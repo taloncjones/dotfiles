@@ -689,6 +689,17 @@ def ship_agent_name(launch_id: str) -> str:
     return f"{launch_id[:-13][:19]}-{launch_id[-12:]}"
 
 
+def _task_label_result(rd, task_id, herdr_cli, env):
+    """Relabel the task's workspace from the record on disk; never raises."""
+    try:
+        task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+        label = core.task_label(task, core.task_ship_handoff(rd, task_id, task))
+        return core.apply_workspace_label(task, label, herdr_cli=herdr_cli, env=env)
+    except Exception as exc:  # noqa: BLE001 -- a label never changes the caller's outcome
+        return {"status": "unsupported", "label": None, "workspace_id": None,
+                "reason": (str(exc) or type(exc).__name__)[:200]}
+
+
 def launch(
     *,
     repo_slug: str,
@@ -1036,6 +1047,19 @@ def launch(
             pass
         raise
 
+    # Outside the try above: a label failure must never record launch_failed.
+    if binding is not None:
+        label = {"status": "skipped", "label": None, "workspace_id": None,
+                 "reason": "lead-scope"}
+    else:
+        try:
+            with core.owner_transaction(rd, session, fence, context=repository,
+                                        scope=scope, expected_slug=repo_slug):
+                label = _task_label_result(rd, task_id, herdr_cli, child_env)
+        except Exception as exc:  # noqa: BLE001 -- a stale fence only loses the label
+            label = {"status": "unsupported", "label": None, "workspace_id": None,
+                     "reason": (str(exc) or type(exc).__name__)[:200]}
+
     inspected = inspect(
         repo_slug,
         task_id,
@@ -1060,6 +1084,7 @@ def launch(
         "observation": "not-exposed-by-herdr-agent-metadata",
         "strict_ready": False,
         "presentation": presentation,
+        "label": label,
     }
 
 
@@ -1698,8 +1723,9 @@ def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
             if index is None:
                 raise DispatchError("no worker row for that launch in the workspace")
             reasons = _settlement_reasons(task, rd, task_id, repository["head"])
-            return _settle_index(herdr_cli, task_path, task, index, reasons,
-                                 workspace_id, child_env)
+            result = _settle_index(herdr_cli, task_path, task, index, reasons,
+                                   workspace_id, child_env)
+            return {**result, "label": _task_label_result(rd, task_id, herdr_cli, child_env)}
     except (OSError, ValueError) as exc:
         raise DispatchError(f"settle could not hold the owner fence: {exc}") from exc
 

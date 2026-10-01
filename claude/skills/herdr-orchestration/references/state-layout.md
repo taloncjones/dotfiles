@@ -60,7 +60,8 @@ STATE_ROOT/
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
-    rollover.jsonl                    # resume-helper outcomes ({ts, session, pane, outcome, reason, waited_secs}); diagnostic only
+    rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
+    rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
@@ -145,16 +146,17 @@ STATE_ROOT/
   = `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
   Verify uniqueness via `agent list`; each launch also gets a collision-resistant
   launch ID. Names are transport handles, not task identity.
-- Display label: short task title, current role/runtime/model/status in separate
-  metadata fields; director `director:<repo>`. Retain stable task and launch IDs
-  behind the label. Refresh pane and workspace metadata on every phase/retry so
-  a reused plan pane no longer displays a plan role during review.
+- Display label: the workspace label is `<state>: <title>` (at most 25
+  characters, no ids), derived from the task record by `core.task_label`
+  (SKILL.md section 8); director `director:<repo>`. Pane metadata carries
+  role/runtime/model/status separately. Stable task and launch IDs stay
+  behind the label.
 - **One workspace/worktree per task.** git allows only one worktree per branch,
   so a task's plan -> implement -> review phases all run in the SAME
   worktree-backed workspace (a fresh agent per phase, sequentially). The
-  workspace label and its index `role` are updated to the current phase as it
-  advances (`<task_id>` for impl, `review:<task_id>` + `role: review` for
-  review); there is never a second workspace on the same branch.
+  workspace label follows the task state (`plan`, `impl`, `review`, ...)
+  and its index `role` the current phase; there is never a second
+  workspace on the same branch.
 
 ## Schemas
 
@@ -202,6 +204,21 @@ STATE_ROOT/
   > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
   > director whose claim fails **yields** to read-only reporting and
   > offers an explicit takeover.
+
+### `rollover-pending.json`
+
+Written by the `rollover` verb under the owner lock, only while the writer's
+fence is current and no unexpired marker from the same session exists. It is
+deleted only by compare-and-delete on `token`. `claim-owner` and
+`adopt-rollover` adopt a fresh lease through it when the claimant's
+`HERDR_PANE_ID` equals `pane`, its `HERDR_ROLLOVER_TOKEN` equals `token`
+(constant-time compare), `time < expires_ts`, and the lease's session and
+fence equal `from_session`/`from_fence`. In one owner transaction adoption
+appends `{"v":2,"event":"adopted","handover":<sha256(token)[:16]>,...}` to
+`rollover.jsonl`, deletes the marker, then writes the lease and the mirror;
+the token itself is never logged. A malformed or expired marker reads as
+absent. `carry` (at most 4000 characters) is printed as `carried:` lines in
+the new director's startup block.
 
 ### `config.json`
 
@@ -435,6 +452,8 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "worktree": "/abs/path/to/worktree",
   "base_ref": "origin/main",
   "base_sha": "<40hex>",
+  "title": "Teardown lifecycle",
+  "workspace_id": "w1",
   "workers": [
     {
       "role": "impl",
@@ -475,6 +494,10 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "updated": "..."
 }
 ```
+
+`title` (Jira summary or todo title) is the label's title source;
+`workspace_id` is the task's own Herdr workspace, the label target. Both
+are set at kickoff.
 
 `ship_launch_id` is the ship launch the director pinned at dispatch (only
 its handoff counts). `teardown_blocked` is the reason a director teardown

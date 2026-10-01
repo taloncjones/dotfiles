@@ -8,21 +8,26 @@ go: the owner is the only contributor there (2026-09-28).
 
 Incident 2026-09-23: on rw-bess #2444 a co-review/herdr flow replied to a
 human reviewer; on this repo's PR #170 the director posted after a
-multiple-choice answer. Design 2026-09-29 (spec
-2026-09-29-audience-posting-policy-design.md): maintenance and green
+multiple-choice answer given without the text in view. Design 2026-09-29
+(spec 2026-09-29-audience-posting-policy-design.md): maintenance and green
 evidence on a PR this account authored post freely; text aimed at a person
-needs the owner's go for that exact draft.
+needs the owner's go for that exact draft. Design 2026-09-29 (spec
+2026-09-29-prompt-every-decision-design.md): that go is the owner's
+AskUserQuestion answer, bound to one draft whose text the prompt showed.
 
 Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
-(no file I/O). Two events, one script, dispatched on hook_event_name, plus a
-`draft` CLI:
+(no file I/O). Three events, one script, dispatched on hook_event_name, plus
+a `draft` CLI:
 
 - `draft -- gh <args>` records a gated call as shown (pending), keyed by a
-  hash of its argv, the bytes it reads and where it lands.
-- UserPromptSubmit closes the session's batch, then turns a typed `post it`
-  (latest draft of the closing batch), `post all` (every draft of it) or
-  `post <hash>` into approved drafts and dismisses the rest -- never from an
-  AskUserQuestion answer or a multiple-choice option string.
+  hash of its argv, the bytes it reads and where it lands, with the text
+  it prints.
+- PostToolUse AskUserQuestion approves a pending draft when the chosen
+  option is `Post draft <hash>` and the draft's text is in that question;
+  `Skip draft <hash>` dismisses it or withdraws its
+  unspent approval. Typed prompts never approve.
+- UserPromptSubmit records which session this Claude process is on for the
+  shim, removes legacy files and prunes old state.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
   shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv,
   reads the PR author, decides the audience and spends one approved draft
@@ -48,7 +53,6 @@ import importlib.util
 import json
 import os
 import re
-import secrets
 import shlex
 import shutil
 import subprocess
@@ -63,9 +67,10 @@ from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
-NEGATION_RE = re.compile(r"\b(not|never|no)\b|n't", re.IGNORECASE)
-GO_REQUEST_RE = re.compile(r"(?<!`)\bpost (it|all|[0-9a-fA-F]{8})\b(?!`)", re.IGNORECASE)
+# The owner's answer to a post prompt (spec R2): `Post draft <hash>` approves
+# that draft, `Skip draft <hash>` dismisses it; the tool may add the suffix.
+DECISION_RE = re.compile(r"(Post|Skip) draft ([0-9a-f]{8})( \(Recommended\))?")
+
 # GitHub sends no notification for a mention inside code.
 FENCED_CODE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
 CODE_SPAN_RE = re.compile(r"(`+).+?\1", re.DOTALL)
@@ -280,21 +285,6 @@ def exempt_from_go(args: list[str], cwd: str) -> bool:
     return personal_repository(cwd) if owner is None else personal_owner(owner, cwd)
 
 
-def go_request(prompt: str) -> set[str]:
-    """Go requests in a typed prompt: "it", "all" and lowercase draft hashes.
-    A sentence counts when it has no negation before the phrase and no closing `?`."""
-    found: set[str] = set()
-    if "(recommended)" in prompt.lower():
-        return found
-    for sentence in SENTENCE_SPLIT_RE.split(prompt):
-        if sentence.rstrip().endswith("?"):
-            continue
-        for hit in GO_REQUEST_RE.finditer(sentence):
-            if not NEGATION_RE.search(sentence[:hit.start()]):
-                found.add(hit.group(1).lower())
-    return found
-
-
 def flag_value(args: list[str], names: tuple[str, ...]) -> str | None:
     """Last value given to one of `names`: `--x v`, `--x=v`, `-x v` or `-xv`."""
     value, k = None, 0
@@ -393,12 +383,21 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
     return "a non-APPROVE co-review marker"
 
 
+ASK_OWNER = (
+    "then ask with AskUserQuestion, one single-select question per draft: options "
+    "`Post draft <hash>` and `Skip draft <hash>`, the full draft text in the question "
+    "(an option preview is clipped by the terminal and never counts). "
+    "Post only after the answer approves it.\n"
+    "An answer that printed no `post gate:` line means the answer hook is not active "
+    "in this session: ask the owner to run `update --ai` and restart Claude, and "
+    "leave the draft in the report instead of asking again."
+)
+
+
 def gated_denial(reason: str, args: list[str]) -> str:
     return (
         f"Blocked: {reason} needs the owner's go.\n"
-        f"Register it with `{DRAFT_COMMAND} {shlex.join(args)}`, show the printed "
-        "draft and hash in chat, and wait for `post it`, `post all` or `post <hash>`; "
-        "a multiple-choice answer is not a go."
+        f"Register it with `{DRAFT_COMMAND} {shlex.join(args)}`, {ASK_OWNER}"
     )
 
 
@@ -413,9 +412,7 @@ def check_replies(kinds: list[str], sid: str, directory: Path) -> str | None:
     return (
         "Blocked: a PR review, thread reply, reaction or comment edit needs an "
         "approved draft for each call.\n"
-        f"Register each with `{DRAFT_COMMAND} <args>`, show the drafts and hashes in "
-        "chat, and wait for `post it`, `post all` or `post <hash>`; a "
-        "multiple-choice answer is not a go."
+        f"Register each with `{DRAFT_COMMAND} <args>`, {ASK_OWNER}"
     )
 
 
@@ -923,55 +920,116 @@ def _move_fresh(src: Path, dst: Path) -> bool:
     return True
 
 
-def current_batch(directory: Path, sid: str) -> str:
-    try:
-        text = (directory / f"{sid}.batch").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "initial"
-    return text or "initial"
-
-
-def close_batch(directory: Path, sid: str) -> str:
-    """Start a new batch and return the one this prompt closes: `post it`
-    and `post all` reach only drafts shown in the closing batch."""
-    closing = current_batch(directory, sid)
-    write_atomic(directory / f"{sid}.batch", secrets.token_hex(8))
-    return closing
-
-
-def register_draft(directory: Path, sid: str, digest: str, args: list[str], now: float) -> bool:
-    """Record a draft as shown (pending); False when it is already approved."""
+def register_draft(directory: Path, sid: str, digest: str, args: list[str], text: str | None, now: float) -> bool:
+    """Record a draft as shown (pending) with the text it shows; False when
+    it is already approved."""
     if draft_path(directory, sid, digest, "approved").exists():
         return False
-    record = {"v": 2, "batch": current_batch(directory, sid), "created": now, "argv": list(args)}
+    record = {"v": 3, "created": now, "argv": list(args), "text": text}
     write_atomic(draft_path(directory, sid, digest, "pending"), json.dumps(record))
     _unlink(draft_path(directory, sid, digest, "dismissed"))
     return True
 
 
-def approve_drafts(directory: Path, sid: str, requests: set[str], closing: str) -> None:
-    """Apply one prompt's go requests, then dismiss every draft still pending."""
-    batch = []
-    for path in drafts(directory, sid, "pending"):
-        record = read_json(path)
-        if isinstance(record, dict) and record.get("batch") == closing:
-            created = record.get("created")
-            ok = isinstance(created, (int, float)) and not isinstance(created, bool)
-            batch.append((created if ok else 0, path))
-    if "all" in requests:
-        chosen = [path for _created, path in batch]
-    elif "it" in requests and batch:
-        chosen = [max(batch)[1]]
-    else:
-        chosen = []
-    for path in chosen:
-        _move_fresh(path, path.with_suffix(".approved"))
-    for digest in requests - {"it", "all"}:
-        approved = draft_path(directory, sid, digest, "approved")
-        if not _move_fresh(draft_path(directory, sid, digest, "pending"), approved):
-            _move_fresh(draft_path(directory, sid, digest, "dismissed"), approved)
-    for path in drafts(directory, sid, "pending"):
-        _move(path, path.with_suffix(".dismissed"))
+SHOWN_LIMIT = 2000  # Claude Code withholds a longer question from the prompt
+
+
+def shown(text, question: str) -> bool:
+    """The draft's text is in the question, whitespace-normalized, within the
+    display limit; a draft with no text shows only its hash. The option preview
+    pane clips by terminal rows, so it never counts."""
+    if not isinstance(text, str) or not text.strip():
+        return True
+    return len(question) <= SHOWN_LIMIT and " ".join(text.split()) in " ".join(question.split())
+
+
+def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
+    """Approve a pending draft the owner chose to post (spec R3 step 5);
+    returns the context line."""
+    pending = draft_path(directory, sid, digest, "pending")
+    if not pending.exists():
+        if draft_path(directory, sid, digest, "approved").exists():
+            return f"draft {digest} already approved; post it"
+        if draft_path(directory, sid, digest, "spent").exists():
+            return f"draft {digest} already posted once; read the PR, then register it again to post again"
+        return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
+    record = read_json(pending)
+    if (
+        not isinstance(record, dict) or record.get("v") != 3 or "text" not in record
+        or not (record["text"] is None or isinstance(record["text"], str))
+    ):
+        return f"draft {digest} not approved: its record is unreadable or predates prompt approval; register it again"
+    if isinstance(record["text"], str) and len(record["text"]) > SHOWN_LIMIT:
+        return (
+            f"draft {digest} not approved: its text is over {SHOWN_LIMIT} characters; "
+            "shorten the draft or split it"
+        )
+    if not shown(record["text"], question):
+        if len(question) > SHOWN_LIMIT:
+            return (
+                f"draft {digest} not approved: the question is over {SHOWN_LIMIT} characters, "
+                "more than a prompt displays; shorten it"
+            )
+        return f"draft {digest} not approved: its text was not in the question"
+    if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):
+        return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
+    return f"approved draft {digest}"
+
+
+def dismiss_draft(directory: Path, sid: str, digest: str) -> str:
+    """Skip a pending draft, or withdraw an approval not yet spent (spec R3
+    step 4); returns the context line."""
+    dismissed = draft_path(directory, sid, digest, "dismissed")
+    if _move_fresh(draft_path(directory, sid, digest, "pending"), dismissed):
+        return f"draft {digest} skipped"
+    if _move_fresh(draft_path(directory, sid, digest, "approved"), dismissed):
+        return f"draft {digest} approval withdrawn"
+    if draft_path(directory, sid, digest, "spent").exists():
+        return f"draft {digest} not skipped: already posted; read the PR"
+    return f"draft {digest} skipped (nothing to withdraw)"
+
+
+def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
+    """(verb, digest, question, why_undecided) for each draft a
+    question names in its option labels (spec R3); why_undecided is None
+    when the chosen option decides it."""
+    answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
+    questions = response.get("questions")
+    if not isinstance(questions, list):
+        return []
+    stale = None
+    if response.get("afkTimeoutMs"):
+        stale = "the prompt timed out"
+    elif response.get("followUp"):
+        stale = "the owner asked for more questions"
+    found = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        text = question.get("question") if isinstance(question.get("question"), str) else ""
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        named = []
+        for option in options:
+            label = option.get("label") if isinstance(option, dict) else None
+            hit = DECISION_RE.fullmatch(label) if isinstance(label, str) else None
+            if hit:
+                named.append((option, hit))
+        if not named:
+            continue
+        why = stale
+        if not why and len({hit.group(2) for _option, hit in named}) > 1:
+            why = "the question names more than one draft"
+        if not why and question.get("multiSelect"):
+            why = "a multi-select question cannot approve"
+        chosen = next((pair for pair in named if pair[0]["label"] == answers.get(text)), None)
+        if chosen and not why:
+            _option, hit = chosen
+            found.append((hit.group(1), hit.group(2), text, None))
+            continue
+        why = why or "no Post or Skip option was chosen"
+        for digest in dict.fromkeys(hit.group(2) for _option, hit in named):
+            found.append(("", digest, text, why))
+    return found
 
 
 def spend_draft(directory: Path, sid: str, digest: str) -> bool:
@@ -988,7 +1046,7 @@ def _unclassified_denial(reason: str) -> str:
     return (
         f"Blocked: {reason}.\n"
         "Run plain `gh` as found on PATH, not from a login `sh`; "
-        "no typed go covers this."
+        "no approved draft covers this."
     )
 
 
@@ -1056,20 +1114,43 @@ def write_pid_map(directory: Path, sid: str) -> None:
 
 
 def handle_prompt(payload: dict, directory: Path, now: float) -> None:
+    """A typed prompt approves nothing (spec R5): it records the pid map,
+    removes legacy files and prunes."""
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
         return
-    try:
-        closing = close_batch(directory, sid)
-    except OSError:
-        return  # no batch boundary, so this prompt approves nothing
-    for legacy in ("json", "post-used", "body-used"):
+    for legacy in ("json", "post-used", "body-used", "batch"):
         _unlink(directory / f"{sid}.{legacy}")
     write_pid_map(directory, sid)
-    prompt = payload.get("prompt")
-    requests = go_request(prompt) if isinstance(prompt, str) else set()
-    approve_drafts(directory, sid, requests, closing)
     prune(directory, now)
+
+
+def handle_answer(payload: dict, directory: Path) -> str | None:
+    """PostToolUse AskUserQuestion: the owner's chosen option approves or
+    skips one draft per question (spec R3). Returns the context lines; every
+    draft a question names but does not decide is reported."""
+    if payload.get("tool_name") != "AskUserQuestion":
+        return None
+    response = payload.get("tool_response")
+    if not isinstance(response, dict):
+        return None
+    decisions = answer_decisions(response)
+    sid = payload.get("session_id")
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        decisions = [(verb, digest, question, why or "no valid session id")
+                     for verb, digest, question, why in decisions]
+        sid = None
+    lines = []
+    for verb, digest, question, why in decisions:
+        if why:
+            lines.append(f"draft {digest} not decided ({why})")
+        elif verb == "Skip":
+            lines.append(dismiss_draft(directory, sid, digest))
+        else:
+            lines.append(approve_draft(directory, sid, digest, question))
+    if sid:
+        write_pid_map(directory, sid)
+    return "\n".join(f"post gate: {line}" for line in lines) or None
 
 
 def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
@@ -1129,6 +1210,11 @@ def main() -> int:
             print(reason, file=sys.stderr)
             return 2
         return 0
+    if event == "PostToolUse":
+        context = handle_answer(payload, directory)
+        if context:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}))
+        return 0
     return 0
 
 
@@ -1150,11 +1236,11 @@ def draft_main(argv: list[str]) -> int:
     if digest is None:
         print("draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor", file=sys.stderr)
         return 1
-    if not register_draft(gate_dir(), sid, digest, args, time.time()):
+    text = post_body(args, cwd)[1]
+    if not register_draft(gate_dir(), sid, digest, args, text, time.time()):
         print(f"draft {digest} already approved")
         return 0
     print(f"draft {digest}: gh {shlex.join(args)}")
-    text = post_body(args, cwd)[1]
     if text:
         print(text)
     if draft_path(gate_dir(), sid, digest, "spent").exists():

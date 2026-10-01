@@ -11272,31 +11272,6 @@ out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-jso
 printf '%s\n' "$out" | grep -qx 'rollover-due used_pct=31 threshold=30'
 SH
 
-check "current_input: reads only the bordered input region, never history" <<PY
-$LOAD
-rule = "─" * 40
-tip = "  Tip: Use /clear to start fresh when switching topics"
-meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
-def screen(*lines):
-    return "\n".join(lines) + "\n"
-assert c.current_input(screen("history", tip, "", rule, "❯", rule, meter, "mode")) == ""
-assert c.current_input(screen(rule, "❯ /clear", rule, meter)) == "/clear"
-assert c.current_input(screen("❯ /clear", "done", rule, "❯", rule, meter)) == ""
-assert c.current_input(screen(rule, "❯ /cl", rule, meter)) == "/cl"
-assert c.current_input(screen("❯ /clear", "Working...", meter)) is None
-assert c.current_input(screen(rule, "some output", rule, meter)) is None
-# Bordered history (no live meter under the lower rule) is never input.
-assert c.current_input(screen(rule, "❯ /clear", rule)) is None
-assert c.current_input(screen(rule, "❯ /clear", rule, "o1")) is None
-assert c.current_input(screen(rule, "❯ /clear", rule, "o1", "o2", "o3", "o4")) is None
-assert c.current_input(screen(rule, "❯", rule, "output")) is None
-# A meterless footer (remaining_percentage null early in a session) still
-# has the "│" segment separator, so it is a valid footer, not history.
-assert c.current_input(screen(rule, "❯", rule, "Opus 5.5 │ dotfiles")) == ""
-assert c.current_input(screen(rule, "❯ /clear", rule, "Opus 5.5 │ dotfiles")) == "/clear"
-assert c.current_input("") is None
-PY
-
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD
 s = open("claude/skills/herdr-orchestration/SKILL.md").read()
@@ -11316,6 +11291,48 @@ grep -Fq 'Director mode' claude/skills/post-merge/SKILL.md
 grep -Fq 'lessons distillation pending (human)' claude/skills/post-merge/SKILL.md
 grep -Fq 'dirty worktree' claude/skills/post-merge/SKILL.md
 SH
+
+check "decisions are prompts: no typed go, no prose ask, answers are turn-scoped" <<'PY'
+import re
+def read(path):
+    return open(path).read()
+def section(text, start, end):
+    i = text.index(start)
+    return text[i:text.index(end, i + len(start))]
+herdr = read("claude/skills/herdr-orchestration/SKILL.md")
+director = read("claude/agents/director.md")
+cc = read("claude/skills/co-review/SKILL.md")
+cx = read("codex/skills/co-review/SKILL.md")
+pm = read("claude/skills/post-merge/SKILL.md")
+voice = read("claude/skills/voice/SKILL.md")
+ops = read("claude/operating-principles.md")
+layout = read(".claude/skills/dotfiles-architecture-contract/references/install-layout.md")
+guard = read("claude/hooks/pr_post_guard.py")
+banned = ("post it", "post all", "post <hash>", "typed go", "the go is a typed",
+          "answer is never a go", "never an `askuserquestion`")
+for name, text in (("herdr", herdr), ("director", director), ("co-review", cc),
+                   ("codex co-review", cx), ("install-layout", layout)):
+    low = text.lower()
+    for phrase in banned:
+        assert phrase not in low, (name, phrase)
+for phrase in ("post all", "post <hash>", "typed go", "the go is a typed"):
+    assert phrase not in guard.lower(), ("guard", phrase)
+for name, text in (("herdr", herdr), ("director", director)):
+    assert "prose ask" not in text and "asks once in prose" not in text, name
+for name, text in (("herdr", herdr), ("co-review", cc), ("codex co-review", cx)):
+    assert "Post draft <hash>" in text and "Skip draft <hash>" in text, name
+assert "AskUserQuestion" in director
+for token in ("Answers are not stored", "post gate:", "update --ai"):
+    assert token in herdr, token
+for start, end in (("## Step 2", "## Step 3"), ("## Step 4", "## Step 5"), ("## Step 5", "## Notes")):
+    assert "AskUserQuestion" in section(pm, start, end), start
+assert "read the issue's comments" in section(pm, "## Step 4", "## Step 5")
+assert "Resolved by <PR URL>" in section(pm, "## Step 4", "## Step 5")
+assert "<owner>/<repo>/pull/<n>" in section(pm, "## Step 4", "## Step 5")
+assert "AskUserQuestion" in section(voice, "3. Ask", "4. Apply")
+assert "AskUserQuestion" in ops
+assert "Post draft <hash>" in layout
+PY
 
 check "brief template keeps the turn alive on long runs" <<'PY'
 import sys

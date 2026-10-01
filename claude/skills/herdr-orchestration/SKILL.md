@@ -122,6 +122,14 @@ for the provider's `launch_env` mapping.
      `BUSY`. Never run `claim-owner` in the
      background: a background process started before `/clear` would pass the
      ancestry check under the old session id.
+   - **Handover adoption.** A fresh lease is also adopted, with a fence bump,
+     when `STATE_ROOT/<slug>/rollover-pending.json` (written by section 1a's
+     `rollover` verb) names this pane (`HERDR_PANE_ID`) and the token in
+     `HERDR_ROLLOVER_TOKEN`, has not expired, and names the current lease's
+     session and fence. The marker is single-use: adoption appends an
+     `adopted` line to `<slug>/rollover.jsonl` and deletes it. A missing or
+     mismatched marker changes nothing; the other claim rules still apply.
+     Launcher-tier Claude claims only.
    - **On the initial claim only** (not on refresh), label THIS session's own
      workspace so the Herdr UI shows the standing director, not a bare
      name: `herdr workspace rename "$HERDR_WORKSPACE_ID" "director:<repo>"`
@@ -129,8 +137,14 @@ for the provider's `launch_env` mapping.
      the workspace label already equals it (`herdr workspace get
 "$HERDR_WORKSPACE_ID"` -> `.result.workspace.label`). This is display-only
      Herdr state, never repo/worktree state; a worker's own workspace is
-     labelled `<task_id>` at `worktree create` (section 2), so no worker is
-     ever left as a generic "Worker N".
+     labelled `<task_id>` at `worktree create` (section 2) and then
+     `<state>: <title>` from its task record (section 8, Compact
+     presentation), so no worker is ever left as a generic "Worker N".
+   - After every claim or resume, relabel every task workspace from its
+     record:
+     `python3 "$CORE" present-task --repo-slug <slug> --session <id> --fence <fence> --all --apply`.
+     A nonzero exit is reported and the preflight continues; labels are
+     display-only.
    - On every subsequent turn this session acts in the repo, call
      `python3 "$CORE" refresh-owner --repo-slug <slug> --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
      to keep the heartbeat alive.
@@ -310,7 +324,7 @@ for the provider's `launch_env` mapping.
      heartbeat).
    - A persistent Monitor survives `/clear` and keeps delivering into the new
      context (verified 2026-09-22), but the new context does not know its
-     task id. After a rollover, the hook's `watch:` line decides: `live`
+     task id. After a `/clear` or compaction, the hook's `watch:` line decides: `live`
      means do not arm; `none` or `unknown` means arm now.
    - **On yielding ownership** (stale fence, or explicit takeover), TaskStop
      this session's watch before going read-only.
@@ -329,43 +343,63 @@ for the provider's `launch_env` mapping.
      mech-ledger writes; the hook pushes on completion-record changes and
      blocks; an ordinary worker turn end produces neither.
 
-## 1a. Rollover in place
+## 1a. Roll over to a new pane
 
 Roll over when the human asks, or when a check-in prints
 `rollover-due used_pct=<n> threshold=<t>`. That line comes from the host's
 own context reading (the statusline records it per session; `config.json`
 `rollover_pct`, default 45, sets the threshold); never estimate the fill
-yourself and never write the record. Check-in also deletes context records older than 10 minutes; they are inert. On `rollover-due`, write that pass's
+yourself and never write the record. Check-in also deletes context records
+older than 10 minutes; they are inert. On `rollover-due`, write that pass's
 transitions, start no kickoff or dispatch in the same turn, then roll over.
 
 1. Finish or park the current action. Never roll over mid-kickoff or
    mid-dispatch.
-2. Say in this turn's message anything `STATE_ROOT` does not hold: pending
-   human questions, standing directives from chat, a decision in progress.
-   Nothing carries them across `/clear`; the human reads the message and can
-   restate them. Task state is already on disk; do not restate it.
-3. Run, as the LAST tool call of the turn:
-   `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence>`
-4. End the turn. The verb typed `/clear` into this pane and read the input line back; it runs when the
-   turn ends. If the verb exits 1, say what it printed; the human presses
-   Enter or clears the input.
-5. In the fresh context, the `director_rollover` SessionStart hook has already
-   re-claimed the lease under the new session id, printed an `[INFO] herdr
-director rollover` block with the fence and the watch state, and started
-   a helper that sends one `resume director` line into this pane once it is
-   idle (the block's `auto-resume:` line says so). That line is your first
-   turn: follow the block's `Next:` line. Follow its `Next:` line: load this
-   skill, use the printed fence, skip the initial-claim-only steps
-   (workspace label, `dashboard --open`), and run a section-4 check-in
-   before any dispatch.
-6. If the block is a `[WARNING]`, or no block appears, run section 1
-   preflight. Its `claim-owner` adopts the lease the same way; on `BUSY`,
-   stop and ask the human. If no `resume director` line arrives within two minutes, the
-   human types it after checking the pane shows no earlier one; the helper's
-   outcome is in `<slug>/rollover.jsonl`.
+2. Collect what `STATE_ROOT` does not hold: pending human questions,
+   standing directives from chat, a decision in progress. Task state is
+   already on disk; do not restate it. This pane closes after the handover,
+   so pass the notes with `--carry` (at most 4000 characters, one note per
+   line); the new director sees them as `carried:` lines.
+3. Run in the foreground, with a Bash timeout of 300000 ms:
+   `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence> --carry '<notes>'`
+   (add `--personal` when this director runs on an intentional personal
+   account in a work repo). The verb splits this pane, writes
+   `STATE_ROOT/<slug>/rollover-pending.json` naming the new pane and a
+   one-time token, starts `director` there, and waits up to 120 s for the
+   new director to adopt the lease.
+4. `rollover: handed over to pane <p> ...` (exit 0): this session is fenced
+   out. The verb stopped this session's watch; on a `watch:` line that says
+   `unknown` or `not scanned`, TaskStop the watch task. Make
+   `herdr pane close "$HERDR_PANE_ID"` your last tool call; it ends this
+   Claude process. The transcript stays on disk.
+5. `rollover: no ack ... this session keeps the lease (fence <n>)`: the new
+   pane is closed and the marker removed. Use fence `<n>` from now on, say
+   so in this turn's message, and retry later or ask the human.
+6. `rollover: rollover in progress for pane <p>`: an earlier rollover is
+   still waiting. Do not retry until it expires (two minutes); a retry then
+   closes that pane and starts over.
+7. `rollover: lease moved without a handover ack` or `owner: stale-fence`:
+   this session no longer holds the lease. Stop its watch per section 1 step
+   7 and run the section-1 preflight, which reports the holder.
 
-No handoff record, second pane, `/exit`, or `--stale-secs` wait is part of
-a director rollover.
+If the Bash call times out or is interrupted, run the same `rollover`
+command again: it reports a handover that completed meanwhile, refuses
+while the first attempt is still pending, and cleans up an expired one.
+
+In the new pane, the `director_rollover` SessionStart hook runs the core's
+`adopt-rollover`, which takes the lease through the marker (fence + 1, the
+wake socket moves to the new process) and appends an `adopted` line to
+`<slug>/rollover.jsonl`. Its `[INFO] herdr director rollover: lease handed
+over from session <old> (pane <p>).` block is the new director's startup
+report: follow its `Next:` line, act on its `carried:` lines, arm the
+backstop (its `watch:` line says none exists), and run a section-4 check-in
+before any dispatch. On a `[WARNING]` block, or no block, run the section-1
+preflight; its `claim-owner` adopts through the same marker while it is
+valid, and on `BUSY` stop and ask the human.
+
+A `/clear` or compaction in place still keeps the lease: the same hook runs
+`resume-owner` and prints the `lease re-established in place` block. Nothing
+types `/clear` or a resume line into any pane.
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
@@ -533,8 +567,11 @@ phase-appropriate brief (references/brief-template.md) and model.
    means the pre-existing branch/worktree is not what step 4 expected; leave it
    untouched (no `worktree remove`, no `branch -D`) and just surface the
    mismatch. Either way, stop after surfacing the mismatch. Only a
-   verified-correct anchor proceeds. Label the workspace `<task_id>`.
-6. **Publish the task before launch under the owner fence.** Preserve the
+   verified-correct anchor proceeds. Label the workspace `<task_id>`; step 6 replaces it with the state label.
+6. **Publish the task before launch under the owner fence.** The record
+   carries `title` (the Jira summary or the todo title) and `workspace_id`
+   (the new `HERDR_WORKSPACE_ID`); publish it with `write-task --present`,
+   which relabels the workspace `plan: <title>`. Preserve the
    pinned contract, branch, base, worktree, and account binding. New records
    start with `workers: []` and `status: in-progress`; a failed launch remains
    visibly retryable. Write the workspace index through `write-index`.
@@ -727,6 +764,12 @@ prints one line per non-terminal task plus a final `changed:` line. It mutates
 nothing but the heartbeat; every status transition below is still the
 director's own `write-task`.
 
+Then, whatever the `changed:` line says, run
+`python3 "$CORE" present-task --repo-slug <slug> --session <id> --fence <fence> --all --apply`
+once. It relabels any workspace a missed trigger left stale (a crash, a
+rollover, a sweep, a settle that lost its fence). A nonzero exit is
+reported in the check-in and does not make the check-in incomplete.
+
 - `changed: no` -- end the turn. Do not read panes, do not re-poll.
 - `changed: yes`, any `action=unknown`, or `poll: failed (...)` -- fall through
   to the full reconciliation below, for the named tasks only.
@@ -781,9 +824,35 @@ user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
 
 A gated post (a review, a thread reply, a comment on another author's PR, a
-body that mentions someone, a Jira comment) is never an `AskUserQuestion`
-option, recommended or not: register the draft, show it in prose with its
-hash, and end the turn.
+body that mentions someone, a Jira comment) is asked the same way.
+
+1. Register it first with `python3 ~/.claude/hooks/pr_post_guard.py draft --
+   gh <args>`. A Jira comment has no draft.
+2. Ask one single-select question per draft, at most four per prompt. Put the
+   full draft text in the question; an option preview is clipped by the
+   terminal, so it never counts.
+3. The options are `Post draft <hash>` and `Skip draft <hash>`. The
+   recommended one comes first, with ` (Recommended)`.
+
+The answer is the go. A PostToolUse hook approves exactly the draft the
+chosen option names, and only when its text was in that question
+and the draft text and that question are each at most 2000 characters, the
+most a prompt displays.
+It prints a `post gate:` line for each decision. A typed message never
+approves a post, so never ask the owner to type one. Without the tool, a
+gated post cannot be approved; leave the draft in the report.
+
+Answers are not stored. An answer authorizes the action it names in the same
+turn. After any interruption (a crash, `/clear`, compaction, a resume),
+re-derive the state from live sources and ask again: the PR's state and head,
+the worktree and branch, the Jira issue, and a draft's state file. Only an
+approved draft outlives the turn. It stays approved until it is posted,
+withdrawn with `Skip draft <hash>`, or pruned 24 hours later.
+
+When a `Post draft <hash>` answer prints no `post gate:` line, the answer hook
+is not active in this session. Do not ask again. Try the post once. If the
+shim refuses it, tell the owner to run `update --ai` and restart Claude, and
+leave the draft in the report.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -1313,11 +1382,11 @@ Exit 0 keeps the verdict for the new head: post the record's
 `audit_comment` exactly as ship step 5 (dedupe on
 `co-review-audit head=<head>`, standing authorization), then the
 carry-forward marker under the co-review skill's Carry-forward and Publish
-rules (its dedupe; a personal repository needs no go, a work repository the
-owner's typed `post it`), and never dispatch a gate for that head. Exit 1
-continues to the ship dispatch rules below. `merge-ready` still pins the
-gated head and reports `head-moved` for it, so the director merges that
-head only after one prose ask, as in a work repository.
+rules (its dedupe; a personal repository needs no go, a work repository
+asks the owner with `AskUserQuestion`), and never dispatch a gate for that head.
+Exit 1 continues to the ship dispatch rules below. `merge-ready` still pins
+the gated head and reports `head-moved` for it, so the director merges that
+head only after one `AskUserQuestion` merge prompt, as in a work repository.
 
 **Delta tier.** When a dispatch is due under rule (b), the stale handoff's
 verdict is `APPROVE`, and the carry-forward proof above exited 1, run:
@@ -1405,8 +1474,9 @@ A personal repository is a checkout whose path or canonical owner is under
 `~/Git/personal`. Where `merge-authority` prints `director`, the user's
 standing authorization (2026-09-22, reaffirmed 2026-09-29) is the merge go
 and the steps below run without asking. In a work repository the director
-asks once in prose ("merge #<n> at <head>?") and runs the same steps on a
-yes; the yes covers that head only, and a moved head asks again.
+asks once with `AskUserQuestion`, with the options `Merge #<n> at <head>
+(Recommended)` and `Hold`. It runs the same steps when the answer is merge.
+That answer covers that head only, and a moved head asks again.
 
 **Recovery first, before the stale-verdict rule, in every repository.** List
 tasks with the section 4 check-in call plus `--all`:
@@ -1632,10 +1702,39 @@ worker dispatch (binding-scoped)").
 - Route fallback never switches authentication. After an unavailable model,
   choose only an explicitly configured same-account fallback and record it.
 
-Compact presentation uses a stable task ID behind a short title. Show current
-role, runtime/model, and status separately; update them for plan -> implement
--> review and every retry. Presentation failure is visible but never changes
-completion state. Launch IDs, not labels, are the provenance keys.
+Compact presentation. The Herdr sidebar label of a task workspace is
+`<state>: <title>`, at most 25 characters, with the state first so any
+truncation keeps it. `<title>` is the record's `title` (the Jira summary
+or todo title) with ticket keys and `#<n>` PR references removed; the
+task record keeps the ids. `core.task_label` derives it:
+
+| Record                                                     | Token                  |
+| ---------------------------------------------------------- | ---------------------- |
+| `in-progress`, last launched phase plan (or none)          | `plan`                 |
+| `in-progress`, last launched phase implement or mechanical | `impl`                 |
+| `in-progress`, last launched phase review / ship           | `review` / `co-review` |
+| `blocked`                                                  | `blocked`              |
+| `completed`                                                | `review-due`           |
+| `review-dispatched`                                        | `review`               |
+| `changes-requested`                                        | `repair`               |
+| `reviewed`, no `pr_number`                                 | `open-pr?`             |
+| `reviewed`, PR, no ship handoff for `ship_launch_id`       | `co-review`            |
+| `reviewed`, PR, handoff APPROVE at `review_head_sha`       | `merge?`               |
+| `reviewed`, PR, any other handoff                          | `gate?`                |
+| `pr-open-pending-merge`                                    | `merge?`               |
+| `merged`, `abandoned`, `failed`, `paused`                  | verbatim               |
+
+A `?` marks a state that waits on the owner. Triggers:
+`write-task --present` (section 9), the adapter's `launch` and `settle`,
+and `present-task --all --apply` at preflight and every check-in. A
+rename happens only when the workspace's `worktree.checkout_path` is the
+task's `worktree`, so a reused workspace id or the director's own
+workspace is never relabelled. The label is display-only Herdr state: no
+gate reads it, the next trigger overwrites a manual rename, and launch
+IDs, not labels, are the provenance keys. Pane metadata still shows
+role, runtime/model and status separately; presentation failure is
+visible but never changes completion state. Lead-scoped records are not
+labelled.
 
 **Deep-think escalation.** Native Claude/Codex advisors resolve the `think`
 role through the selected-runtime resolver and bounded runner, with only its
@@ -1852,6 +1951,9 @@ The "Event" column below names the conceptual transition, not an emitted
 (`stopped`/`blocked`/`review-stopped`, see references/event-schema.md). Each
 row's transition is committed solely by a `python3 "$CORE" write-task` call that sets
 the new `status`; that write is the authoritative record.
+Every launcher-scope `write-task` passes `--present`, whether or not it
+changes `status`: a `pr_number` or `ship_launch_id` write changes the label
+too.
 
 | From                                         | Evidence / trigger                                                                                                                                                                                     | Event                                          | To                      | Terminal? |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- | ----------------------- | --------- |
@@ -1870,7 +1972,7 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                 | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: one `AskUserQuestion` merge prompt, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
 | reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
 | reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
@@ -1935,8 +2037,8 @@ Rules (these are outward-facing writes, so treat them carefully):
 - The director pushes the task branch and opens its PR in the section 6
   ship step, runs every `gh` read and non-post write itself, and never
   hands a `gh` command to the owner. It merges through section 6a: without
-  asking where `merge-authority` prints `director`, after one prose ask
-  elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
+  asking where `merge-authority` prints `director`, after one
+  `AskUserQuestion` merge prompt elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
   actions. Workers never carry merge authority.
 - The director posts by audience. In a personal repository it posts without
   asking. In a work repository, maintenance of a PR this account authored
@@ -1948,9 +2050,9 @@ Rules (these are outward-facing writes, so treat them carefully):
   bench, blocked notes) is not posted; it stays in the ship report. Text
   aimed at a person (any `gh pr review`, a thread reply, a comment on a PR
   this account did not author, a body with an `@login`) needs the owner's
-  go: register it with `python3 ~/.claude/hooks/pr_post_guard.py draft --
-  gh <args>`, show the draft and hash, and wait for `post it`, `post all`
-  or `post <hash>`; after posting, print `[INFO] posted reply on #n`. If an
+  go, asked as section 4 says: register it with
+  `python3 ~/.claude/hooks/pr_post_guard.py draft -- gh <args>`, then ask
+  `Post draft <hash>` / `Skip draft <hash>` with the text in the question; after posting, print `[INFO] posted reply on #n`. If an
   approved post fails, let the Bash call return, read the PR, and
   re-register only when the text is absent, telling the owner that a
   duplicate is possible. It never replies to a human reviewer's thread on

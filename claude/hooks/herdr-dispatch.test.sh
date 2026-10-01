@@ -399,6 +399,12 @@ elif args[:2] == ["pane", "report-metadata"]:
     if mode == "metadata-fail":
         print(json.dumps({"error": "presentation_unsupported"}), file=sys.stderr)
         raise SystemExit(1)
+    # herdr 0.9.1's own rule and reply, recorded by a live probe 2026-09-29.
+    if "--ttl-ms" in args and int(args[args.index("--ttl-ms") + 1]) > 86400000:
+        print('{"error":{"code":"invalid_metadata_ttl",'
+              '"message":"metadata ttl_ms must be 86400000 or less"},"id":"cli:request"}',
+              file=sys.stderr)
+        raise SystemExit(1)
     # Mutation success is established by the exit status; no result body is required.
 elif args[:2] == ["agent", "list"]:
     agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
@@ -442,6 +448,36 @@ elif args[:2] == ["agent", "send-keys"]:
         raise SystemExit(1)
     if mode in ("exit-menu", "exit-timeout-menu") and args[3:] == ["1", "enter"]:
         apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
+elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
+    wpath = Path(os.environ["FAKE_WORKSPACES"])
+    spaces = (json.loads(wpath.read_text()) if wpath.exists() else
+              [{"workspace_id": workspace, "label": "td-a",
+                "worktree": {"checkout_path": cwd}}])
+    verb = args[1]
+    if verb == "list":
+        if mode == "list-fail":
+            print(json.dumps({"id": "cli:workspace:list",
+                              "error": {"code": "server_unavailable", "message": "fake"}}),
+                  file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps({"id": "cli:workspace:list",
+                          "result": {"type": "workspace_list", "workspaces": spaces}}))
+        raise SystemExit(0)
+    match = [w for w in spaces if w["workspace_id"] == args[2]]
+    if verb == "rename" and mode == "rename-hang":
+        import time
+        time.sleep(float(os.environ.get("FAKE_HANG_SECS", "3")))
+    if not match or (verb == "rename" and mode == "rename-fail"):
+        code = "rename_refused" if match else "workspace_not_found"
+        print(json.dumps({"id": f"cli:workspace:{verb}",
+                          "error": {"code": code, "message": "fake"}}), file=sys.stderr)
+        raise SystemExit(1)
+    if verb == "rename":
+        # Live herdr joins every trailing word into the label.
+        match[0]["label"] = " ".join(args[3:])
+        wpath.write_text(json.dumps(spaces))
+    print(json.dumps({"id": f"cli:workspace:{verb}",
+                      "result": {"type": "workspace_info", "workspace": match[0]}}))
 else:
     print(json.dumps({"error": "unexpected", "args": args}), file=sys.stderr)
     raise SystemExit(2)
@@ -532,6 +568,7 @@ class Fixture:
             "FAKE_PANES": str(self.root / "panes.json"),
             "FAKE_REMOVED_AGENT": str(self.root / "removed-agent.json"),
             "FAKE_AGENT_LIST_COUNT": str(self.root / "agent-list-count"),
+            "FAKE_WORKSPACES": str(self.root / "workspaces.json"),
         }
 
     def close(self):
@@ -3483,6 +3520,512 @@ def test_inspect_binding_reads_lead_subtree():
         fixture.close()
 
 
+RECORDED_TTL_ERROR = (
+    '{"error":{"code":"invalid_metadata_ttl",'
+    '"message":"metadata ttl_ms must be 86400000 or less"},"id":"cli:request"}'
+)
+
+
+def ws_entry(workspace_id, label, checkout):
+    return {"workspace_id": workspace_id, "label": label,
+            "worktree": {"checkout_path": str(checkout)}}
+
+
+def write_workspaces(fx, entries):
+    Path(fx.env["FAKE_WORKSPACES"]).write_text(json.dumps(entries))
+
+
+def workspace_labels(fx):
+    return {w["workspace_id"]: w["label"]
+            for w in json.loads(Path(fx.env["FAKE_WORKSPACES"]).read_text())}
+
+
+def test_fake_herdr_enforces_recorded_ttl_rule():
+    fx = Fixture()
+    try:
+        attempt = {"launch_id": "launch-123", "phase": "review", "role": "reviewer",
+                   "agent": "review-td-a", "pane_id": "w1:p1", "task_id": "td-a"}
+        argv = herdr_dispatch.metadata_argv(attempt, "working", 1234)
+        ok = subprocess.run([str(fx.bin), *argv[1:]], env=fx.env,
+                            capture_output=True, text=True, check=False)
+        assert ok.returncode == 0, ok.stderr
+        over = list(argv[1:])
+        over[over.index("--ttl-ms") + 1] = "86400001"
+        bad = subprocess.run([str(fx.bin), *over], env=fx.env,
+                             capture_output=True, text=True, check=False)
+        assert bad.returncode == 1, bad
+        assert bad.stderr.strip() == RECORDED_TTL_ERROR, bad.stderr
+    finally:
+        fx.close()
+
+
+def test_launch_presentation_passes_recorded_ttl_rule():
+    fx = Fixture()
+    try:
+        result = fx.launch()
+        assert result["presentation"] == {"status": "applied", "reason": None}, result
+    finally:
+        fx.close()
+
+
+SHA_A = "a" * 40
+
+
+def label_row(phase, status="launched", ws="w1"):
+    return {"phase": phase, "status": status, "workspace_id": ws}
+
+
+STATE_TOKEN_ROWS = (
+    # (name, record fields, ship handoff, token)
+    ("in-progress-no-rows", {"status": "in-progress"}, None, "plan"),
+    ("in-progress-record-phase", {"status": "in-progress", "phase": "implement"}, None, "impl"),
+    ("in-progress-plan", {"status": "in-progress", "workers": [label_row("plan")]}, None, "plan"),
+    ("in-progress-impl", {"status": "in-progress",
+                          "workers": [label_row("plan"), label_row("implement")]}, None, "impl"),
+    ("in-progress-mech", {"status": "in-progress", "workers": [label_row("mechanical")]}, None, "impl"),
+    ("in-progress-review", {"status": "in-progress", "workers": [label_row("review")]}, None, "review"),
+    ("in-progress-ship", {"status": "in-progress", "workers": [label_row("ship")]}, None, "co-review"),
+    ("in-progress-failed-impl", {"status": "in-progress",
+                                 "workers": [label_row("plan"),
+                                             label_row("implement", "launch_failed")]}, None, "plan"),
+    ("in-progress-think-skipped", {"status": "in-progress",
+                                   "workers": [label_row("implement"), label_row("think")]}, None, "impl"),
+    ("blocked", {"status": "blocked"}, None, "blocked"),
+    ("completed", {"status": "completed"}, None, "review-due"),
+    ("review-dispatched", {"status": "review-dispatched"}, None, "review"),
+    ("changes-requested", {"status": "changes-requested"}, None, "repair"),
+    ("reviewed-no-pr", {"status": "reviewed"}, None, "open-pr?"),
+    ("reviewed-pr-no-handoff", {"status": "reviewed", "pr_number": 7}, None, "co-review"),
+    ("reviewed-pr-alias", {"status": "reviewed", "pr": 7}, None, "co-review"),
+    ("reviewed-approve", {"status": "reviewed", "pr_number": 7, "review_head_sha": SHA_A},
+     {"verdict": "APPROVE", "head_sha": SHA_A}, "merge?"),
+    ("reviewed-approve-old-head", {"status": "reviewed", "pr_number": 7, "review_head_sha": SHA_A},
+     {"verdict": "APPROVE", "head_sha": "b" * 40}, "gate?"),
+    ("reviewed-incomplete", {"status": "reviewed", "pr_number": 7, "review_head_sha": SHA_A},
+     {"verdict": "INCOMPLETE", "head_sha": SHA_A}, "gate?"),
+    ("reviewed-null-head", {"status": "reviewed", "pr_number": 7, "review_head_sha": None},
+     {"verdict": "APPROVE"}, "gate?"),
+    ("pr-open-pending-merge", {"status": "pr-open-pending-merge"}, None, "merge?"),
+    ("merged", {"status": "merged"}, None, "merged"),
+    ("abandoned", {"status": "abandoned"}, None, "abandoned"),
+    ("failed", {"status": "failed"}, None, "failed"),
+    ("paused", {"status": "paused"}, None, "paused"),
+    ("unknown", {"status": "something-very-long-status"}, None, "something-ve"),
+)
+
+
+def test_state_token_covers_every_status_row():
+    for name, fields, handoff, token in STATE_TOKEN_ROWS:
+        got = core.task_state_token({"task_id": "td-a", **fields}, handoff)
+        assert got == token, (name, got, token)
+
+
+LABEL_RENDER_ROWS = (
+    # (record fields, expected label)
+    ({"task_id": "td-a", "status": "in-progress",
+      "title": "Label herdr workspaces with task state, not just the task id"}, "plan: Label herdr"),
+    ({"task_id": "td-a", "status": "completed",
+      "title": "BESS-3473: HIL smoke tiers (#2567)"}, "review-due: HIL smoke"),
+    ({"task_id": "2026-09-28-label-herdr-workspaces-with-task-state-not-just-the-id",
+      "status": "in-progress"}, "plan: label herdr"),
+    ({"task_id": "BESS-2989", "status": "reviewed", "pr_number": 12}, "co-review"),
+    ({"task_id": "td-a", "status": "review-dispatched", "title": "PROJ-1 #4"}, "review"),
+    ({"task_id": "td-a", "status": "in-progress",
+      "title": "Supercalifragilisticexpialidocious words"}, "plan: Supercalifragilisti"),
+    ({"task_id": "td-a", "status": "pr-open-pending-merge",
+      "title": "Fix dropped messages on the device bus"}, "merge?: Fix dropped"),
+    ({"task_id": "td-a", "status": "something-very-long-status", "title": "Fix bus"},
+     "something-ve: Fix bus"),
+    ({"task_id": "td-a", "status": "merged", "title": "Tab\tand\nnewline title"},
+     "merged: Tab and newline"),
+)
+
+
+def test_label_rendering_pins_titles_and_bound():
+    for fields, expected in LABEL_RENDER_ROWS:
+        got = core.task_label(fields)
+        assert got == expected, (fields, got, expected)
+    long_title = "Word " * 20
+    for name, fields, handoff, token in STATE_TOKEN_ROWS:
+        got = core.task_label({"task_id": "PROJ-9", "title": long_title, **fields}, handoff)
+        assert len(got) <= core.LABEL_MAX and got.startswith(token), (name, got)
+        assert "PROJ" not in got and "#" not in got, (name, got)
+
+
+def test_label_target_fallback():
+    assert core.label_target({"workspace_id": "w9", "workers": [label_row("plan")]}) == "w9"
+    rows = [label_row("plan", ws="w2"), label_row("review", ws="w3"),
+            label_row("implement", "launch_failed", ws="w4")]
+    assert core.label_target({"workers": rows}) == "w2"
+    assert core.label_target({"workspace_id": "bad id", "workers": rows}) == "w2"
+    assert core.label_target({"workers": [label_row("ship", ws="w5")]}) is None
+    assert core.label_target({}) is None
+
+
+def label_task(fx, **fields):
+    return {"task_id": "td-a", "status": "reviewed", "worktree": str(fx.repo.resolve()),
+            "workspace_id": "w1", **fields}
+
+
+def test_apply_label_applies_once_then_unchanged():
+    fx = Fixture()
+    try:
+        task = label_task(fx)
+        first = core.apply_workspace_label(task, "open-pr?: td a", herdr_cli=str(fx.bin), env=fx.env)
+        assert first == {"status": "applied", "label": "open-pr?: td a",
+                         "workspace_id": "w1", "reason": None}, first
+        second = core.apply_workspace_label(task, "open-pr?: td a", herdr_cli=str(fx.bin), env=fx.env)
+        assert second["status"] == "unchanged", second
+        renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+        assert renames == [["workspace", "rename", "w1", "open-pr?: td a"]], renames
+        assert workspace_labels(fx) == {"w1": "open-pr?: td a"}
+    finally:
+        fx.close()
+
+
+def test_apply_label_refuses_checkout_mismatch():
+    fx = Fixture()
+    try:
+        write_workspaces(fx, [ws_entry("w1", "td-a", fx.root / "elsewhere"),
+                              {"workspace_id": "w2", "label": "td-b"}])
+        mismatch = core.apply_workspace_label(label_task(fx), "x", herdr_cli=str(fx.bin), env=fx.env)
+        assert mismatch["status"] == "unsupported", mismatch
+        assert mismatch["reason"] == "workspace-mismatch", mismatch
+        no_tree = core.apply_workspace_label(label_task(fx, workspace_id="w2"), "x",
+                                             herdr_cli=str(fx.bin), env=fx.env)
+        assert no_tree["reason"] == "workspace-mismatch", no_tree
+        assert not [c for c in fx.calls() if c[:2] == ["workspace", "rename"]], fx.calls()
+        gone = core.apply_workspace_label(label_task(fx, worktree=None), "x",
+                                          herdr_cli=str(fx.bin), env=fx.env)
+        assert gone["reason"] == "no-worktree", gone
+        none = core.apply_workspace_label({"task_id": "td-a", "worktree": "/x"}, "x",
+                                          herdr_cli=str(fx.bin), env=fx.env)
+        assert none["reason"] == "no-workspace", none
+    finally:
+        fx.close()
+
+
+def test_apply_label_failures_never_raise():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        refused = core.apply_workspace_label(label_task(fx), "x", herdr_cli=str(fx.bin), env=fx.env)
+        assert refused["status"] == "unsupported", refused
+        assert "rename_refused" in refused["reason"], refused
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        hung = core.apply_workspace_label(label_task(fx), "x", herdr_cli=str(fx.bin),
+                                          env=fx.env, timeout_secs=1)
+        assert hung == {"status": "unsupported", "label": "x", "workspace_id": "w1",
+                        "reason": "herdr-unavailable"}, hung
+        missing = core.apply_workspace_label(label_task(fx), "x",
+                                             herdr_cli=str(fx.root / "no-such-herdr"), env=fx.env)
+        assert missing["reason"] == "herdr-unavailable", missing
+        bad_reply = core.apply_workspace_label(label_task(fx), "x", herdr_cli="/bin/echo",
+                                               env=fx.env)
+        assert bad_reply["status"] == "unsupported", bad_reply
+        assert bad_reply["reason"] not in (None, "herdr-unavailable"), bad_reply
+    finally:
+        fx.close()
+
+
+def core_cli(fx, *argv, herdr_on_path=False):
+    env = dict(fx.env)
+    if herdr_on_path:
+        env["PATH"] = str(fx.root) + os.pathsep + env["PATH"]
+    return subprocess.run(
+        [sys.executable, str(Path(core.__file__).resolve()), *argv],
+        capture_output=True, text=True, env=env, check=False)
+
+
+def put_task(fx, task_id, **fields):
+    record = {"v": 1, "task_id": task_id, "repo_slug": fx.slug,
+              "worktree": str(fx.repo.resolve()), "status": "in-progress",
+              "workers": [], **fields}
+    (fx.rd / "tasks" / f"{task_id}.json").write_text(json.dumps(record))
+
+
+def present_argv(fx, *extra):
+    return ("present-task", "--repo-slug", fx.slug, "--repo-path", str(fx.repo), *extra)
+
+
+def test_present_task_prints_label_without_herdr():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", status="completed", title="HIL smoke tiers")
+        out = core_cli(fx, *present_argv(fx, "--task-id", "td-a"))
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == "review-due: HIL smoke\n", out.stdout
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_present_task_apply_renames_under_fence():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", status="reviewed", title="Fix bus", workspace_id="w1")
+        argv = present_argv(fx, "--task-id", "td-a", "--apply", "--session", "S", "--fence", "1")
+        out = core_cli(fx, *argv, herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == "open-pr?: Fix bus\n", out.stdout
+        again = core_cli(fx, *argv, herdr_on_path=True)
+        assert again.returncode == 0, again.stderr
+        renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+        assert renames == [["workspace", "rename", "w1", "open-pr?: Fix bus"]], renames
+        write_workspaces(fx, [ws_entry("w1", "td-a", fx.root / "elsewhere")])
+        refused = core_cli(fx, *argv, herdr_on_path=True)
+        assert refused.returncode == 1, refused
+        assert "workspace-mismatch" in refused.stderr, refused.stderr
+        assert len([c for c in fx.calls() if c[:2] == ["workspace", "rename"]]) == 1
+    finally:
+        fx.close()
+
+
+def test_present_task_apply_refuses_stale_fence():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", workspace_id="w1")
+        out = core_cli(fx, *present_argv(fx, "--task-id", "td-a", "--apply",
+                                         "--session", "S", "--fence", "2"),
+                       herdr_on_path=True)
+        assert out.returncode != 0, out
+        assert fx.calls() == [], fx.calls()
+        no_fence = core_cli(fx, *present_argv(fx, "--task-id", "td-a", "--apply"),
+                            herdr_on_path=True)
+        assert no_fence.returncode != 0 and fx.calls() == [], no_fence
+    finally:
+        fx.close()
+
+
+def test_present_all_exit_and_stop_rules():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", title="Alpha", workspace_id="w1")
+        put_task(fx, "td-b", title="Beta", workspace_id="w3", worktree=None)
+        put_task(fx, "td-c", title="Gamma", workspace_id="w2")
+        write_workspaces(fx, [ws_entry("w1", "td-a", fx.repo.resolve()),
+                              ws_entry("w2", "td-c", fx.repo.resolve()),
+                              ws_entry("w3", "td-b", fx.repo.resolve())])
+        argv = present_argv(fx, "--all", "--apply", "--session", "S", "--fence", "1")
+        ok = core_cli(fx, *argv, herdr_on_path=True)
+        assert ok.returncode == 0, ok.stderr
+        rows = {r["task_id"]: r for r in map(json.loads, ok.stdout.splitlines())}
+        assert rows["td-b"]["reason"] == "no-worktree", rows
+        assert rows["td-a"]["status"] == "applied", rows
+        assert rows["td-c"]["status"] == "applied", rows
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        write_workspaces(fx, [ws_entry("w1", "x", fx.repo.resolve()),
+                              ws_entry("w2", "y", fx.repo.resolve()),
+                              ws_entry("w3", "z", fx.repo.resolve())])
+        before = len(fx.calls())
+        refused = core_cli(fx, *argv, herdr_on_path=True)
+        assert refused.returncode == 0, refused.stderr
+        tried = [c for c in fx.calls()[before:] if c[:2] == ["workspace", "rename"]]
+        assert len(tried) == 2, tried
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "3"
+        results, stopped = core.present_all(fx.rd, apply=True, herdr_cli=str(fx.bin),
+                                            env=fx.env, timeout_secs=1)
+        assert stopped is True, results
+        assert [r["reason"] for r in results] == ["herdr-unavailable"] * 3, results
+        fx.env["FAKE_HERDR_MODE"] = "list-fail"
+        listed = core_cli(fx, *argv, herdr_on_path=True)
+        assert listed.returncode != 0, listed
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "12"
+        hung = core_cli(fx, *argv, herdr_on_path=True)
+        assert hung.returncode != 0, hung
+        assert len(hung.stdout.splitlines()) == 3, hung.stdout
+    finally:
+        fx.close()
+
+
+def test_present_all_orders_terminal_first():
+    fx = Fixture()
+    try:
+        fx.task_file.unlink()
+        put_task(fx, "td-new", title="New work", workspace_id="w1")
+        put_task(fx, "td-old", status="abandoned", title="Old work", workspace_id="w1")
+        argv = present_argv(fx, "--all", "--apply", "--session", "S", "--fence", "1")
+        for _ in range(2):
+            out = core_cli(fx, *argv, herdr_on_path=True)
+            assert out.returncode == 0, out.stderr
+            rows = [json.loads(line) for line in out.stdout.splitlines()]
+            assert [r["task_id"] for r in rows] == ["td-old", "td-new"], rows
+            assert (rows[0]["status"], rows[0]["reason"]) == ("skipped", "superseded"), rows
+            assert workspace_labels(fx) == {"w1": "plan: New work"}, workspace_labels(fx)
+        assert rows[1]["status"] == "unchanged", rows
+        renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+        assert renames == [["workspace", "rename", "w1", "plan: New work"]], renames
+    finally:
+        fx.close()
+
+
+def write_task_argv(fx, record, *extra):
+    return ("write-task", "--repo-slug", fx.slug, "--repo-path", str(fx.repo),
+            "--session", "S", "--fence", "1", "--task-id", record["task_id"],
+            "--json", json.dumps(record), *extra)
+
+
+def fixture_record(fx, **fields):
+    return {**json.loads(fx.task_file.read_text()), **fields}
+
+
+def test_write_task_present_relabels():
+    fx = Fixture()
+    try:
+        record = fixture_record(fx, status="reviewed", title="Fix bus", workspace_id="w1")
+        out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert workspace_labels(fx) == {"w1": "open-pr?: Fix bus"}, workspace_labels(fx)
+        record["pr_number"] = 5
+        out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert workspace_labels(fx) == {"w1": "co-review: Fix bus"}, workspace_labels(fx)
+    finally:
+        fx.close()
+
+
+def test_write_task_without_present_no_herdr():
+    fx = Fixture()
+    try:
+        record = fixture_record(fx, status="reviewed", workspace_id="w1")
+        out = core_cli(fx, *write_task_argv(fx, record), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_write_task_present_failure_keeps_write():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        record = fixture_record(fx, status="blocked", workspace_id="w1")
+        out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert "present: " in out.stderr, out.stderr
+        assert json.loads(fx.task_file.read_text())["status"] == "blocked"
+    finally:
+        fx.close()
+
+
+def test_write_task_present_refuses_binding():
+    fx = Fixture()
+    try:
+        before = fx.task_file.read_text()
+        record = fixture_record(fx, status="blocked")
+        out = core_cli(fx, *write_task_argv(fx, record, "--present", "--binding", "b1"),
+                       herdr_on_path=True)
+        assert out.returncode == 2, out
+        assert "--present" in out.stderr, out.stderr
+        assert fx.task_file.read_text() == before
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_launch_relabels_task_workspace():
+    fx = Fixture()
+    try:
+        result = fx.launch()
+        assert result["label"]["status"] == "applied", result
+        assert ["workspace", "rename", "w1", "impl: td a"] in fx.calls(), fx.calls()
+        assert workspace_labels(fx) == {"w1": "impl: td a"}
+    finally:
+        fx.close()
+
+
+def test_launch_label_failure_keeps_launch():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        result = fx.launch()
+        assert result["status"] == "launched", result
+        assert result["label"]["status"] == "unsupported", result
+        assert fx.worker_records()[-1]["status"] == "launched", fx.worker_records()
+    finally:
+        fx.close()
+
+
+def test_launch_label_stale_fence_keeps_launch():
+    fx = Fixture()
+    original = core.owner_transaction
+
+    def refusing(rd, *args, **kwargs):
+        rows = json.loads(fx.task_file.read_text()).get("workers", [])
+        if rows and rows[-1].get("status") == "launched":
+            raise ValueError("stale owner fence")
+        return original(rd, *args, **kwargs)
+
+    try:
+        core.owner_transaction = refusing
+        result = fx.launch()
+        assert result["status"] == "launched", result
+        assert result["label"]["status"] == "unsupported", result
+        assert "stale owner fence" in result["label"]["reason"], result
+        assert fx.worker_records()[-1]["status"] == "launched", fx.worker_records()
+        assert not [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+    finally:
+        core.owner_transaction = original
+        fx.close()
+
+
+def test_bound_launch_skips_label():
+    fx = LeadFixture()
+    try:
+        result = fx.launch()
+        assert result["label"] == {"status": "skipped", "label": None,
+                                   "workspace_id": None, "reason": "lead-scope"}, result
+        assert not [c for c in fx.calls() if c[:1] == ["workspace"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_ship_settle_relabels_merge_ready():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        task = json.loads(fx.task_file.read_text())
+        task.update(pr_number=9, review_head_sha=head, ship_launch_id=ship["launch_id"],
+                    title="Fix bus")
+        fx.task_file.write_text(json.dumps(task))
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(json.dumps(
+            {"launch_id": ship["launch_id"], "verdict": "APPROVE", "head_sha": head}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled", result
+        assert result["label"]["status"] == "applied", result
+        assert workspace_labels(fx) == {"w1": "merge?: Fix bus"}, workspace_labels(fx)
+    finally:
+        fx.close()
+
+
+def test_settle_label_failure_keeps_result():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["reason"] == "verdict-recorded", result
+        assert result["label"]["status"] == "unsupported", result
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -3605,6 +4148,29 @@ for name, test in (
     ("bound start failure keeps the pane outstanding until re-dispatch", test_bound_start_failure_keeps_pane_outstanding_until_redispatch),
     ("bound prechecks refuse before any herdr call", test_bound_prechecks_refuse_before_any_herdr_call),
     ("inspect --binding reads the lead subtree", test_inspect_binding_reads_lead_subtree),
+    ("fake herdr enforces the recorded ttl rule", test_fake_herdr_enforces_recorded_ttl_rule),
+    ("launch presentation passes the recorded ttl rule", test_launch_presentation_passes_recorded_ttl_rule),
+    ("state token covers every status row", test_state_token_covers_every_status_row),
+    ("label rendering pins titles and the 25 char bound", test_label_rendering_pins_titles_and_bound),
+    ("label target falls back to the launched plan or implement row", test_label_target_fallback),
+    ("workspace label applies once then reports unchanged", test_apply_label_applies_once_then_unchanged),
+    ("workspace label refuses a checkout-path mismatch", test_apply_label_refuses_checkout_mismatch),
+    ("workspace label failures never raise", test_apply_label_failures_never_raise),
+    ("present-task prints a label without herdr", test_present_task_prints_label_without_herdr),
+    ("present-task --apply renames under the fence", test_present_task_apply_renames_under_fence),
+    ("present-task --apply refuses a stale fence before herdr", test_present_task_apply_refuses_stale_fence),
+    ("present-task --all exit and stop rules", test_present_all_exit_and_stop_rules),
+    ("present-task --all labels live tasks after terminal ones", test_present_all_orders_terminal_first),
+    ("write-task --present relabels from the written record", test_write_task_present_relabels),
+    ("write-task without --present makes no herdr call", test_write_task_without_present_no_herdr),
+    ("write-task --present failure keeps exit 0 and the record", test_write_task_present_failure_keeps_write),
+    ("write-task --present refuses --binding", test_write_task_present_refuses_binding),
+    ("launch relabels the task workspace", test_launch_relabels_task_workspace),
+    ("launch label rename failure keeps the launch", test_launch_label_failure_keeps_launch),
+    ("launch label stale fence keeps the launch", test_launch_label_stale_fence_keeps_launch),
+    ("bound launch skips the label", test_bound_launch_skips_label),
+    ("ship settle relabels merge-ready", test_ship_settle_relabels_merge_ready),
+    ("settle label failure keeps the settle result", test_settle_label_failure_keeps_result),
 ):
     check(name, test)
 

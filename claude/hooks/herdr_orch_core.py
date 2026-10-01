@@ -2280,7 +2280,8 @@ def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) 
 
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
-                control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None):
+                control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None,
+                handover=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
         print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
@@ -2420,9 +2421,28 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
             tx.current, require_pid, adopt_pid, tx.account_id, adopt_start
         ):
             raise NotLeaseHolder("no lease held by this process")
+        handover_from = None
+        marker = read_rollover_pending(rd) if handover is not None else None
+        if (marker is not None
+                and marker["pane"] == handover["pane"]
+                and ROLLOVER_TOKEN_RE.fullmatch(handover["token"])
+                and secrets.compare_digest(marker["token"], handover["token"])
+                and time.time() < marker["expires_ts"]
+                and tx.handover_adoptable(tx.current, (marker["from_session"], marker["from_fence"]),
+                                          session_id, runtime, thread_id)):
+            handover_from = (marker["from_session"], marker["from_fence"])
+            # Ack first, lease last: a kill before the owner write leaves an
+            # adopted line with the lease unchanged, which the old verb reads
+            # as "kept".
+            append_rollover_event(rd, event="adopted", handover=handover_id(marker["token"]),
+                                  from_session=handover_from[0], from_fence=handover_from[1],
+                                  session=session_id, fence=handover_from[1] + 1,
+                                  pane=marker["pane"])
+            clear_rollover_pending(rd, marker["token"])
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
                          runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid,
-                         pid_start=pid_start, adopt_start=adopt_start)
+                         pid_start=pid_start, adopt_start=adopt_start,
+                         handover_from=handover_from)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
@@ -2472,38 +2492,80 @@ def watch_state(root_pid, slug):
     return live, ("live" if live else "none")
 
 
-_RULE_LINE_RE = re.compile(r"─{20,}")
-_PROMPT_LINE_RE = re.compile(r"❯(?: (.*))?")
-# The live statusline footer (claude/statusline.js render()): either the
-# context-meter segment (ten block cells and NN%), or, when the host
-# reports no remaining_percentage (e.g. early in a session) and
-# buildContextMeter() returns '', any line carrying the U+2502 segment
-# separator the remaining segments always join on.
-_FOOTER_LINE_RE = re.compile(r"(?: *[█░]{10} \d{1,3}%.*)|(?:.*│.*)")
-ROLLOVER_READ_SETTLE_SECS = 0.5
+ROLLOVER_PENDING_FILE = "rollover-pending.json"
+ROLLOVER_ACK_SECS = 120
+ROLLOVER_POLL_SECS = 1.0
+ROLLOVER_LAUNCH = "director 'resume director'"
+ROLLOVER_TOKEN_RE = re.compile(r"[0-9a-f]{32}\Z")
+ROLLOVER_CARRY_MAX = 4000
 
 
-def current_input(text):
-    """The Claude Code input region's text from a `pane read`, or None.
+def handover_id(token):
+    """The loggable id of a handover token; the token itself is never logged."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
 
-    The region is the prompt line (U+276F) plus any continuation lines
-    between the bottom-most two full-width U+2500 rules, and the line under
-    the lower rule must be the live statusline footer: the footer is redrawn
-    in place, so it never appears in history. Anything else is ambiguous and
-    returns None."""
-    lines = [line.rstrip() for line in text.rstrip().splitlines()[-20:]]
-    rules = [i for i, line in enumerate(lines) if _RULE_LINE_RE.fullmatch(line)]
-    if len(rules) < 2:
+
+def read_rollover_pending(rd):
+    """The pending rollover marker, or None when absent or malformed."""
+    try:
+        rec = json.loads(read_payload_text(Path(rd) / ROLLOVER_PENDING_FILE))
+    except (OSError, ValueError):
         return None
-    upper, lower = rules[-2], rules[-1]
-    if lower - upper < 2 or lower + 1 >= len(lines):
+    if not isinstance(rec, dict):
         return None
-    if not _FOOTER_LINE_RE.fullmatch(lines[lower + 1]):
+    ok = (rec.get("v") == 1
+          and isinstance(rec.get("token"), str) and ROLLOVER_TOKEN_RE.fullmatch(rec["token"])
+          and all(isinstance(rec.get(k), str) and SHELL_SAFE_RE.fullmatch(rec[k])
+                  for k in ("pane", "from_pane"))
+          and isinstance(rec.get("from_session"), str) and rec["from_session"] != ""
+          and type(rec.get("from_fence")) is int
+          and isinstance(rec.get("carry"), str) and len(rec["carry"]) <= ROLLOVER_CARRY_MAX
+          and all(type(rec.get(k)) in (int, float) for k in ("created_ts", "expires_ts")))
+    return rec if ok else None
+
+
+def clear_rollover_pending(rd, token):
+    """Delete the marker only when it still carries token. Call under the owner lock."""
+    rec = read_rollover_pending(rd)
+    if rec is None or rec["token"] != token:
+        return False
+    try:
+        with coordination.payload_parent(Path(rd) / ROLLOVER_PENDING_FILE) as (parent, name):
+            os.unlink(name, dir_fd=parent)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def append_rollover_event(rd, **fields):
+    rec = {"v": 2, "ts": now_iso(), **fields}
+    append_payload(Path(rd) / "rollover.jsonl",
+                   (json.dumps(rec, separators=(",", ":")) + "\n").encode())
+
+
+def rollover_adopted(rd, **match):
+    """The last v2 `adopted` line in rollover.jsonl whose fields equal match, or None."""
+    try:
+        text = read_payload_text(Path(rd) / "rollover.jsonl")
+    except (OSError, ValueError):
         return None
-    m = _PROMPT_LINE_RE.fullmatch(lines[upper + 1])
-    if not m:
-        return None
-    return "\n".join([m.group(1) or ""] + lines[upper + 2:lower]).strip()
+    found = None
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and rec.get("v") == 2 and rec.get("event") == "adopted"
+                and all(rec.get(k) == v for k, v in match.items())):
+            found = rec
+    return found
+
+
+def env_handover():
+    """This pane's handover ({"pane", "token"}) from the environment, or None."""
+    pane = os.environ.get("HERDR_PANE_ID", "")
+    token = os.environ.get("HERDR_ROLLOVER_TOKEN", "")
+    return {"pane": pane, "token": token} if pane and token else None
 
 
 def rollover_warning(reason) -> str:
@@ -2512,10 +2574,11 @@ def rollover_warning(reason) -> str:
             "and ask the human (takeover is a human decision).")
 
 
-def rollover_info(slug, session, fence, watch) -> str:
+def rollover_info(slug, session, fence, watch, header="lease re-established in place.", carry="") -> str:
     pids, wstate = watch
-    lines = ["[INFO] herdr director rollover: lease re-established in place.",
+    lines = [f"[INFO] herdr director rollover: {header}",
              f"repo_slug={slug} session={session} fence={fence}"]
+    lines += [f"carried: {line}" for line in carry.splitlines() if line.strip()]
     if wstate == "live":
         lines += [f"watch: live (pids {','.join(map(str, pids))}); do not arm another. Its Monitor task id",
                   "did not survive /clear; on yielding ownership, stop it from a fresh scan:",
@@ -3657,6 +3720,238 @@ def ship_handoff_launches(rd, task_id, task):
     return frozenset(found)
 
 
+LABEL_MAX = 25
+LABEL_HERDR_TIMEOUT_SECS = 10
+LABEL_PHASE_TOKENS = {"plan": "plan", "implement": "impl", "mechanical": "impl",
+                      "review": "review", "ship": "co-review"}
+LABEL_STATUS_TOKENS = {
+    "blocked": "blocked", "completed": "review-due", "review-dispatched": "review",
+    "changes-requested": "repair", "pr-open-pending-merge": "merge?",
+    "merged": "merged", "abandoned": "abandoned", "failed": "failed", "paused": "paused",
+}
+LABEL_TERMINAL_STATUSES = frozenset({"merged", "abandoned", "failed"})
+_LABEL_IDS = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b|#\d+")
+_LABEL_TRIM = " -:|,;."
+
+
+def _launched_rows(task, phases):
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    return [w for w in workers if isinstance(w, dict) and w.get("status") == "launched"
+            and w.get("phase") in phases]
+
+
+def _label_phase(task):
+    rows = _launched_rows(task, LABEL_PHASE_TOKENS)
+    if rows:
+        return rows[-1]["phase"]
+    phase = task.get("phase")
+    return phase if phase in LABEL_PHASE_TOKENS else "plan"
+
+
+def _label_pr_number(task):
+    for key in ("pr_number", "pr"):
+        value = task.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def task_state_token(task, ship_handoff=None):
+    """Short human state for a task's Herdr workspace label; display only."""
+    status = task.get("status")
+    if status == "in-progress":
+        return LABEL_PHASE_TOKENS[_label_phase(task)]
+    if status == "reviewed":
+        if _label_pr_number(task) is None:
+            return "open-pr?"
+        if not isinstance(ship_handoff, dict):
+            return "co-review"
+        head = task.get("review_head_sha")
+        if (ship_handoff.get("verdict") == "APPROVE" and head
+                and ship_handoff.get("head_sha") == head):
+            return "merge?"
+        return "gate?"
+    return LABEL_STATUS_TOKENS.get(status, str(status)[:12])
+
+
+def _label_title(task):
+    title = task.get("title")
+    fallback = not isinstance(title, str) or not title.strip()
+    if fallback:
+        title = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", str(task.get("task_id") or ""))
+    # Ids go before the fallback's hyphens become spaces, or a Jira id survives.
+    title = _LABEL_IDS.sub(" ", title)
+    if fallback:
+        title = re.sub(r"[-_]+", " ", title)
+    title = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in title)
+    return " ".join(title.split()).strip(_LABEL_TRIM)
+
+
+def task_label(task, ship_handoff=None):
+    """`<token>: <title>`, at most LABEL_MAX chars, with no ticket key or PR ref."""
+    token = task_state_token(task, ship_handoff)
+    title = _label_title(task)
+    budget = LABEL_MAX - len(token) - 2
+    if budget <= 0 or not title:
+        return token[:LABEL_MAX]
+    if len(title) > budget:
+        cut = title.rfind(" ", 0, budget + 1)
+        title = title[:cut] if 2 * cut >= budget else title[:budget]
+        title = title.rstrip(_LABEL_TRIM)
+    return f"{token}: {title}" if title else token
+
+
+def label_target(task):
+    """The task's own workspace: the record's, else its last launched plan/implement row's."""
+    ws = task.get("workspace_id")
+    if isinstance(ws, str) and valid_workspace_id(ws):
+        return ws
+    for row in reversed(_launched_rows(task, ("plan", "implement", "mechanical"))):
+        ws = row.get("workspace_id")
+        if isinstance(ws, str) and valid_workspace_id(ws):
+            return ws
+    return None
+
+
+def task_ship_handoff(rd, task_id, task):
+    """The ship.json the record's ship_launch_id pins, or None."""
+    launch = task.get("ship_launch_id")
+    launch_dir = ship_launch_dir(rd, task_id, launch)
+    return read_ship_handoff(launch_dir, launch) if launch_dir is not None else None
+
+
+def apply_workspace_label(task, label, *, herdr_cli=None, env=None, workspace=None,
+                          timeout_secs=None):
+    """Set the task's Herdr workspace label; never raises. Display only.
+
+    `workspace` is a `workspace list` entry the caller already fetched.
+    Renames only a workspace whose checkout is the task's worktree."""
+    ws = label_target(task)
+    out = {"status": "unsupported", "label": label, "workspace_id": ws, "reason": None}
+    try:
+        worktree = task.get("worktree")
+        if ws is None:
+            out["reason"] = "no-workspace"
+            return out
+        if not isinstance(worktree, str) or not worktree:
+            out["reason"] = "no-worktree"
+            return out
+        # Lazy: herdr_dispatch imports this module (see _checkin_poll).
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = herdr_cli or shutil.which("herdr")
+        if not exe:
+            out["reason"] = "herdr-unavailable"
+            return out
+        run_env = dict(os.environ) if env is None else env
+        timeout = LABEL_HERDR_TIMEOUT_SECS if timeout_secs is None else timeout_secs
+        if workspace is None:
+            workspace = run_herdr(exe, ["workspace", "get", ws], env=run_env,
+                                  timeout_secs=timeout)["workspace"]
+        tree = workspace.get("worktree")
+        checkout = tree.get("checkout_path") if isinstance(tree, dict) else None
+        if (not isinstance(checkout, str)
+                or os.path.realpath(checkout) != os.path.realpath(worktree)):
+            out["reason"] = "workspace-mismatch"
+            return out
+        if workspace.get("label") == label:
+            out["status"] = "unchanged"
+            return out
+        run_herdr(exe, ["workspace", "rename", ws, label], env=run_env,
+                  timeout_secs=timeout, json_result=True)
+        out["status"] = "applied"
+        return out
+    except Exception as exc:  # noqa: BLE001 -- display only; DispatchError is lazily imported
+        cause = exc.__cause__
+        out["reason"] = ("herdr-unavailable"
+                         if isinstance(cause, (subprocess.TimeoutExpired, OSError))
+                         else (str(exc) or type(exc).__name__)[:200])
+        return out
+
+
+def launcher_task_ids(rd):
+    """Launcher-scope task ids: terminal statuses first, each group by id."""
+    tasks = Path(rd) / "tasks"
+    ids = sorted(p.name[:-len(".json")] for p in tasks.glob("*.json")
+                 if p.name.count(".") == 1 and valid_task_id(p.name[:-len(".json")]))
+
+    terminal = set()
+    for tid in ids:
+        try:
+            record = json.loads(read_payload_text(tasks / f"{tid}.json"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("status") in LABEL_TERMINAL_STATUSES:
+            terminal.add(tid)
+    # A live record sharing a workspace with a finished one must label it last.
+    return [t for t in ids if t in terminal] + [t for t in ids if t not in terminal]
+
+
+def _present_row(rd, task_id):
+    task = json.loads(read_payload_text(Path(rd) / "tasks" / f"{task_id}.json"))
+    if not isinstance(task, dict) or task.get("task_id") != task_id:
+        raise ValueError("task record does not match its file")
+    return task, task_label(task, task_ship_handoff(rd, task_id, task))
+
+
+def present_all(rd, *, apply, herdr_cli=None, env=None, timeout_secs=None):
+    """One label row per launcher task; with apply, stop at herdr-unavailable.
+
+    When several records target one workspace, only the last in
+    launcher_task_ids order (a live record after a finished one) is applied;
+    the others report `superseded`. Raises the herdr error when
+    `workspace list` itself fails."""
+    spaces = {}
+    if apply:
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = herdr_cli or shutil.which("herdr")
+        if not exe:
+            raise OSError("herdr is not on PATH")
+        timeout = LABEL_HERDR_TIMEOUT_SECS if timeout_secs is None else timeout_secs
+        listed = run_herdr(exe, ["workspace", "list"],
+                           env=dict(os.environ) if env is None else env, timeout_secs=timeout)
+        spaces = {w.get("workspace_id"): w for w in listed.get("workspaces", [])
+                  if isinstance(w, dict)}
+    rows, rendered = [], {}
+    for tid in launcher_task_ids(rd):
+        row = {"task_id": tid, "label": None, "status": "unsupported",
+               "workspace_id": None, "reason": None}
+        rows.append(row)
+        try:
+            task, label = _present_row(rd, tid)
+        except (OSError, ValueError) as exc:
+            row["reason"] = f"unreadable: {exc}"[:200]
+            continue
+        row.update(label=label, workspace_id=label_target(task))
+        rendered[tid] = task
+    # Last claimant wins, so two records never fight over one workspace.
+    claimant = {row["workspace_id"]: row["task_id"] for row in rows
+                if row["task_id"] in rendered and row["workspace_id"]}
+    stopped = False
+    for row in rows:
+        if row["task_id"] not in rendered:
+            continue
+        ws = row["workspace_id"]
+        if not apply:
+            row["status"] = "rendered"
+        elif stopped:
+            row["reason"] = "herdr-unavailable"
+        elif ws is None:
+            row["reason"] = "no-workspace"
+        elif claimant[ws] != row["task_id"]:
+            row.update(status="skipped", reason="superseded")
+        elif ws not in spaces:
+            row["reason"] = "workspace-gone"
+        else:
+            result = apply_workspace_label(rendered[row["task_id"]], row["label"],
+                                           herdr_cli=herdr_cli, env=env,
+                                           workspace=spaces[ws], timeout_secs=timeout_secs)
+            row.update(status=result["status"], reason=result["reason"])
+            stopped = result["reason"] == "herdr-unavailable"
+    return rows, stopped
+
+
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
@@ -3914,6 +4209,216 @@ def _resume_owner(ns) -> int:
     return 0
 
 
+def _adopt_rollover(ns) -> int:
+    """adopt-rollover: take the lease a rollover handed to this pane.
+    Exit 0 INFO, 1 WARNING, 3 silent (no handover names this pane)."""
+    handover = env_handover()
+    sock, sock_pid, reason = validate_messaging_socket(ns.messaging_socket)
+    if handover is None or reason != "ok":
+        return 3
+    try:
+        context = repository_context(ns.repo_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 3
+    ns.repo_slug = _context_slug(context)
+    ns.runtime = "claude"
+    if not valid_repo_slug(ns.repo_slug):
+        return 3
+    select_payload(ns)
+    rd = repo_dir(ns.repo_slug)
+    marker = read_rollover_pending(rd)
+    if (marker is None or marker["pane"] != handover["pane"]
+            or time.time() >= marker["expires_ts"]):
+        return 3
+    selected = _PAYLOAD_SELECTION.get()
+    try:
+        fence = claim_owner(rd, ns.session, socket.gethostname(), sock_pid,
+                            messaging_socket=sock, context=selected["context"],
+                            expected_slug=ns.repo_slug, runtime="claude",
+                            scope=selected["scope"], handover=handover)
+    except (OSError, ValueError) as exc:
+        print(rollover_warning(f"error: {exc}"))
+        return 1
+    if fence is None:
+        print(rollover_warning("BUSY"))
+        return 1
+    header = (f"lease handed over from session {marker['from_session']} "
+              f"(pane {marker['from_pane']}).")
+    print(rollover_info(ns.repo_slug, ns.session, fence, watch_state(sock_pid, ns.repo_slug),
+                        header=header, carry=marker["carry"]))
+    return 0
+
+
+def rollover_launch(scope_kind):
+    """The shell line that starts the successor on this director's account."""
+    return "director --personal 'resume director'" if scope_kind == "personal" else ROLLOVER_LAUNCH
+
+
+def marker_live(marker, session, fence):
+    """True while marker can still be adopted: unexpired and naming this lease."""
+    return (time.time() < marker["expires_ts"]
+            and (marker["from_session"], marker["from_fence"]) == (session, fence))
+
+
+def handed_to(lease, adopted):
+    """True when the lease names the successor an adopted line recorded."""
+    return (lease.get("session_id") == adopted.get("session")
+            and type(lease.get("fence")) is int and type(adopted.get("fence")) is int
+            and lease["fence"] >= adopted["fence"])
+
+
+def _handed_over(rd, ns, pane, adopted, started):
+    """Report a completed handover: stop this session's watch, log, print."""
+    _sock, sock_pid, reason = validate_messaging_socket(
+        os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""))
+    if reason != "ok":
+        watch_line = "watch: not scanned (no messaging socket); stop it with TaskStop"
+    else:
+        pids, wstate = watch_state(sock_pid, ns.repo_slug)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if pids:
+            watch_line = f"watch: stopped (pids {','.join(map(str, pids))})"
+        elif wstate == "none":
+            watch_line = "watch: none found"
+        else:
+            watch_line = "watch: unknown (ps failed); stop it with TaskStop"
+    append_rollover_event(rd, event="handed-over", handover=adopted["handover"],
+                          session=ns.session, pane=pane, to_pane=adopted["pane"],
+                          waited_secs=round(time.monotonic() - started, 1))
+    print(f"rollover: handed over to pane {adopted['pane']} "
+          f"(session {adopted['session']}, fence {adopted['fence']})")
+    print(watch_line)
+    print(f"Close this pane now, as your last tool call: herdr pane close {pane}")
+    return 0
+
+
+def _rollover(ns) -> int:
+    """rollover: hand the lease to a fresh director in a new pane of this
+    workspace. Exit 0 handed over; 1 not handed over (the message says who
+    holds the lease)."""
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    pane = os.environ.get("HERDR_PANE_ID", "")
+    _require(pane, "rollover must run inside a herdr pane (HERDR_PANE_ID is unset)")
+    _require(SHELL_SAFE_RE.fullmatch(pane), "HERDR_PANE_ID is not a pane id")
+    _require(ns.repo_path, "rollover requires --repo-path")
+    _require(len(ns.carry) <= ROLLOVER_CARRY_MAX and "\x00" not in ns.carry,
+             f"--carry must be at most {ROLLOVER_CARRY_MAX} characters without NUL")
+    import shutil
+    from herdr_dispatch_cli import run_herdr
+    exe = shutil.which("herdr")
+    _require(exe, "herdr is not on PATH")
+    rd = repo_dir(ns.repo_slug)
+    started = time.monotonic()
+    if not refresh_owner(rd, ns.session, ns.fence):
+        # An adopted line is written before the owner write, so it proves a
+        # handover only when the lease names its successor.
+        adopted = rollover_adopted(rd, from_session=ns.session, from_fence=ns.fence)
+        with owner_transaction(rd) as tx:
+            lease = dict(tx.current or {})
+        if adopted is not None and handed_to(lease, adopted):
+            return _handed_over(rd, ns, pane, adopted, started)
+        print("owner: stale-fence")
+        return 1
+    env = dict(os.environ)
+
+    def close(target):
+        try:
+            run_herdr(exe, ["pane", "close", target], env=env)
+        except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+            pass
+
+    def failed(reason, hid, new_pane, close_pane):
+        if close_pane:
+            close(new_pane)
+        append_rollover_event(rd, event="handover-failed", handover=hid, reason=reason,
+                              session=ns.session, pane=pane, to_pane=new_pane,
+                              waited_secs=round(time.monotonic() - started, 1))
+        return 1
+
+    # The fence is valid, so no adoption through any marker has landed: a
+    # marker is live only while it names this lease and has not expired.
+    with owner_transaction(rd):
+        prior = read_rollover_pending(rd)
+        live = prior is not None and marker_live(prior, ns.session, ns.fence)
+        if prior is not None and not live:
+            clear_rollover_pending(rd, prior["token"])
+    if live:
+        print(f"rollover: rollover in progress for pane {prior['pane']}")
+        return 1
+    if prior is not None:
+        reason = "expired" if time.time() >= prior["expires_ts"] else "superseded"
+        failed(reason, handover_id(prior["token"]), prior["pane"],
+               close_pane=prior["pane"] != pane)
+
+    token = secrets.token_hex(16)
+    hid = handover_id(token)
+    root = repository_context(ns.repo_path)["root"]
+    try:
+        split = run_herdr(exe, ["pane", "split", pane, "--direction", "right", "--cwd", root,
+                                "--env", f"HERDR_ROLLOVER_TOKEN={token}"], env=env)
+        new_pane = split["pane"]["pane_id"]
+        if not isinstance(new_pane, str) or not SHELL_SAFE_RE.fullmatch(new_pane):
+            raise ValueError("pane split returned no pane id")
+    except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+        print("rollover: pane split failed; this session keeps the lease")
+        return failed("split-failed", hid, None, close_pane=False)
+    with owner_transaction(rd) as tx:
+        held = tx.check(ns.session, ns.fence)
+        other = read_rollover_pending(rd)
+        busy = other is not None and marker_live(other, ns.session, ns.fence)
+        if held and not busy:
+            created = time.time()
+            write_json_atomic(Path(rd) / ROLLOVER_PENDING_FILE, {
+                "v": 1, "token": token, "pane": new_pane, "from_session": ns.session,
+                "from_fence": ns.fence, "from_pane": pane, "carry": ns.carry,
+                "created_ts": created, "expires_ts": created + ns.ack_secs})
+    if not held:
+        print("owner: stale-fence")
+        return failed("stale-fence", hid, new_pane, close_pane=True)
+    if busy:
+        close(new_pane)
+        print(f"rollover: rollover in progress for pane {other['pane']}")
+        return 1
+    scope_kind = ((_PAYLOAD_SELECTION.get() or {}).get("scope") or {}).get("kind")
+    try:
+        run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
+                  env=env, json_result=False)
+    except Exception:  # noqa: BLE001
+        # herdr may have delivered the command before failing; the lease decides.
+        with owner_transaction(rd) as tx:
+            lease = dict(tx.current or {})
+            clear_rollover_pending(rd, token)
+        adopted = rollover_adopted(rd, handover=hid)
+        if adopted is not None and handed_to(lease, adopted):
+            return _handed_over(rd, ns, pane, adopted, started)
+        if lease.get("session_id") != ns.session:
+            print("rollover: lease moved without a handover ack; run the section-1 preflight")
+            return failed("lease-moved", hid, new_pane, close_pane=False)
+        print(f"rollover: could not start director in pane {new_pane}; this session keeps the lease")
+        return failed("run-failed", hid, new_pane, close_pane=True)
+    deadline = created + ns.ack_secs
+    while time.time() < deadline and rollover_adopted(rd, handover=hid) is None:
+        time.sleep(ns.poll_secs)
+    # The lock waits out an adoption in progress; the lease decides.
+    with owner_transaction(rd) as tx:
+        lease = dict(tx.current or {})
+        clear_rollover_pending(rd, token)
+    adopted = rollover_adopted(rd, handover=hid)
+    if lease.get("session_id") == ns.session:
+        print(f"rollover: no ack from pane {new_pane} within {ns.ack_secs:g} s; "
+              f"this session keeps the lease (fence {lease.get('fence')})")
+        return failed("adoption-incomplete" if adopted else "no-ack", hid, new_pane,
+                      close_pane=True)
+    if adopted is not None and handed_to(lease, adopted):
+        return _handed_over(rd, ns, pane, adopted, started)
+    print("rollover: lease moved without a handover ack; run the section-1 preflight")
+    return failed("lease-moved", hid, new_pane, close_pane=False)
+
+
 def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
     """Who may merge in this repository: "director" or "human"; fails closed."""
     if not repo_path:
@@ -4113,6 +4618,11 @@ def _main(argv=None) -> int:
     ro.add_argument("--session", required=True)
     ro.add_argument("--messaging-socket", required=True)
     ro.add_argument("--personal", action="store_true")
+    ar = sub.add_parser("adopt-rollover")
+    ar.add_argument("--repo-path", required=True)
+    ar.add_argument("--session", required=True)
+    ar.add_argument("--messaging-socket", required=True)
+    ar.add_argument("--personal", action="store_true")
     wp = add("watch-pids")
     wp.add_argument("--messaging-socket", required=True)
     ib = add("issue-binding", "--task-id", fenced=True)
@@ -4126,9 +4636,14 @@ def _main(argv=None) -> int:
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
-    add("rollover", fenced=True)
+    rv = add("rollover", fenced=True)
+    rv.add_argument("--carry", default="")
+    # Test seams only.
+    rv.add_argument("--ack-secs", type=float, default=ROLLOVER_ACK_SECS, help=argparse.SUPPRESS)
+    rv.add_argument("--poll-secs", type=float, default=ROLLOVER_POLL_SECS, help=argparse.SUPPRESS)
     wt = add("write-task", "--task-id", "--json", fenced=True)
     wt.add_argument("--binding", default=None)
+    wt.add_argument("--present", action="store_true")
     # Launcher-scope only: no --binding, so _fenced_scoped never resolves a
     # lead subtree. A lead that needs a fresh start hands back to the director.
     add("reset-task", "--task-id", "--new-task-id", "--json", fenced=True)
@@ -4264,10 +4779,18 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     add("merge-authority")
     add("merge-ready", "--task-id", "--pr-json", "--repo-json")
+    pt = add("present-task")
+    pt.add_argument("--task-id", default=None)
+    pt.add_argument("--all", action="store_true")
+    pt.add_argument("--apply", action="store_true")
+    pt.add_argument("--session", default=None)
+    pt.add_argument("--fence", type=int, default=None)
     ns = ap.parse_args(argv)
 
     if ns.cmd == "resume-owner":
         return _resume_owner(ns)
+    if ns.cmd == "adopt-rollover":
+        return _adopt_rollover(ns)
 
     # Before select_payload: this verb answers "human" for a bad path or
     # slug instead of exiting 2, so the director never mistakes an error.
@@ -4325,7 +4848,8 @@ def _main(argv=None) -> int:
                 _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
         fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
                             messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"),
-                            control_tier=control_tier, workspace_root=workspace_root, binding_id=ns.binding, **kw)
+                            control_tier=control_tier, workspace_root=workspace_root, binding_id=ns.binding,
+                            handover=env_handover() if control_tier == "launcher" else None, **kw)
         if fence is None:
             print("BUSY")
             return 1
@@ -4343,62 +4867,10 @@ def _main(argv=None) -> int:
                                messaging_socket=ns.messaging_socket) else 1
         )
     if ns.cmd == "rollover":
-        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
-        pane = os.environ.get("HERDR_PANE_ID", "")
-        _require(pane, "rollover must run inside a herdr pane (HERDR_PANE_ID is unset)")
-        import shutil
-        from herdr_dispatch_cli import run_herdr
-        exe = shutil.which("herdr")
-        _require(exe, "herdr is not on PATH")
-        if not refresh_owner(repo_dir(ns.repo_slug), ns.session, ns.fence):
-            print("owner: stale-fence")
-            return 1
-        env = dict(os.environ)
-
-        def pane_input():
-            time.sleep(ROLLOVER_READ_SETTLE_SECS)
-            try:
-                return current_input(run_herdr(
-                    exe, ["pane", "read", pane, "--source", "detection", "--lines", "40"],
-                    env=env, json_result=False))
-            except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
-                return None
-
-        def send(argv, landed, retry):
-            # herdr has returned malformed JSON for a send that landed, so a
-            # failed reply is judged by the input region: resend only when it
-            # proves the send missed, and stop on anything ambiguous.
-            for attempt in (1, 2):
-                try:
-                    run_herdr(exe, argv, env=env)
-                    return True
-                except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
-                    if attempt == 2:
-                        return False
-                    seen = pane_input()
-                    if seen == landed:
-                        return True
-                    if seen != retry:
-                        return False
-            return False
-
-        if not (send(["pane", "send-text", pane, "/clear"], landed="/clear", retry="")
-                and send(["pane", "send-keys", pane, "enter"], landed="", retry="/clear")):
-            print("rollover: delivery unknown; do not re-run rollover. Check this "
-                  "pane's input line: if it shows exactly /clear, press Enter; otherwise "
-                  "clear it.", file=sys.stderr)
-            return 1
-        seen = pane_input()
-        if seen == "/clear":
-            print(f"rollover: /clear typed but not submitted in pane {pane}; press Enter there",
-                  file=sys.stderr)
-            return 1
-        if seen is None:
-            print(f"rollover: input line not found in pane {pane}; delivery unverified",
-                  file=sys.stderr)
-        print(f"rollover: queued /clear for pane {pane}; end this turn now")
-        return 0
+        return _rollover(ns)
     if ns.cmd == "write-task":
+        _require(not (ns.present and ns.binding is not None),
+                 "--present is launcher scope only; drop it with --binding")
         with _fenced_scoped(ns) as (rd, base):
             if ns.binding is not None:
                 require_not_consumed(rd, ns.binding)
@@ -4428,6 +4900,13 @@ def _main(argv=None) -> int:
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
+            if ns.present:
+                # Same transaction, from the bytes on disk, so labels never regress.
+                written = json.loads(read_payload_text(dest))
+                result = apply_workspace_label(
+                    written, task_label(written, task_ship_handoff(rd, ns.task_id, written)))
+                if result["status"] == "unsupported":
+                    sys.stderr.write(f"present: {result['reason']}\n")
             return 0
     if ns.cmd == "reset-task":
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -6397,6 +6876,39 @@ def _main(argv=None) -> int:
         except (OSError, ValueError):
             return 1
         return 0 if should_dispatch_review(task, ns.head_sha) else 1
+    if ns.cmd == "present-task":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require((ns.task_id is None) == ns.all, "pass exactly one of --task-id or --all")
+        _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
+        _require(not ns.apply or (ns.session and ns.fence is not None),
+                 "--apply needs --session and --fence")
+        if not ns.apply:
+            rd = repo_dir(ns.repo_slug)
+            if ns.all:
+                for row in present_all(rd, apply=False)[0]:
+                    print(json.dumps(row, sort_keys=True))
+                return 0
+            print(_present_row(rd, ns.task_id)[1])
+            return 0
+        # Renames run under the owner transaction so no writer interleaves.
+        with _fenced(ns) as rd:
+            if ns.all:
+                try:
+                    rows, stopped = present_all(rd, apply=True)
+                except Exception as exc:  # noqa: BLE001 -- DispatchError is lazily imported
+                    _require(False, f"present-task: workspace list failed: {exc}")
+                for row in rows:
+                    print(json.dumps(row, sort_keys=True))
+                if stopped:
+                    sys.stderr.write("[X] present-task: herdr-unavailable\n")
+                return 1 if stopped else 0
+            task, label = _present_row(rd, ns.task_id)
+            result = apply_workspace_label(task, label)
+            print(label)
+            if result["status"] == "unsupported":
+                sys.stderr.write(f"[X] present-task: {result['reason']}\n")
+                return 1
+            return 0
     if ns.cmd == "merge-ready":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
