@@ -61,7 +61,7 @@ STATE_ROOT/
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
     rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
-    rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
+    rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed|takeover, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
@@ -200,10 +200,22 @@ STATE_ROOT/
   `linux:<boot_id>:<starttime>` or `ps:<lstart>`) is written at claim.
   Same-process adoption requires it to match; a record without it (written
   before this field) still adopts by pid alone for one release.
-- Preflight claims if the file is absent or `heartbeat_ts` is stale (e.g.
-  > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
-  > director whose claim fails **yields** to read-only reporting and
-  > offers an explicit takeover.
+- **Liveness:** `claim-owner` takes the lease when the record is absent,
+  when `heartbeat_ts` is older than `--stale-secs` (default 900 s; the owner
+  refreshes it each turn), or when the holder is gone. "Gone" is judged
+  only for a Claude launcher lease whose private mirror matches the shared
+  record (`session_id`, `fence`, `pid`) and names a valid
+  `messaging_socket` for that `pid`, while no live `rollover-pending.json`
+  names the lease: the `pid` has no process (`pid-dead`); its start
+  identity differs from `pid_start` under the same scheme
+  (`pid-recycled`); or its identity is unconfirmed (no `pid_start`, or no
+  probe result) and the socket path is missing (`socket-missing`). A holder
+  whose start identity matches keeps the heartbeat rule, socket or not. A
+  handover or same-process adoption is never judged. A takeover appends a
+  `takeover` line to `rollover.jsonl` before writing the lease and prints
+  `[INFO] lease holder gone (<reason>)` on stderr. A second director whose
+  claim fails **yields** to read-only reporting and offers an explicit
+  takeover.
 
 ### `rollover-pending.json`
 
