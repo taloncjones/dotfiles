@@ -1589,10 +1589,6 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
     return "still-live"
 
 
-# Rows whose pane settle may close once every row sharing it is settled.
-PANE_CLOSING_PHASES = ("review", "ship")
-
-
 def _pane_verdict(task, row, agents, panes, reasons):
     pane_id = row["pane_id"]
     if pane_id not in [p.get("pane_id") for p in panes]:
@@ -1604,9 +1600,7 @@ def _pane_verdict(task, row, agents, panes, reasons):
     # The first row's pane is the workspace root; a repair may still follow.
     if pane_id == task["workers"][0].get("pane_id"):
         return "kept-shared"
-    if any(task["workers"][i].get("phase") not in PANE_CLOSING_PHASES
-           and "ship-report" not in (reasons(i), task["workers"][i].get("exit_requested"))
-           for i in sharing):
+    if not all(core.row_releases_pane(task, i, reasons(i)) for i in sharing):
         return "kept-shared"
     if any(reasons(i) is None for i in sharing):
         return "kept-unsettled"
@@ -1716,7 +1710,7 @@ def _settlement_reasons(task, rd, task_id, head):
 
 def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
            runtime="claude", herdr_cli="herdr", env=None, personal=False):
-    """Exit a settled worker row's idle agent and close its pane if only review or ship rows used it."""
+    """Exit a settled worker row's idle agent and close its pane once every row that used it releases it."""
     child_env, repository, scope, rd = _settle_context(
         repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "settle")
     try:
@@ -1753,7 +1747,7 @@ def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
             rows = [_settle_index(herdr_cli, task_path, task, i, reasons,
                                   workspace_id, child_env)
                     for i, w in enumerate(task.get("workers", []))
-                    if isinstance(w, dict) and w.get("phase") in PANE_CLOSING_PHASES
+                    if isinstance(w, dict) and w.get("phase") in core.PANE_CLOSING_PHASES
                     and w.get("workspace_id") == workspace_id]
             return {"status": "swept", "rows": rows}
     except (OSError, ValueError) as exc:

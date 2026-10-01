@@ -1478,6 +1478,125 @@ def test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed
         fx.close()
 
 
+def test_settle_closes_a_superseded_repair_pane_whose_agent_is_gone():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p3", head)
+        latest = settle_row("implement", "I3", "w1:p1", head)
+        fx.settle_state([impl, repair, latest], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I3"), pane("w1:p3", launch_id="I2")])
+        result = fx.settle("I2")
+        assert result["reason"] == "superseded" and result["agent"] == "absent", result
+        assert result["pane"] == "closed", result
+        assert [c for c in fx.calls() if c[:2] == ["pane", "close"]] == [["pane", "close", "w1:p3"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_non_root_pane_settled_only_by_review_approval():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        # An exit already requested on review approval: "the agent may exit" only.
+        repair = dict(settle_row("implement", "I2", "w1:p3", head), exit_requested="review-approved")
+        fx.settle_state([impl, repair], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p3", launch_id="I2")])
+        result = fx.settle("I2")
+        assert result["reason"] == "exit-requested" and result["pane"] == "kept-shared", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_review_approved_pane_after_its_agent_exits():
+    fx = Fixture()
+    original = core.is_reviewed
+    core.is_reviewed = lambda *a, **k: True
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        plan = settle_row("plan", "P", "w1:p1", head)
+        impl, rev = settle_row("implement", "I2", "w1:p3", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([plan, impl, rev], "reviewed",
+                        [{"name": "I2", "pane_id": "w1:p3", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1"), pane("w1:p2", launch_id="R"), pane("w1:p3", "claude", "idle", "I2")])
+        result = fx.settle("I2")
+        # The row's reason flips to exit-requested inside this call; the pane must not follow.
+        assert result["reason"] == "review-approved" and result["agent"] == "exited", result
+        assert result["pane"] == "kept-shared", result
+        assert fx.worker_records()[1]["exit_requested"] == "review-approved", fx.worker_records()
+        again = fx.settle("I2")
+        assert again["agent"] == "absent" and again["pane"] == "kept-shared", again
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        core.is_reviewed = original
+        fx.close()
+
+
+def test_settle_closes_a_review_approved_pane_once_superseded():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        repair = dict(settle_row("implement", "I2", "w1:p3", head), exit_requested="review-approved")
+        latest = settle_row("implement", "I3", "w1:p1", head)
+        fx.settle_state([impl, repair, latest], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I3"), pane("w1:p3", launch_id="I2")])
+        result = fx.settle("I2")
+        assert result["pane"] == "closed", result
+        assert [c for c in fx.calls() if c[:2] == ["pane", "close"]] == [["pane", "close", "w1:p3"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_the_root_pane_of_a_superseded_implement_row():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p3", head)
+        latest = settle_row("implement", "I3", "w1:p1", head)
+        fx.settle_state([impl, repair, latest], "changes-requested", [],
+                        [pane("w1:p1", launch_id="I3"), pane("w1:p3", launch_id="I2")])
+        result = fx.settle("I")
+        assert result["reason"] == "superseded" and result["pane"] == "kept-shared", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_superseded_repair_pane_with_a_busy_foreground():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p3", head)
+        latest = settle_row("implement", "I3", "w1:p1", head)
+        fx.settle_state([impl, repair, latest], "changes-requested", [],
+                        [pane("w1:p1", launch_id="I3"), pane("w1:p3", launch_id="I2")])
+        fx.env["FAKE_HERDR_MODE"] = "process-info-foreground-busy"
+        result = fx.settle("I2")
+        assert result["agent"] == "absent" and result["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_superseded_repair_pane_a_later_row_claims():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p3", head)
+        # The next repair reserved the same pane before its agent started.
+        latest = settle_row("implement", "I3", "w1:p3", head)
+        fx.settle_state([impl, repair, latest], "changes-requested", [],
+                        [pane("w1:p1", launch_id="I"), pane("w1:p3", launch_id="I3")])
+        result = fx.settle("I2")
+        assert result["reason"] == "superseded" and result["pane"].startswith("kept"), result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_background_exit_menu_regex_rejects_prose_without_the_numbered_option():
     fx = Fixture()
     try:
@@ -4162,6 +4281,13 @@ for name, test in (
     ("settle closes a pane when exit reports agent_not_found", test_settle_closes_a_pane_when_exit_reports_agent_not_found),
     ("settle keeps a pane when agent_not_running but the agent stays listed", test_settle_keeps_a_pane_when_agent_not_running_but_the_agent_stays_listed),
     ("settle never sends keys when agent_not_found but the agent stays listed", test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed),
+    ("settle closes a superseded repair pane whose agent is gone", test_settle_closes_a_superseded_repair_pane_whose_agent_is_gone),
+    ("settle keeps a non-root pane settled only by review approval", test_settle_keeps_a_non_root_pane_settled_only_by_review_approval),
+    ("settle keeps a review-approved pane after its agent exits", test_settle_keeps_a_review_approved_pane_after_its_agent_exits),
+    ("settle closes a review-approved pane once superseded", test_settle_closes_a_review_approved_pane_once_superseded),
+    ("settle keeps the root pane of a superseded implement row", test_settle_keeps_the_root_pane_of_a_superseded_implement_row),
+    ("settle keeps a superseded repair pane with a busy foreground", test_settle_keeps_a_superseded_repair_pane_with_a_busy_foreground),
+    ("settle keeps a superseded repair pane a later row claims", test_settle_keeps_a_superseded_repair_pane_a_later_row_claims),
     ("background exit menu regex rejects prose without the numbered option", test_background_exit_menu_regex_rejects_prose_without_the_numbered_option),
     ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
     ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),
