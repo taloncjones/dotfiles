@@ -1596,10 +1596,10 @@ try:
     cur = {"session_id": "S", "fence": 1, "pid": dead, "runtime": "claude",
            "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
     mirror = os.path.join(rd, "owner.json")
-    json.dump(dict(cur, messaging_socket=sock), open(mirror, "w"))
+    json.dump(dict(cur, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
     assert c._launcher_holder_gone(rd, cur, "h") == "pid-dead"
     codex = dict(cur, runtime="codex", thread_id="t")
-    json.dump(dict(codex, messaging_socket=sock), open(mirror, "w"))
+    json.dump(dict(codex, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
     assert c._launcher_holder_gone(rd, codex, "h") is None
 finally:
     shutil.rmtree(sockdir, ignore_errors=True)
@@ -1623,13 +1623,13 @@ try:
     open(mirror, "w").write("[]")
     assert c._launcher_holder_gone(rd, cur, "h") is None
     open(sockdir + "/%d.sock" % dead, "w").close()
-    json.dump(dict(cur, messaging_socket=sockdir + "/%d.sock" % dead), open(mirror, "w"))
+    json.dump(dict(cur, pid_ns=c.pid_namespace_id(), messaging_socket=sockdir + "/%d.sock" % dead), open(mirror, "w"))
     assert c._launcher_holder_gone(rd, cur, "h") == "pid-dead"
     for key, other in (("session_id", "S-other"), ("fence", 2), ("pid", dead + 1)):
-        json.dump(dict(cur, messaging_socket=sockdir + "/%d.sock" % dead, **{key: other}), open(mirror, "w"))
+        json.dump(dict(cur, pid_ns=c.pid_namespace_id(), messaging_socket=sockdir + "/%d.sock" % dead, **{key: other}), open(mirror, "w"))
         assert c._launcher_holder_gone(rd, cur, "h") is None, key
     big = dict(cur, pid=2**64)
-    json.dump(dict(big, messaging_socket=sockdir + "/%d.sock" % 2**64), open(mirror, "w"))
+    json.dump(dict(big, pid_ns=c.pid_namespace_id(), messaging_socket=sockdir + "/%d.sock" % 2**64), open(mirror, "w"))
     assert c._launcher_holder_gone(rd, big, "h") is None
 finally:
     shutil.rmtree(sockdir, ignore_errors=True)
@@ -1706,11 +1706,11 @@ try:
             "host": "host-a"}
     start = c.coordination.process_start_id(me)
     recycled = dict(base, pid_start=start.split(":", 1)[0] + ":other")
-    json.dump(dict(recycled, messaging_socket=sock), open(mirror, "w"))
+    json.dump(dict(recycled, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
     assert c._launcher_holder_gone(rd, recycled, "host-a") == "pid-recycled"
     assert c._launcher_holder_gone(rd, recycled, "host-b") is None
     nosock = dict(base)
-    json.dump(dict(nosock, messaging_socket=sock), open(mirror, "w"))
+    json.dump(dict(nosock, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
     assert c._launcher_holder_gone(rd, nosock, "host-a") == "socket-missing"
     assert c._launcher_holder_gone(rd, nosock, "host-b") is None
 finally:
