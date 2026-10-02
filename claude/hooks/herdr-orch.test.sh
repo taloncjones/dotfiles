@@ -2787,7 +2787,7 @@ assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], o
 import shutil; shutil.rmtree(sb)
 PY
 
-check "merge-ready: a merge_tree must equal git's merge of the live PR base and head" <<'PY'
+check "merge-ready: only a head that contains the live PR base is ready" <<'PY'
 import contextlib, hashlib, io, json, os, subprocess, sys, tempfile
 from pathlib import Path
 for k in ("CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
@@ -2872,23 +2872,23 @@ def run():
                      "--task-id", tid, "--pr-json", str(pf), "--repo-json", str(rf)])
     return rc, json.loads(buf.getvalue())
 
-# The true merge of the live PR base and head is ready.
-write_gate(exp)
-rc, out = run()
-assert rc == 0 and out["ready"] is True, out
-
-# A forged merge_tree that the report agrees with still fails on the live recompute.
-forged = dict(exp, merge_tree="e" * 40)
-rep["reviewed_tree"] = "e" * 40
-write_gate(forged)
+# A head behind the live PR base is never ready, even when the handoff carries a
+# stray merge_tree that matches git's merge of the two.
+rep["reviewed_tree"] = merged
+write_gate(dict(exp, merge_tree=merged))
 rc, out = run()
 codes = [r["code"] for r in out["reasons"]]
 assert rc == 1 and out["ready"] is False and "identity" in codes, out
-assert any("merge_tree" in r["detail"] for r in out["reasons"] if r["code"] == "identity"), out
 
-# Main moved past a true merge_tree: base-moved alone, so section 6 rule (c) re-gates.
-rep["reviewed_tree"] = merged
-write_gate(exp)
+# Same head, no merge_tree: still behind, still not ready.
+rep["reviewed_tree"] = tree
+bare = {k: v for k, v in exp.items() if k != "merge_tree"}
+write_gate(bare)
+rc, out = run()
+codes = [r["code"] for r in out["reasons"]]
+assert rc == 1 and out["ready"] is False and "identity" in codes, out
+
+# Main moved: base-moved alone, so section 6 rule (c) re-gates.
 # baseRefOid still equals the handoff base (it lags); only origin's live tip shows the move.
 git(repo, "checkout", "-q", "upstream")
 commit_file(repo, "origin_newer.txt", "n\n", "main moves again")
@@ -2903,16 +2903,7 @@ rc, out = run()
 assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
 (sb / "origin-p.git.gone").rename(origin)
 
-# No merge_tree and a head behind the PR base: the reviewed tree is not the merge result.
-pr["baseRefOid"] = pr_base
-rep["reviewed_tree"] = tree
-bare = {k: v for k, v in exp.items() if k != "merge_tree"}
-write_gate(bare)
-rc, out = run()
-codes = [r["code"] for r in out["reasons"]]
-assert rc == 1 and out["ready"] is False and "identity" in codes, out
-
-# No merge_tree and a head that contains the PR base stays ready.
+# A head that contains the live PR base stays ready.
 git(repo, "checkout", "-q", "-b", "uptodate", pr_base)
 commit_file(repo, "feature2.txt", "f2\n", "feature on top of base")
 head2 = git(repo, "rev-parse", "HEAD"); tree2 = git(repo, "rev-parse", "HEAD^{tree}")

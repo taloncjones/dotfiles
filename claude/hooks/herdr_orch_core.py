@@ -4566,26 +4566,14 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     elif not expected.get("base") == handoff.get("base_sha") == base_tip:
         fail("base-moved", f"expected={expected.get('base')} handoff={handoff.get('base_sha')} "
                            f"live={base_tip}")
-    elif expected.get("merge_tree") is not None:
-        # A behind-path gate reviewed git's merge of the PR base and head; recompute
-        # it from live state so a coordinator-written merge_tree cannot stand alone.
-        want_merge = expected["merge_tree"]
-        try:
-            merged = context_git(worktree, "merge-tree", "--write-tree",
-                                 base_tip, str(live_head)).strip()
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            merged = f"unavailable ({exc})"
-        if merged != want_merge:
-            fail("identity", f"expected merge_tree {want_merge}; git's merge of "
-                             f"{base_tip} and {live_head} is {merged}")
     else:
-        # Without a merge_tree the reviewed tree is the head tree, which only
-        # stands for the merge result when the head already contains the PR base.
+        # The reviewed tree is the head tree, which stands for the squash merge
+        # only when the head already contains the live PR base.
         try:
             context_git(worktree, "merge-base", "--is-ancestor",
                         base_tip, str(live_head))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            fail("identity", f"no merge_tree and head {live_head} does not contain "
+            fail("identity", f"head {live_head} does not contain "
                              f"live base {base_tip}: {exc}")
     default = (repo.get("defaultBranchRef") or {}).get("name")
     if (expected.get("repository") != repo.get("nameWithOwner")
