@@ -314,5 +314,43 @@ test_serve_ignores_inherited_lock_marker() {
 }
 test_serve_ignores_inherited_lock_marker
 
+test_serve_open_keeps_token_out_of_argv() {
+  local rec argv_file out3 err3 pid3 token3 argv target mode owner dir
+  rec=$(mktemp); argv_file=$(mktemp); out3=$(mktemp); err3=$(mktemp)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" >"%s"\n' "$argv_file" >"$rec"
+  chmod 700 "$rec"
+  (cd "$REPO" && TODOS_STATE_ROOT="$STATE" TODOS_DASHBOARD_OPENER="$rec" \
+    exec bash "$TODOS" serve --runtime claude --port 0 --open) >"$out3" 2>"$err3" &
+  pid3=$!
+  for _ in $(seq 1 100); do [ -s "$err3" ] && [ -s "$argv_file" ] && break; sleep 0.1; done
+  token3=$(head -1 "$err3" | sed -n 's/.*[?]t=\([^&]*\)$/\1/p')
+  argv=$(cat "$argv_file")
+  assert_missing "serve --open: opener argv has no token" "$argv" "$token3"
+  assert_missing "serve --open: opener argv has no query string" "$argv" "?t="
+  target=${argv#file://}
+  if [ -f "$target" ] && [ ! -L "$target" ]; then
+    ok "serve --open: opener gets a regular file"
+    mode=$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$target")
+    owner=$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_uid == os.getuid())' "$target")
+    assert_eq "serve --open: redirect file is mode 0600" "$mode" "0o600"
+    assert_eq "serve --open: redirect file is owned by the user" "$owner" "True"
+    assert_contains "serve --open: redirect file refreshes to the token URL" "$(cat "$target")" "http-equiv=\"refresh\""
+    assert_contains "serve --open: redirect file carries the token URL" "$(cat "$target")" "$(head -1 "$err3")"
+  else
+    bad "serve --open: opener gets a regular file" "argv [$argv]"
+  fi
+  assert_eq "serve --open: stdout is the bare URL" "$(sed -n 's/^\(http:\/\/127\.0\.0\.1:[0-9]*\/\)$/\1/p' "$out3" | head -1)" "$(head -1 "$out3")"
+  assert_eq "serve --open: stderr is the single token URL" "$(wc -l <"$err3" | tr -d ' ')" "1"
+  dir=$(dirname "$target")
+  kill "$pid3" 2>/dev/null; wait "$pid3" 2>/dev/null
+  if [ -e "$target" ] || [ -d "$dir" ]; then
+    bad "serve --open: redirect file removed on exit" "still present: $target"
+  else
+    ok "serve --open: redirect file removed on exit"
+  fi
+  rm -f "$rec" "$argv_file" "$out3" "$err3"
+}
+test_serve_open_keeps_token_out_of_argv
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -13,9 +13,13 @@ notes. The token URL is printed once on stderr.
 import argparse
 import hmac
 import os
+import html
 import secrets
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -173,6 +177,23 @@ class BoardServer(HTTPServer):
         self.token = secrets.token_urlsafe(32)
 
 
+def write_redirect(token_url):
+    """Write a private HTML redirect to token_url; return (directory, file path).
+
+    The opener gets this path, so the token never appears in a process argv.
+    """
+    d = tempfile.mkdtemp(prefix="todos-serve-")
+    path = os.path.join(d, "open.html")
+    href = html.escape(token_url, quote=True)
+    page = ('<!doctype html><meta charset="utf-8">'
+            f'<meta http-equiv="refresh" content="0; url={href}">'
+            f'<a href="{href}">Open the todo board</a>\n')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(page)
+    return d, path
+
+
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     ctx = board.board_context(args)
@@ -184,14 +205,19 @@ def main(argv=None):
     token_url = f"{url}?t={server.token}"
     print(url, flush=True)
     print(token_url, file=sys.stderr, flush=True)
-    if args.open:
-        board.open_file(token_url)
+    redirect_dir = None
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
+        if args.open:
+            redirect_dir, redirect_file = write_redirect(token_url)
+            board.open_file(redirect_file)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        if redirect_dir:
+            shutil.rmtree(redirect_dir, ignore_errors=True)
     return 0
 
 

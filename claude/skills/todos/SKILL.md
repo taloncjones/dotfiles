@@ -253,7 +253,7 @@ atomically so a half-written file is never seen.
 `todos.sh serve` renders the same board at `http://127.0.0.1:<port>/`
 (`--port 0`, the default, lets the OS pick). It prints the bare address on
 stdout and the URL with the per-run token (`/?t=<token>`) on stderr;
-`--open` opens the token URL. Every request re-reads `.todos/`, so a reload always shows the
+`--open` opens a private redirect file so the token stays out of the process list. Every request re-reads `.todos/`, so a reload always shows the
 files as they are now. In each pending todo's expanded row there is a form
 under its Problem, Solution and Verification sections; completed todos
 are read-only. Stop the server with Ctrl-C.
