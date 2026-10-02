@@ -51,6 +51,8 @@ MERGE_TREE=$(uv run --no-project python -c 'import json,sys; print(json.load(ope
 if [ -n "$MERGE_TREE" ]; then
   MERGED=$(git merge-tree --write-tree "$BASE" "$HEAD") || exit 2
   [ "$MERGED" = "$MERGE_TREE" ] || exit 2
+else
+  git merge-base --is-ancestor "$BASE" "$HEAD" || exit 2
 fi
 # Normalize statusCheckRollup into the strict CI envelope with the actual
 # headRefOid, required check_runs/status_contexts arrays, and each returned

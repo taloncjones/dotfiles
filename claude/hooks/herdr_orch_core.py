@@ -4567,6 +4567,15 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
         if merged != want_merge:
             fail("identity", f"expected merge_tree {want_merge}; git's merge of "
                              f"{pr.get('baseRefOid')} and {live_head} is {merged}")
+    else:
+        # Without a merge_tree the reviewed tree is the head tree, which only
+        # stands for the merge result when the head already contains the PR base.
+        try:
+            context_git(worktree, "merge-base", "--is-ancestor",
+                        str(pr.get("baseRefOid")), str(live_head))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            fail("identity", f"no merge_tree and head {live_head} does not contain "
+                             f"PR base {pr.get('baseRefOid')}: {exc}")
     default = (repo.get("defaultBranchRef") or {}).get("name")
     if (expected.get("repository") != repo.get("nameWithOwner")
             or expected.get("pr_number") != pr.get("number")

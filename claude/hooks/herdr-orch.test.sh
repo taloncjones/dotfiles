@@ -2625,6 +2625,7 @@ def sha(p):
 def build(repo, tid="td-merge", launch="ship-a1"):
     slug = c._context_slug(w.repository_context(str(repo)))
     head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+    base = head  # a real object, contained in head
     c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
                                       "runtime": "claude", "personal": False})())
     rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
@@ -2635,12 +2636,12 @@ def build(repo, tid="td-merge", launch="ship-a1"):
     (ld / "ci.json").write_text(json.dumps(ci))
     rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
     for obj in (rep, exp):
-        obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base="b" * 40, base_ref="main")
+        obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base=base, base_ref="main")
     rep["reviewed_tree"] = tree
     rep["preconditions"].update(head=head, tree=tree)
     (ld / "report.json").write_text(json.dumps(rep)); (ld / "expected.json").write_text(json.dumps(exp))
     hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
-            "base_ref": "main", "base_sha": "b" * 40, "tree_sha": tree,
+            "base_ref": "main", "base_sha": base, "tree_sha": tree,
             "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
             "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
             "verdict": "APPROVE", "written_at": "t"}
@@ -2651,7 +2652,7 @@ def build(repo, tid="td-merge", launch="ship-a1"):
             "merge_check": None}
     (rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
     pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
-          "headRefOid": head, "baseRefName": "main", "baseRefOid": "b" * 40,
+          "headRefOid": head, "baseRefName": "main", "baseRefOid": base,
           "statusCheckRollup": [{"__typename": "CheckRun", "name": "tests",
                                  "status": "COMPLETED", "conclusion": "SUCCESS"}]}
     rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
@@ -2737,10 +2738,10 @@ assert rc == 1 and out["handoff_state"] == "current", out
 head0 = task["review_head_sha"]
 expect("merge-refused", task_edit=lambda t: t.update(merge_check={
     "result": "fail", "reason": "protected", "branch_head_sha": head0,
-    "base_main_sha": "b" * 40, "ts": "t"}))
+    "base_main_sha": pr["baseRefOid"], "ts": "t"}))
 # The same refusal at an older head is stale and does not block.
 t_old = dict(task, merge_check={"result": "fail", "reason": "protected",
-                                "branch_head_sha": "c" * 40, "base_main_sha": "b" * 40, "ts": "t"})
+                                "branch_head_sha": "c" * 40, "base_main_sha": pr["baseRefOid"], "ts": "t"})
 (rd / "tasks" / f"{tid}.json").write_text(json.dumps(t_old))
 rc, out = run(personal, slug, tid, pr, rp)
 assert rc == 0 and out["ready"] is True, out
@@ -2868,6 +2869,33 @@ write_gate(exp)
 pr["baseRefOid"] = "d" * 40
 rc, out = run()
 assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+
+# No merge_tree and a head behind the PR base: the reviewed tree is not the merge result.
+pr["baseRefOid"] = pr_base
+rep["reviewed_tree"] = tree
+bare = {k: v for k, v in exp.items() if k != "merge_tree"}
+write_gate(bare)
+rc, out = run()
+codes = [r["code"] for r in out["reasons"]]
+assert rc == 1 and out["ready"] is False and "identity" in codes, out
+
+# No merge_tree and a head that contains the PR base stays ready.
+git(repo, "checkout", "-q", "-b", "uptodate", pr_base)
+commit_file(repo, "feature2.txt", "f2\n", "feature on top of base")
+head2 = git(repo, "rev-parse", "HEAD"); tree2 = git(repo, "rev-parse", "HEAD^{tree}")
+ci["head"] = head2
+(ld / "ci.json").write_text(json.dumps(ci))
+rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
+for obj in (rep, bare):
+    obj.update(head=head2, tree=tree2)
+rep["reviewed_tree"] = tree2
+rep["preconditions"].update(head=head2, tree=tree2)
+head, tree = head2, tree2
+pr["headRefOid"] = head2
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(dict(task, review_head_sha=head2, branch="uptodate")))
+write_gate(bare)
+rc, out = run()
+assert rc == 0 and out["ready"] is True, out
 PY
 
 check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
