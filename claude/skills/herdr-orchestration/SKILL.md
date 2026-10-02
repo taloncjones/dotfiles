@@ -1454,7 +1454,9 @@ ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
 its launch directory, and no merge authority.
 The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
-gate under rule (c) gates the current PR base.
+gate under rule (c) gates the current PR base. The gate requires an
+up-to-date branch: when the head does not contain the live base, merge the
+base into the branch and rely on carry-forward.
 
 Once its `ship.json` is written, the idle ship agent settles as
 `handoff-recorded`: run

@@ -69,7 +69,8 @@ includes a fresh `run_id`, and supplies `known_blockers` as an empty list when
 there are none.
 
 Do not read historical comments or markers for authority. Record a dirty source
-checkout, but still freeze it for findings; equality of the reviewed tree with the committed expected tree, or with `expected.merge_tree` when it is set, is required later for approval. `SNAPSHOT_DIR` is empty
+checkout, but still freeze it for findings; equality of the committed expected
+tree and reviewed tree is required later for approval. `SNAPSHOT_DIR` is empty
 and reserved only for `review.py`; `RUN_DIR` holds prompts, runtime results,
 diff, CI, expected identity, and report. Prepare and verify one snapshot:
 
@@ -88,20 +89,17 @@ uv run --no-project python "$REVIEW_HELPER" verify --manifest "$MANIFEST"
 
 For a PR gate, read the live base tip from `git ls-remote` (not `baseRefOid`, which can lag) into `PR_BASE` before
 `prepare` and write it as `expected.base`; the manifest's `source.base`
-must equal it. After `verify` and before any seat runs, write
-`source.merge_tree` as `expected.merge_tree`, in the same write that sets
-`class`. When head does not contain the PR base, `prepare` freezes git's
-merge of the PR base and head, so the frozen diff below is the change the
-squash merge makes on the current base, and `report.reviewed_tree` must
-equal `expected.merge_tree`; when the PR base is the merge-base,
-`source.merge_tree` is null. An interruption between `prepare` and that
-write invalidates the run: start a new `run_id` with a fresh
-`SNAPSHOT_DIR`, and never patch an existing expected identity.
+must equal it. The gate needs an up-to-date branch: `prepare` refuses a head
+that does not contain the live base. When it refuses, merge the base into the
+branch and re-run; the carry-forward rule keeps an APPROVE across a clean
+merge of the base. The reviewed tree is the head tree, which a squash merge of
+an up-to-date branch reproduces exactly.
 
 Read `source.base`, `source.head`, `source.repo_id`, `source.source_tree`,
 `snapshot.codex_root`, `snapshot.claude_root`, and `snapshot.codex_tree` from
 the verified manifest. `source.source_tree` binds `expected.tree` and
-`snapshot.codex_tree` binds `report.reviewed_tree`; the reviewed tree must equal `expected.tree`, or `expected.merge_tree` when it is set; a mismatch is incomplete for approval, not an early review abort. Capture the frozen diff and CI JSON
+`snapshot.codex_tree` binds `report.reviewed_tree`; their mismatch is incomplete
+for approval, not an early review abort. Capture the frozen diff and CI JSON
 response for that exact expected head:
 
 ```bash

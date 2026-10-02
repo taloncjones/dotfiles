@@ -62,14 +62,13 @@ separate from the report before the snapshot. It gets repository, PR number, ful
 full base, base branch, committed tree, and CI for the actual target. Verify
 that the PR target repository is the fetch target before resolving `--base-ref`.
 For a PR, read the live base tip from `git ls-remote origin refs/heads/<base>` (not `baseRefOid`, which can lag) before `prepare`, write it as
-`expected.base`, and pass it as `--pr-base` with `--base-ref`. After
-`review.py verify` and before any seat runs, write the manifest's
-`source.merge_tree` as `expected.merge_tree`; an interruption in between
-invalidates the run, and a fresh `run_id` starts over. A branch behind its
-PR base is frozen as git's merge of the two, and `report.reviewed_tree`
-must then equal `expected.merge_tree`.
+`expected.base`, and pass it as `--pr-base` with `--base-ref`. The gate needs
+an up-to-date branch: `prepare` refuses a head behind that base. Merge the base
+into the branch and re-run; the carry-forward rule keeps an APPROVE across a
+clean merge of the base.
 Prepare and verify one frozen snapshot with `review.py prepare` and
-`review.py verify`; a dirty source is still frozen for findings, but a mismatch with the committed tree, or with `expected.merge_tree` when it is set, makes approval incomplete. A local no-PR review cannot fabricate a
+`review.py verify`; a dirty source is still frozen for findings, but a committed
+tree mismatch makes approval incomplete. A local no-PR review cannot fabricate a
 PR number or claim `APPROVE`. Capture and hash the frozen diff and exact-head
 CI payload as precondition artifacts:
 

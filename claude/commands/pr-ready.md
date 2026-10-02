@@ -47,13 +47,8 @@ for key, value in actual.items():
     if expected.get(key) != (int(value) if key == "pr_number" else value):
         raise SystemExit(f"active identity changed: {key}")
 PY
-MERGE_TREE=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("merge_tree") or "")' "$EXPECTED_IDENTITY") || exit 2
-if [ -n "$MERGE_TREE" ]; then
-  MERGED=$(git merge-tree --write-tree "$BASE" "$HEAD") || exit 2
-  [ "$MERGED" = "$MERGE_TREE" ] || exit 2
-else
-  git merge-base --is-ancestor "$BASE" "$HEAD" || exit 2
-fi
+# The gate needs an up-to-date branch: the live base must be inside the head.
+git merge-base --is-ancestor "$BASE" "$HEAD" || exit 2
 # Normalize statusCheckRollup into the strict CI envelope with the actual
 # headRefOid, required check_runs/status_contexts arrays, and each returned
 # check identity/status/conclusion or context identity/state. Refresh the
@@ -62,7 +57,7 @@ uv run --no-project python "$GATE_REPORT" evaluate \
   --report "$ACTIVE_CO_REVIEW_REPORT" --expected "$EXPECTED_IDENTITY"
 ```
 
-A moved PR base fails the identity check (`active identity changed: base`); it needs a fresh co-review gate on the same head. Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
+A moved PR base fails the identity check (`active identity changed: base`), and a head that does not contain the live base stops the command: merge the base into the branch, then re-gate (carry-forward keeps an APPROVE across a clean merge of the base). Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
 missing active evidence, evaluator `CHANGES`/`INCOMPLETE`, or CI failure stops
 and returns control to the user. Preserve the calling workflow's stop; do not
 turn it into an automatic review request. Evaluator approval does not authorize a merge:

@@ -65,7 +65,7 @@ gate.
    and removes the active expected identity, so it always requires a new gate.
    Read the expected file and stop unless its
    repository, PR number, head, base, base branch, and tree exactly equal the
-   live values. When its `merge_tree` is set, also stop unless `git merge-tree --write-tree <live-base> <head>` exits 0 and prints exactly that tree; when it is unset, stop unless `git merge-base --is-ancestor <live-base> <head>` succeeds. Refresh its exact-head CI artifact and digest, then
+   live values. Also stop unless `git merge-base --is-ancestor <live-base> <head>` succeeds; a behind branch needs the base merged in, then carry-forward. Refresh its exact-head CI artifact and digest, then
    invoke `gate_report.py evaluate --report REPORT --expected EXPECTED`. The
    co-review snapshot has already been verified and cleaned; this step checks
    live source/PR identity and retained report artifacts, not a deleted manifest.
@@ -75,7 +75,8 @@ gate.
    this step. One exception: a head whose only new commits since the gated
    head merge the base branch keeps the verdict when the co-review skill's
    `carry-forward` command exits 0 against this workflow's retained report and
-   expected identity and their digests; keep its record, redo this step's live recheck against the new head (the carry-forward record's proofs replace the `merge_tree` recompute there), and continue without a new round.
+   expected identity and their digests; keep its record, redo this step's live
+   recheck against the new head, and continue without a new round.
 
 5. **Audit comment.** Only in this same uninterrupted workflow, right after
    step 4 passes (an interrupted workflow stops under the existing step 3/4
