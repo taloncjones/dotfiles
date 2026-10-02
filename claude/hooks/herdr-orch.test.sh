@@ -1597,10 +1597,10 @@ try:
            "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
     mirror = os.path.join(rd, "owner.json")
     json.dump(dict(cur, messaging_socket=sock), open(mirror, "w"))
-    assert c._launcher_holder_gone(rd, cur) == "pid-dead"
+    assert c._launcher_holder_gone(rd, cur, "h") == "pid-dead"
     codex = dict(cur, runtime="codex", thread_id="t")
     json.dump(dict(codex, messaging_socket=sock), open(mirror, "w"))
-    assert c._launcher_holder_gone(rd, codex) is None
+    assert c._launcher_holder_gone(rd, codex, "h") is None
 finally:
     shutil.rmtree(sockdir, ignore_errors=True)
 PY
@@ -1617,20 +1617,20 @@ try:
            "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
     mirror = os.path.join(rd, "owner.json")
     assert c._launcher_holder_gone(rd, None) is None
-    assert c._launcher_holder_gone(rd, cur) is None
+    assert c._launcher_holder_gone(rd, cur, "h") is None
     open(mirror, "w").write("not json")
-    assert c._launcher_holder_gone(rd, cur) is None
+    assert c._launcher_holder_gone(rd, cur, "h") is None
     open(mirror, "w").write("[]")
-    assert c._launcher_holder_gone(rd, cur) is None
+    assert c._launcher_holder_gone(rd, cur, "h") is None
     open(sockdir + "/%d.sock" % dead, "w").close()
     json.dump(dict(cur, messaging_socket=sockdir + "/%d.sock" % dead), open(mirror, "w"))
-    assert c._launcher_holder_gone(rd, cur) == "pid-dead"
+    assert c._launcher_holder_gone(rd, cur, "h") == "pid-dead"
     for key, other in (("session_id", "S-other"), ("fence", 2), ("pid", dead + 1)):
         json.dump(dict(cur, messaging_socket=sockdir + "/%d.sock" % dead, **{key: other}), open(mirror, "w"))
-        assert c._launcher_holder_gone(rd, cur) is None, key
+        assert c._launcher_holder_gone(rd, cur, "h") is None, key
     big = dict(cur, pid=2**64)
     json.dump(dict(big, messaging_socket=sockdir + "/%d.sock" % 2**64), open(mirror, "w"))
-    assert c._launcher_holder_gone(rd, big) is None
+    assert c._launcher_holder_gone(rd, big, "h") is None
 finally:
     shutil.rmtree(sockdir, ignore_errors=True)
 PY
@@ -1656,6 +1656,48 @@ assert last["v"] == 2 and last["event"] == "takeover", last
 assert (last["reason"], last["from_session"], last["from_fence"], last["from_pid"], last["session"]) == ("pid-dead", "S1", f1, dead, "S2"), last
 PY
 SH
+
+check "liveness: a dead-looking holder on another host keeps BUSY and its fence" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+F1=$($CLI claim-owner --repo-slug slug-host --session S1 --host host-a --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock")
+rc=0; out=$($CLI claim-owner --repo-slug slug-host --session S2 --host host-b --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>"$SOCKS/err") || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+if grep -q 'lease holder gone' "$SOCKS/err"; then exit 1; fi
+[ ! -e "$root/herdr-orch/slug-host/rollover.jsonl" ]
+python3 -c "import json,sys; o=json.load(open(sys.argv[1])); assert o['session_id']=='S1' and o['fence']==int(sys.argv[2]), o" "$root/herdr-orch/slug-host/owner.json" "$F1"
+SH
+
+check "liveness helper: pid-recycled and socket-missing need the claimant's host" <<PY
+$LOAD
+import random, shutil, subprocess
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = os.path.join(root, "herdr-orch", "slug-unit"); os.makedirs(rd)
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+try:
+    me = os.getpid()
+    sock = sockdir + "/%d.sock" % me
+    mirror = os.path.join(rd, "owner.json")
+    base = {"session_id": "S", "fence": 1, "pid": me, "runtime": "claude",
+            "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0,
+            "host": "host-a"}
+    start = c.coordination.process_start_id(me)
+    recycled = dict(base, pid_start=start.split(":", 1)[0] + ":other")
+    json.dump(dict(recycled, messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, recycled, "host-a") == "pid-recycled"
+    assert c._launcher_holder_gone(rd, recycled, "host-b") is None
+    nosock = dict(base)
+    json.dump(dict(nosock, messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, nosock, "host-a") == "socket-missing"
+    assert c._launcher_holder_gone(rd, nosock, "host-b") is None
+finally:
+    shutil.rmtree(sockdir, ignore_errors=True)
+PY
 
 check "liveness: a live holder with its socket keeps BUSY" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"

@@ -203,7 +203,8 @@ STATE_ROOT/
 - **Liveness:** `claim-owner` takes the lease when the record is absent,
   when `heartbeat_ts` is older than `--stale-secs` (default 900 s; the owner
   refreshes it each turn), or when the holder is gone. "Gone" is judged
-  only for a Claude launcher lease whose private mirror matches the shared
+  only for a Claude launcher lease on the claimant's own `host` (a lease
+  with no `host` field is judged as before) whose private mirror matches the shared
   record (`session_id`, `fence`, `pid`) and names a valid
   `messaging_socket` for that `pid`, while no live `rollover-pending.json`
   names the lease: the `pid` has no process (`pid-dead`); its start

@@ -2278,12 +2278,16 @@ def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) 
     )
 
 
-def _launcher_holder_gone(rd, cur):
+def _launcher_holder_gone(rd, cur, host=None):
     """Why the Claude process behind launcher lease cur is provably gone, or
     None. Only a lease whose private mirror matches cur and names a valid
-    socket for its pid qualifies: without one, pid is whatever --pid was."""
+    socket for its pid qualifies: without one, pid is whatever --pid was.
+    A lease from another host is never judged: pids are local to a host.
+    host=None skips that check (callers without a claimant)."""
     if (cur is None or cur.get("control_tier", "launcher") != "launcher"
             or cur.get("runtime", "claude") != "claude"):
+        return None
+    if host is not None and cur.get("host") is not None and cur["host"] != host:
         return None
     try:
         mirror = json.loads(read_payload_text(_owner_path(rd)))
@@ -2492,7 +2496,7 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
         # A handover or a same-process adoption already proves who holds it.
         if (old is not None and handover_from is None
                 and not tx._adoptable(old, adopt_pid, runtime, thread_id, adopt_start)):
-            gone = _launcher_holder_gone(rd, old)
+            gone = _launcher_holder_gone(rd, old, host)
         takeover = gone is not None and old["session_id"] != session_id
         if takeover:
             # Logged before the lease, like adopted: a line with no matching
