@@ -108,12 +108,14 @@ normally on the next `git add`.
 | `todos.sh ready <exact-todo-id> [--offline\|--online]`                                                       | Read-only JSON dependency verdict for one exact pending todo; offline by default              |
 | `todos.sh done <slug-or-substring>`                                                                          | Move a todo `pending/ -> completed/`                                                          |
 | `todos.sh depend <slug-or-substring> REF...`                                                                 | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes    |
+| `todos.sh note <exact-id> <Problem\|Solution\|Verification> [--expect-sha HEX]`                               | Append stdin as a note to one PRD section of a pending todo (see "Serve and notes")           |
 | `todos.sh index`                                                                                             | Regenerate `TODO.md`                                                                          |
 | `todos.sh share`                                                                                             | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
 | `todos.sh path`                                                                                              | Print the `.todos/` directory path                                                            |
 | `todos.sh dashboard [--runtime claude\|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]` | Render the local HTML board in the selected account scope                                     |
+| `todos.sh serve [--runtime claude\|codex] [--personal] [--port N] [--open] [--online] [--completed N]`       | Serve the board on 127.0.0.1 with note forms on pending todos                                 |
 
-`new` and `done` regenerate `TODO.md` automatically, so the index never drifts.
+`new`, `done`, `depend` and `note` regenerate `TODO.md` automatically, so the index never drifts.
 
 ## Time model & the brief
 
@@ -203,7 +205,12 @@ elsewhere); `--out PATH` writes elsewhere; `--completed N` sets how many
 completed todos to show (default 10, 0 hides the section).
 
 The page is inert: no script, no remote assets, no server. Regenerate
-and reload the tab to refresh. For repeated refresh, resolve `scripts/todos.sh` from this loaded skill
+and reload the tab to refresh. Every row expands in place (a native
+`<details>`, still no script) to show the todo's rendered body: the text
+before the first `## ` heading and every section, with paragraphs, lists,
+`###` headings, inline code, bold and `http(s)` links; fenced blocks and
+tables show as preformatted text, and everything else as escaped text.
+To add notes from the browser, use `todos.sh serve` instead. For repeated refresh, resolve `scripts/todos.sh` from this loaded skill
 and rerun `dashboard` with the same runtime/account options. Do not resolve
 it from another runtime's personal installation.
 
@@ -240,6 +247,49 @@ What each row shows:
 The renderer never writes under `.todos/` or the state root (it refuses
 such an output path), never regenerates `TODO.md`, and writes the page
 atomically so a half-written file is never seen.
+
+## Serve and notes
+
+`todos.sh serve` renders the same board at `http://127.0.0.1:<port>/`
+(`--port 0`, the default, lets the OS pick). It prints the bare address on
+stdout and the URL with the per-run token (`/?t=<token>`) on stderr;
+`--open` opens a private redirect file so the token stays out of the process list. Every request re-reads `.todos/`, so a reload always shows the
+files as they are now. In each pending todo's expanded row there is a form
+under its Problem, Solution and Verification sections; completed todos
+are read-only. Stop the server with Ctrl-C.
+
+The form goes through `todos.sh note`, the only writer, which agents can
+call directly:
+
+```bash
+printf 'An idea for later.\n' | todos.sh note 2026-10-01-some-todo Solution
+```
+
+- `note` takes an exact pending id, never a substring, and one of
+  `Problem`, `Solution` or `Verification`.
+- It inserts a blank line and the note after the section's last line (in
+  the last such section when a heading repeats), regenerates `TODO.md`, and
+  commits and pushes a store-backed `.todos` like `depend` does.
+- A note is printable ASCII, tabs and newlines, at most 4000 bytes, with
+  no heading or code-fence lines.
+- `--expect-sha HEX` refuses the write (exit 3) when the file's SHA-256 is
+  not HEX. The form always sends the hash of the file it rendered, so a
+  todo changed on disk after the page loaded is never overwritten: reload
+  and add the note again.
+- Exit 2 is a refused note, section or id. On every non-zero exit the file
+  is unchanged; exit 0 means the note is in the file.
+
+`note`, `depend` and `done` hold `todos-sync.lock` in the git common dir of
+the repo that holds `.todos`, in local mode too, so they never lose each
+other's writes. A busy lock exits 1 after `TODOS_LOCK_WAIT` seconds.
+
+The server binds 127.0.0.1 only, answers only requests whose `Host`
+header names that address and port, and requires the per-run token on
+every request: `?t=<token>` on a GET, a hidden field on each form. A
+request without the right token gets a 403 that never shows a todo or the
+token, so other websites and other local processes can neither read the
+board nor post notes. Pages send `Referrer-Policy: no-referrer`. A tab
+left open across a server restart gets a 403; reopen the printed URL.
 
 ## Research reports
 

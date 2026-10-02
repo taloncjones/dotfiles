@@ -23,6 +23,8 @@
 #   todos.sh share                      stop ignoring .todos/ (commit in this repo)
 #   todos.sh path                       print the .todos/ directory path
 #   todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]   render the HTML board
+#   todos.sh serve [--port N] [--open] [--online] [--completed N]   serve the board on 127.0.0.1 with note forms
+#   todos.sh note <exact-id> <Problem|Solution|Verification> [--expect-sha HEX]   append stdin to a section
 #   todos.sh sync                       commit, pull and push a store-backed .todos
 #   todos.sh import <dir>               merge a directory of todos in (newest wins)
 #
@@ -37,6 +39,7 @@ set -euo pipefail
 TODOS_DIRNAME=".todos"
 TODOS_SCRIPT="${BASH_SOURCE[0]}"
 TODOS_HELPER="$(cd "$(dirname "$TODOS_SCRIPT")" && pwd)/todos_store.py"
+TODOS_PRD="$(cd "$(dirname "$TODOS_SCRIPT")" && pwd)/todos_prd.py"
 STORE_REPO=""
 STORE_SYNC=1
 STORE_PUSH=1
@@ -503,6 +506,23 @@ store_locked() {
   exit "$rc"
 }
 
+todos_locked() {
+  # store_locked for the verbs that rewrite or move a todo (note, depend,
+  # done): a local .todos locks too, keyed on the git repo that holds the
+  # resolved .todos so worktrees sharing one backlog share one lock.
+  if [ -n "$STORE_REPO" ]; then store_locked; return 0; fi
+  [ -z "${TODOS_STORE_LOCKED:-}" ] || return 0
+  command -v python3 >/dev/null 2>&1 || die "this verb needs python3 to lock .todos"
+  local dir common rc=0
+  dir=$(store_dir 2>/dev/null) || dir=$(repo_root)
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || common=$(git -C "$(repo_root)" rev-parse --path-format=absolute --git-common-dir)
+  TODOS_STORE_LOCKED=1 python3 "$TODOS_HELPER" lock "$common/todos-sync.lock" "${TODOS_LOCK_WAIT:-10}" \
+    -- bash "$TODOS_SCRIPT" "${TODOS_ARGV[@]}" || rc=$?
+  [ "$rc" -ne 75 ] || die ".todos is busy"
+  exit "$rc"
+}
+
 store_repair() {
   # 0 when git steps may run. Aborts only a rebase whose orig-head matches
   # the oid this script wrote to the marker; a stale marker is just removed.
@@ -798,7 +818,8 @@ cmd_done() {
   [ "$#" -ge 1 ] || die "done requires a slug or substring"
   local query="$1"
   store_setup
-  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  todos_locked
+  if [ -n "$STORE_REPO" ]; then store_begin; fi
   local root pending completed
   root=$(repo_root)
   pending="$root/$TODOS_DIRNAME/pending"
@@ -819,7 +840,8 @@ cmd_depend() {
   local query="$1"; shift
   [ "$#" -ge 1 ] || die "depend requires at least one ref"
   store_setup
-  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  todos_locked
+  if [ -n "$STORE_REPO" ]; then store_begin; fi
   local target base refs=() ref d
   target=$(find_pending "$query") || exit 1
   base=$(basename "$target" .md)
@@ -832,6 +854,30 @@ cmd_depend() {
   regenerate_index
   store_end "todos: depend" "$(store_dir)/pending/$base.md"
   printf '%s\n' "$target"
+}
+
+note_refuse() { printf 'todos: note: %s\n' "$1" >&2; exit 2; }
+
+cmd_note() {
+  # note <exact-id> <section> [--expect-sha HEX], note text on stdin: the one
+  # writer behind `todos.sh serve`. Exact pending ids only, append-only.
+  [ "$#" -eq 2 ] || { [ "$#" -eq 4 ] && [ "$3" = --expect-sha ]; } \
+    || note_refuse "usage: todos.sh note <exact-id> <Problem|Solution|Verification> [--expect-sha HEX]"
+  local id="$1" section="$2" f
+  store_setup
+  todos_locked
+  # git and ssh children must not read the note from stdin.
+  if [ -n "$STORE_REPO" ]; then store_begin </dev/null; fi
+  f="$(repo_root)/$TODOS_DIRNAME/pending/$id.md"
+  if [[ ! "$id" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] \
+     || [ ! -f "$f" ] || [ -L "$f" ]; then
+    note_refuse "no pending todo '$id'"
+  fi
+  python3 "$TODOS_PRD" append "$f" "$section" "${@:3}" || exit $?
+  # The note is in the file from here on: exit 0 whatever follows.
+  regenerate_index || printf 'todos: note: written; TODO.md not regenerated, run todos.sh index\n' >&2
+  store_end "todos: note" "$(store_dir)/pending/$id.md" </dev/null
+  printf '%s\n' "$f"
 }
 
 regenerate_index() {
@@ -1132,7 +1178,7 @@ cmd_repos() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|index|share|path|register|repos|brief|today|sync|import} ..."
+  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|note|index|share|path|register|repos|brief|today|sync|import|dashboard|serve} ..."
   TODOS_ARGV=("$@")
   local cmd="$1" ref; shift
   case "$cmd" in
@@ -1142,6 +1188,7 @@ main() {
     ready)    cmd_ready "$@" ;;
     done)     cmd_done "$@" ;;
     depend)   cmd_depend "$@" ;;
+    note)     cmd_note "$@" ;;
     index)    cmd_index "$@" ;;
     share)    cmd_share "$@" ;;
     path)     cmd_path "$@" ;;
@@ -1149,6 +1196,7 @@ main() {
     import)   cmd_import "$@" ;;
     _pull)    cmd_pull_locked ;;
     dashboard) store_setup; exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@" ;;
+    serve)    store_setup; exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_serve.py" "$@" ;;
     today)    today ;;
     register) cmd_register "$@" ;;
     repos)    cmd_repos "$@" ;;
