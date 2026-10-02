@@ -163,9 +163,7 @@ its own pipeline: brainstorming -> writing-specs (spec to private `docs/superpow
 independent spec review -> writing-plans (plan to private `docs/superpowers/plans/`) ->
 independent plan review. In Claude use codex-spec-review/codex-plan-review;
 in Codex use claude-spec-review/claude-plan-review. Codex review caps: at most
-<spec-cap> spec rounds and <plan-cap> plan rounds (defaults 2 spec rounds, plus one closure check when
-a critical or high finding is open after round 2, and 2 plan rounds; only this brief
-raises them), with
+<spec-cap> spec rounds and <plan-cap> plan rounds (defaults 2 spec rounds, plus one closure check when a critical or high finding is open after round 2, and 2 plan rounds; only this brief raises them), with
 `ARTIFACT_CLASS=<advisory|behavior>` (advisory when the change is workflow
 prose with no durable write of its own; non-defect findings then go to the
 spec's accepted residuals). Author the task's verification contract at
