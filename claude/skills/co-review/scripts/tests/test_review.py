@@ -1021,6 +1021,68 @@ class ReviewHelperTests(unittest.TestCase):
         self.assertEqual(payload["base"], self.base)
         self.assertEqual(payload["base_ref_tip"], origin_tip)
 
+    def test_pr_base_up_to_date_matches_the_tip(self):
+        origin_tip = self.make_origin_target("origin_only")
+        self.run_git("fetch", "-q", "origin", "target")
+        self.run_git("checkout", "-q", "-b", "feature", origin_tip)
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature: work")
+        head = self.git("rev-parse", "HEAD")
+
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+
+        self.assertEqual(manifest["source"]["base"], origin_tip)
+        self.assertEqual(manifest["source"]["base_ref_tip"], origin_tip)
+        self.assertEqual(manifest["source"]["pr_base"], origin_tip)
+        self.assertIsNone(manifest["source"]["merge_tree"])
+        self.assertEqual(manifest["snapshot"]["codex_tree"], self.git("rev-parse", f"{head}^{{tree}}"))
+        diff = self.git("diff", "--name-status", origin_tip, manifest["snapshot"]["snapshot_head"])
+        self.assertEqual(diff, "A\tfeature.txt")
+
+    def test_pr_base_must_equal_the_fetched_tip(self):
+        origin_tip = self.make_origin_target("origin_only")
+        before = self.git("worktree", "list", "--porcelain")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", self.base, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("is not the fetched", result.stderr)
+        self.assertIn(self.base, result.stderr)
+        self.assertIn(origin_tip, result.stderr)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+
+    def test_pr_base_requires_base_ref(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base", self.base,
+            "--pr-base", self.base, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("--pr-base requires --base-ref", result.stderr)
+
+    def test_pr_base_alone_is_refused(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo),
+            "--pr-base", self.base, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("--pr-base requires --base-ref", result.stderr)
+
+    def test_pr_base_must_be_a_full_sha(self):
+        self.make_origin_target("origin_only")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", "target", "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("40-character", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

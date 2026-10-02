@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -100,6 +101,7 @@ def merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
 
 
 _BRANCH_BAD = ("..", "@{", "~", "^", ":", "\\", " ")
+_SHA40 = re.compile(r"[0-9a-f]{40}")
 
 # Frozen artifact kinds: repository-relative root and required suffix. The
 # contract is the herdr verification contract (untracked, git-ignored); its
@@ -394,9 +396,24 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise ReviewError(
             "head must be the source repository's current HEAD when freezing local changes"
         )
-    base, base_ref, base_ref_tip = resolve_base(
-        repo, args.base, getattr(args, "base_ref", None), head
-    )
+    pr_base = getattr(args, "pr_base", None)
+    base_ref_arg = getattr(args, "base_ref", None)
+    if pr_base is not None:
+        if args.base or not base_ref_arg:
+            raise ReviewError("--pr-base requires --base-ref and excludes --base")
+        if not _SHA40.fullmatch(pr_base):
+            raise ReviewError("--pr-base must be a full 40-character lowercase commit SHA")
+    base, base_ref, base_ref_tip = resolve_base(repo, args.base, base_ref_arg, head)
+    if pr_base is not None and pr_base != base_ref_tip:
+        raise ReviewError(
+            f"PR base {pr_base} is not the fetched origin/{base_ref} tip "
+            f"{base_ref_tip}; re-read the PR"
+        )
+    # Behind: the PR base is not an ancestor of head, so the merge-base is older.
+    behind = pr_base is not None and base != pr_base
+    if pr_base is not None:
+        base = pr_base
+    merge_tree_value: str | None = None
     before = status_porcelain(repo)
     original_index_tree = text_git(repo, "write-tree")
     staged = git(
@@ -579,6 +596,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "base": base,
                 "base_ref": base_ref,
                 "base_ref_tip": base_ref_tip,
+                "pr_base": pr_base,
+                "merge_tree": merge_tree_value,
                 "head": head,
                 "source_tree": text_git(repo, "rev-parse", f"{head}^{{tree}}"),
             },
@@ -707,6 +726,7 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--repo", required=True)
     prepare_parser.add_argument("--base")
     prepare_parser.add_argument("--base-ref", dest="base_ref")
+    prepare_parser.add_argument("--pr-base", dest="pr_base")
     prepare_parser.add_argument("--head")
     prepare_parser.add_argument("--output-dir", required=True)
     prepare_parser.add_argument("--include-untracked", action="append")
