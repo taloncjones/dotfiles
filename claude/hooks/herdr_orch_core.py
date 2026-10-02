@@ -4476,7 +4476,7 @@ def _file_sha256(path):
 
 
 def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=False):
-    """Every director-merge precondition for one task (spec R2). Read-only."""
+    """Every director-merge precondition for one task (spec R2). Writes no ref or state."""
     reasons = []
     out = {"ready": False, "reasons": reasons, "pr_number": pr.get("number"),
            "head_sha": None, "base_sha": pr.get("baseRefOid"),
@@ -4555,6 +4555,18 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     if not expected.get("base") == handoff.get("base_sha") == pr.get("baseRefOid"):
         fail("base-moved", f"expected={expected.get('base')} handoff={handoff.get('base_sha')} "
                            f"pr={pr.get('baseRefOid')}")
+    elif expected.get("merge_tree") is not None:
+        # A behind-path gate reviewed git's merge of the PR base and head; recompute
+        # it from live state so a coordinator-written merge_tree cannot stand alone.
+        want_merge = expected["merge_tree"]
+        try:
+            merged = context_git(worktree, "merge-tree", "--write-tree",
+                                 str(pr.get("baseRefOid")), str(live_head)).strip()
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            merged = f"unavailable ({exc})"
+        if merged != want_merge:
+            fail("identity", f"expected merge_tree {want_merge}; git's merge of "
+                             f"{pr.get('baseRefOid')} and {live_head} is {merged}")
     default = (repo.get("defaultBranchRef") or {}).get("name")
     if (expected.get("repository") != repo.get("nameWithOwner")
             or expected.get("pr_number") != pr.get("number")

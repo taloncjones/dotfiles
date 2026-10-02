@@ -2767,6 +2767,109 @@ assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], o
 import shutil; shutil.rmtree(sb)
 PY
 
+check "merge-ready: a merge_tree must equal git's merge of the live PR base and head" <<'PY'
+import contextlib, hashlib, io, json, os, subprocess, sys, tempfile
+from pathlib import Path
+for k in ("CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
+          "CLAUDE_WORK_TREE", "CLAUDE_WORK_CONFIG_DIR"):
+    os.environ.pop(k, None)
+for k in [k for k in os.environ if k.startswith("GIT_")]:
+    os.environ.pop(k)
+sb = Path(tempfile.mkdtemp()); os.environ["HOME"] = str(sb)
+sys.path[:0] = ["claude/hooks", "claude/skills/lib", "claude/skills/co-review/scripts/tests"]
+import herdr_orch_core as c, workflow_context as w, test_gate_report as tg
+
+def git(cwd, *a):
+    return subprocess.run(["git", "-C", str(cwd), *a], check=True,
+                          capture_output=True, text=True).stdout.strip()
+def commit_file(cwd, name, body, msg):
+    (Path(cwd) / name).write_text(body)
+    git(cwd, "add", name)
+    git(cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", msg)
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+repo = sb / "Git" / "personal" / "p"; repo.mkdir(parents=True)
+git(repo, "init", "-q")
+commit_file(repo, "t.txt", "base\n", "base")
+fork = git(repo, "rev-parse", "HEAD")
+git(repo, "checkout", "-q", "-b", "upstream")
+commit_file(repo, "origin_only.txt", "o\n", "upstream moves")
+pr_base = git(repo, "rev-parse", "HEAD")
+git(repo, "checkout", "-q", "-b", "topic", fork)
+commit_file(repo, "feature.txt", "f\n", "feature")
+head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+merged = git(repo, "merge-tree", "--write-tree", pr_base, head)
+assert merged != tree
+
+slug = c._context_slug(w.repository_context(str(repo)))
+c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
+                                  "runtime": "claude", "personal": False})())
+rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
+tid, launch = "td-merge-tree", "ship-m1"
+ld = rd / "artifacts" / tid / f"ship-{launch}"; ld.mkdir(parents=True)
+t = tg.GateReportTests(); t.setUp(); t.root = ld
+rep = t._report(); exp = dict(t.expected)
+ci = json.loads((ld / "ci.json").read_text()); ci["head"] = head
+(ld / "ci.json").write_text(json.dumps(ci))
+rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
+for obj in (rep, exp):
+    obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base=pr_base, base_ref="main")
+exp["merge_tree"] = merged
+rep["reviewed_tree"] = merged
+rep["preconditions"].update(head=head, tree=tree)
+(rd / "tasks").mkdir(parents=True, exist_ok=True)
+task = {"task_id": tid, "status": "reviewed", "review_head_sha": head,
+        "ship_launch_id": launch, "worktree": str(repo), "branch": "topic",
+        "merge_check": None}
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
+pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+      "headRefOid": head, "baseRefName": "main", "baseRefOid": pr_base,
+      "statusCheckRollup": [{"__typename": "CheckRun", "name": "tests",
+                             "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
+
+def write_gate(expected):
+    (ld / "report.json").write_text(json.dumps(rep))
+    (ld / "expected.json").write_text(json.dumps(expected))
+    hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
+            "base_ref": "main", "base_sha": pr_base, "tree_sha": tree,
+            "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
+            "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
+            "verdict": "APPROVE", "written_at": "t"}
+    (ld / "ship.json").write_text(json.dumps(hand))
+
+def run():
+    pf = sb / "pr.json"; pf.write_text(json.dumps(pr))
+    rf = sb / "repo.json"; rf.write_text(json.dumps(rp))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = c.main(["merge-ready", "--repo-slug", slug, "--repo-path", str(repo),
+                     "--task-id", tid, "--pr-json", str(pf), "--repo-json", str(rf)])
+    return rc, json.loads(buf.getvalue())
+
+# The true merge of the live PR base and head is ready.
+write_gate(exp)
+rc, out = run()
+assert rc == 0 and out["ready"] is True, out
+
+# A forged merge_tree that the report agrees with still fails on the live recompute.
+forged = dict(exp, merge_tree="e" * 40)
+rep["reviewed_tree"] = "e" * 40
+write_gate(forged)
+rc, out = run()
+codes = [r["code"] for r in out["reasons"]]
+assert rc == 1 and out["ready"] is False and "identity" in codes, out
+assert any("merge_tree" in r["detail"] for r in out["reasons"] if r["code"] == "identity"), out
+
+# Main moved past a true merge_tree: base-moved alone, so section 6 rule (c) re-gates.
+rep["reviewed_tree"] = merged
+write_gate(exp)
+pr["baseRefOid"] = "d" * 40
+rc, out = run()
+assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+PY
+
 check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 if grep -q 'The director never merges, pushes, or opens a PR' "$S"; then exit 1; fi
