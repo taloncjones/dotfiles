@@ -4479,7 +4479,7 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     """Every director-merge precondition for one task (spec R2). Writes no ref or state."""
     reasons = []
     out = {"ready": False, "reasons": reasons, "pr_number": pr.get("number"),
-           "head_sha": None, "base_sha": pr.get("baseRefOid"),
+           "head_sha": None, "base_sha": None,
            "report_path": None, "expected_path": None,
            "handoff_state": "none", "handoff_verdict": None}
 
@@ -4544,6 +4544,15 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     if not same:
         fail("hash", "report or expected identity changed after the handoff")
         return out
+    # baseRefOid can lag the branch by hours; the live base is origin's tip.
+    base_tip = None
+    try:
+        listed = context_git(worktree, "ls-remote", "origin",
+                             f"refs/heads/{pr.get('baseRefName')}").split()
+        base_tip = listed[0] if len(listed) == 2 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    out["base_sha"] = base_tip
     try:
         live_tree = context_git(worktree, "rev-parse", f"{live_head}^{{tree}}")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -4552,30 +4561,32 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     if len({live_head, pr.get("headRefOid"), expected.get("head")}) != 1:
         fail("head-moved", f"live={live_head} pr={pr.get('headRefOid')} "
                            f"expected={expected.get('head')}")
-    if not expected.get("base") == handoff.get("base_sha") == pr.get("baseRefOid"):
+    if base_tip is None:
+        fail("base-moved", f"cannot read the live {pr.get('baseRefName')} tip with git ls-remote")
+    elif not expected.get("base") == handoff.get("base_sha") == base_tip:
         fail("base-moved", f"expected={expected.get('base')} handoff={handoff.get('base_sha')} "
-                           f"pr={pr.get('baseRefOid')}")
+                           f"live={base_tip}")
     elif expected.get("merge_tree") is not None:
         # A behind-path gate reviewed git's merge of the PR base and head; recompute
         # it from live state so a coordinator-written merge_tree cannot stand alone.
         want_merge = expected["merge_tree"]
         try:
             merged = context_git(worktree, "merge-tree", "--write-tree",
-                                 str(pr.get("baseRefOid")), str(live_head)).strip()
+                                 base_tip, str(live_head)).strip()
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             merged = f"unavailable ({exc})"
         if merged != want_merge:
             fail("identity", f"expected merge_tree {want_merge}; git's merge of "
-                             f"{pr.get('baseRefOid')} and {live_head} is {merged}")
+                             f"{base_tip} and {live_head} is {merged}")
     else:
         # Without a merge_tree the reviewed tree is the head tree, which only
         # stands for the merge result when the head already contains the PR base.
         try:
             context_git(worktree, "merge-base", "--is-ancestor",
-                        str(pr.get("baseRefOid")), str(live_head))
+                        base_tip, str(live_head))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             fail("identity", f"no merge_tree and head {live_head} does not contain "
-                             f"PR base {pr.get('baseRefOid')}: {exc}")
+                             f"live base {base_tip}: {exc}")
     default = (repo.get("defaultBranchRef") or {}).get("name")
     if (expected.get("repository") != repo.get("nameWithOwner")
             or expected.get("pr_number") != pr.get("number")
@@ -4595,7 +4606,7 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     refused = task.get("merge_check")
     if (isinstance(refused, dict) and refused.get("result") == "fail"
             and refused.get("branch_head_sha") == live_head
-            and refused.get("base_main_sha") == pr.get("baseRefOid")):
+            and refused.get("base_main_sha") == base_tip):
         fail("merge-refused", str(refused.get("reason")))
     try:
         verdict = _gate_report_module().evaluate(report, expected, Path(report_path).resolve().parent)

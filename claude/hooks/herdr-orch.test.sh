@@ -2623,9 +2623,13 @@ def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 def build(repo, tid="td-merge", launch="ship-a1"):
-    slug = c._context_slug(w.repository_context(str(repo)))
     head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
     base = head  # a real object, contained in head
+    origin = sb / f"origin-{repo.name}.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-q", "origin", f"{base}:refs/heads/main")
+    slug = c._context_slug(w.repository_context(str(repo)))
     c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
                                       "runtime": "claude", "personal": False})())
     rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
@@ -2709,7 +2713,22 @@ expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json
 expect("hash", file_edit=lambda: (ld / "report.json").write_text("{}"))
 expect("handoff", state="stale", task_edit=lambda t: t.update(review_head_sha="c" * 40))
 expect("head-moved", pr_edit=lambda p: p.update(headRefOid="c" * 40))
-expect("base-moved", pr_edit=lambda p: p.update(baseRefOid="d" * 40))
+# baseRefOid lags: it still equals the handoff base, but origin's live tip moved on.
+live_base = git(personal, "rev-parse", "HEAD")
+sub = subprocess.run(["git", "-C", str(personal), "commit-tree", "-m", "newer main", "HEAD^{tree}"],
+                     check=True, capture_output=True, text=True,
+                     env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                          "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
+newer = sub.stdout.strip()
+git(personal, "push", "-q", "-f", "origin", f"{newer}:refs/heads/main")
+out = expect("base-moved")
+assert any(newer in r["detail"] for r in out["reasons"] if r["code"] == "base-moved"), out
+git(personal, "push", "-q", "-f", "origin", f"{live_base}:refs/heads/main")
+# An unreadable live base fails closed.
+gone = sb / "origin-p.git.gone"
+(sb / f"origin-{personal.name}.git").rename(gone)
+expect("base-moved")
+gone.rename(sb / f"origin-{personal.name}.git")
 expect("identity", rp_edit=lambda r: r.update(defaultBranchRef={"name": "dev"}))
 expect("identity", rp_edit=lambda r: r.update(nameWithOwner="x/y"))
 expect("pr-state", pr_edit=lambda p: p.update(isDraft=True))
@@ -2797,6 +2816,10 @@ fork = git(repo, "rev-parse", "HEAD")
 git(repo, "checkout", "-q", "-b", "upstream")
 commit_file(repo, "origin_only.txt", "o\n", "upstream moves")
 pr_base = git(repo, "rev-parse", "HEAD")
+origin = sb / "origin-p.git"
+subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+git(repo, "remote", "add", "origin", str(origin))
+git(repo, "push", "-q", "origin", f"{pr_base}:refs/heads/main")
 git(repo, "checkout", "-q", "-b", "topic", fork)
 commit_file(repo, "feature.txt", "f\n", "feature")
 head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
@@ -2866,9 +2889,19 @@ assert any("merge_tree" in r["detail"] for r in out["reasons"] if r["code"] == "
 # Main moved past a true merge_tree: base-moved alone, so section 6 rule (c) re-gates.
 rep["reviewed_tree"] = merged
 write_gate(exp)
-pr["baseRefOid"] = "d" * 40
+# baseRefOid still equals the handoff base (it lags); only origin's live tip shows the move.
+git(repo, "checkout", "-q", "upstream")
+commit_file(repo, "origin_newer.txt", "n\n", "main moves again")
+git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+git(repo, "checkout", "-q", "topic")
 rc, out = run()
 assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+# An unreadable live base fails closed.
+git(repo, "push", "-q", "-f", "origin", f"{pr_base}:refs/heads/main")
+origin.rename(sb / "origin-p.git.gone")
+rc, out = run()
+assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+(sb / "origin-p.git.gone").rename(origin)
 
 # No merge_tree and a head behind the PR base: the reviewed tree is not the merge result.
 pr["baseRefOid"] = pr_base
