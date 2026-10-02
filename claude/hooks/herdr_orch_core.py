@@ -2278,12 +2278,26 @@ def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) 
     )
 
 
+def pid_namespace_id():
+    """Identity of this process's PID namespace, or None where it has none
+    (macOS). HERDR_ORCH_PIDNS overrides it for tests; "none" means None."""
+    forced = os.environ.get("HERDR_ORCH_PIDNS")
+    if forced is not None:
+        return None if forced == "none" else forced
+    try:
+        ns = os.readlink("/proc/self/ns/pid")
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
+    return f"{ns}@{boot}"
+
+
 def _launcher_holder_gone(rd, cur, host=None):
     """Why the Claude process behind launcher lease cur is provably gone, or
     None. Only a lease whose private mirror matches cur and names a valid
     socket for its pid qualifies: without one, pid is whatever --pid was.
-    A lease from another host is never judged: pids are local to a host.
-    host=None skips that check (callers without a claimant)."""
+    A lease from another host or PID namespace is never judged: pids are
+    local to both. host=None skips those checks (callers without a claimant)."""
     if (cur is None or cur.get("control_tier", "launcher") != "launcher"
             or cur.get("runtime", "claude") != "claude"):
         return None
@@ -2295,6 +2309,8 @@ def _launcher_holder_gone(rd, cur, host=None):
         return None
     if not isinstance(mirror, dict) or any(
             mirror.get(k) != cur[k] for k in ("session_id", "fence", "pid")):
+        return None
+    if host is not None and mirror.get("pid_ns") != pid_namespace_id():
         return None
     pid = cur["pid"]
     sock, _sock_pid, reason = validate_messaging_socket(
@@ -2514,7 +2530,8 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                       f"session {old['session_id']}; claimed fence {fence}", file=sys.stderr)
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
-            write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
+            write_json_atomic(_owner_path(rd), dict(
+                tx.current, messaging_socket=sock, pid_ns=pid_namespace_id()))
         return fence
 
 
@@ -2690,7 +2707,9 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
                 if reason == "ok":
                     print("[WARNING] messaging socket ignored (pid-mismatch)", file=sys.stderr)
                 sock = None
-            write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
+            pid_ns = old.get("pid_ns") if isinstance(old, dict) else None
+            write_json_atomic(_owner_path(rd), dict(
+                tx.current, messaging_socket=sock, pid_ns=pid_ns))
             return True
     except (OSError, ValueError):
         return False

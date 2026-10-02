@@ -1673,6 +1673,24 @@ if grep -q 'lease holder gone' "$SOCKS/err"; then exit 1; fi
 python3 -c "import json,sys; o=json.load(open(sys.argv[1])); assert o['session_id']=='S1' and o['fence']==int(sys.argv[2]), o" "$root/herdr-orch/slug-host/owner.json" "$F1"
 SH
 
+check "liveness: a dead-looking holder in another PID namespace keeps BUSY and its fence" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+F1=$(HERDR_ORCH_PIDNS=pidns-a $CLI claim-owner --repo-slug slug-ns --session S1 --host h --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock")
+rc=0; out=$(HERDR_ORCH_PIDNS=pidns-b $CLI claim-owner --repo-slug slug-ns --session S2 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>"$SOCKS/err") || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+if grep -q 'lease holder gone' "$SOCKS/err"; then exit 1; fi
+[ ! -e "$root/herdr-orch/slug-ns/rollover.jsonl" ]
+python3 -c "import json,sys; o=json.load(open(sys.argv[1])); assert o['session_id']=='S1' and o['fence']==int(sys.argv[2]), o" "$root/herdr-orch/slug-ns/owner.json" "$F1"
+F3=$(HERDR_ORCH_PIDNS=pidns-a $CLI claim-owner --repo-slug slug-ns --session S3 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>/dev/null)
+[ "$F3" = $((F1 + 1)) ]
+SH
+
 check "liveness helper: pid-recycled and socket-missing need the claimant's host" <<PY
 $LOAD
 import random, shutil, subprocess

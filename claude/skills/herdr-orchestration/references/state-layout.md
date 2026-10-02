@@ -204,10 +204,14 @@ STATE_ROOT/
   when `heartbeat_ts` is older than `--stale-secs` (default 900 s; the owner
   refreshes it each turn), or when the holder is gone. "Gone" is judged
   only for a Claude launcher lease on the claimant's own `host` (a lease
-  with no `host` field is judged as before) whose private mirror matches the shared
-  record (`session_id`, `fence`, `pid`) and names a valid
+  with no `host` field is corrupt and rejected) and in the claimant's own PID
+  namespace, whose private mirror matches the shared record (`session_id`, `fence`, `pid`) and names a valid
   `messaging_socket` for that `pid`, while no live `rollover-pending.json`
-  names the lease: the `pid` has no process (`pid-dead`); its start
+  names the lease. The mirror's `pid_ns` records the claimant's PID
+  namespace (Linux: `/proc/self/ns/pid` link plus `boot_id`; `null` on
+  macOS). Any difference from the new claimant's, or a missing field while
+  the claimant's is non-null, forbids early takeover; a stale heartbeat
+  still expires the lease. The verdicts: the `pid` has no process (`pid-dead`); its start
   identity differs from `pid_start` under the same scheme
   (`pid-recycled`); or its identity is unconfirmed (no `pid_start`, or no
   probe result) and the socket path is missing (`socket-missing`). A holder
