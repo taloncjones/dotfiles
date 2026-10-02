@@ -267,6 +267,9 @@ correction; code validates that material allegations include impact, not its
 truth. Do not label an impact-free allegation major to force a stop; classify
 nonmaterial feedback as advisory. Unknown material impact remains a gap only
 when evidence supports a concrete material-risk scenario.
+Severity follows the realistic consequence in this project's actual use: a
+failure that needs a platform, configuration or setup the project does not
+use is `minor` at most.
 Allowed severities are `critical`, `high`, `major`, `minor`, `low`,
 `nit`, and `advisory`. Confirmed `critical`, `high`, and `major` findings yield
 `CHANGES`. Confirmed `minor`, `low`, `nit`, and `advisory` findings remain

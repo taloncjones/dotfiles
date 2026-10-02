@@ -64,6 +64,11 @@ Standing engineering discipline for all sessions, all repos.
 
 ## Judgment
 
+- Simplest thing that works, by default. Handle the cases this project actually
+  hits; skip speculative edge cases, extra modes and defensive layers. Size tests
+  to risk: one test per behavior, a smoke check for a script or local tool.
+  Go thorough only when the user asks, or the code guards security, auth,
+  credentials, money, or irreversible or shared data; judge that on the fly.
 - At ambiguous forks, lead with a labeled recommendation, then the alternatives -- do
   not present balanced options with no stated preference.
 - Recorded decisions are revisable, not blockers. A past choice in a todo, spec,
