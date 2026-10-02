@@ -163,7 +163,7 @@ repaired in place.
 Prepare one immutable snapshot with `review.py prepare`, then run
 `review.py verify --manifest` before dispatch, before evaluation, and before cleanup.
 
-A PR gate passes the PR's `baseRefOid` as `--pr-base`. When head does not
+A PR gate passes the live base tip from `git ls-remote origin refs/heads/<base>` as `--pr-base`; `baseRefOid` can lag and is not the live base. When head does not
 contain that base, the snapshot is git's merge dry-run of the base and
 head; `manifest.source.merge_tree` binds `expected.merge_tree`, and
 `report.reviewed_tree` must equal it in place of `expected.tree`. Every

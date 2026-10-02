@@ -25,7 +25,7 @@ fails, so a cleanup-failed report is never active evidence for this command.
 
 Resolve the installed co-review helper root, then use its evaluator. Before
 evaluation, recheck the live PR's repository, number, full head, target branch,
-PR base (`baseRefOid`), and CI. Compare each to the independently retained expected
+live base tip (`git ls-remote origin refs/heads/<baseRefName>`; `baseRefOid` can lag), and CI. Compare each to the independently retained expected
 identity. Refresh the active report's exact-head CI payload and digest, then
 evaluate the report against that expected file:
 
@@ -35,9 +35,9 @@ GATE_REPORT="$REVIEW_ROOT/claude/skills/co-review/scripts/gate_report.py"
 gh pr view --json number,headRefOid,baseRefName,baseRefOid,statusCheckRollup > live-pr.json
 # Resolve BASE_REPO from pulls REST .base.repo.full_name, normalize and compare
 # it with origin's real fetch URL. Extract PR_NUMBER, HEAD, BASE_REF, and
-# BASE (baseRefOid) from live-pr.json.
+# BASE from `git ls-remote origin "refs/heads/$BASE_REF"` (exit 2 on failure), not baseRefOid.
 TREE=$(git rev-parse "$HEAD^{tree}")
-uv run --no-project python - "$EXPECTED_IDENTITY" "$BASE_REPO" "$PR_NUMBER" "$HEAD" "$BASE" "$BASE_REF" "$TREE" <<'PY'
+uv run --no-project python - "$EXPECTED_IDENTITY" "$BASE_REPO" "$PR_NUMBER" "$HEAD" "$BASE" "$BASE_REF" "$TREE" <<'PY' || exit 2
 import json
 import sys
 

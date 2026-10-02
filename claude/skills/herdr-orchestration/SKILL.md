@@ -1452,7 +1452,7 @@ authority and is never adopted. A ship launch is never reprompted;
 further gate work is a fresh launch. Every
 ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
 its launch directory, and no merge authority.
-The gate's base is the PR's `baseRefOid` (co-review Freeze), and
+The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
 gate under rule (c) gates the current PR base.
 

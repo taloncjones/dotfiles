@@ -444,4 +444,4 @@ task. Each still carries `<lessons-step>`:
   through a temp file and rename: `task_id`, `launch_id`, `pr_number`,
   `pr_url`, `head_sha`, `base_ref`, `base_sha`, `tree_sha`, `report_path`,
   `report_sha256`, `expected_path`, `expected_sha256`, `verdict`,
-  `written_at`. `base_sha` is the expected identity's `base`, the PR's `baseRefOid`. A run that dies before a verdict writes none.
+  `written_at`. `base_sha` is the expected identity's `base`, the live `git ls-remote` tip (not `baseRefOid`). A run that dies before a verdict writes none.
