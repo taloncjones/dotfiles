@@ -1040,7 +1040,6 @@ class ReviewHelperTests(unittest.TestCase):
         self.assertEqual(manifest["source"]["base"], origin_tip)
         self.assertEqual(manifest["source"]["base_ref_tip"], origin_tip)
         self.assertEqual(manifest["source"]["pr_base"], origin_tip)
-        self.assertIsNone(manifest["source"]["merge_tree"])
         self.assertEqual(manifest["snapshot"]["codex_tree"], self.git("rev-parse", f"{head}^{{tree}}"))
         diff = self.git("diff", "--name-status", origin_tip, manifest["snapshot"]["snapshot_head"])
         self.assertEqual(diff, "A\tfeature.txt")
@@ -1129,77 +1128,19 @@ class ReviewHelperTests(unittest.TestCase):
         self.run_git("commit", "-qm", "feature: work")
         return origin_tip, self.git("rev-parse", "HEAD")
 
-    def test_pr_base_behind_reviews_the_merge_dry_run(self):
-        origin_tip, head = self.make_behind_feature()
-        output = self.root / "review output"
-        result = self.command(
-            "prepare", "--repo", str(self.repo), "--base-ref", "target",
-            "--pr-base", origin_tip, "--output-dir", str(output),
-        )
-        manifest_path = Path(json.loads(result.stdout)["manifest"])
-        manifest = json.loads(manifest_path.read_text())
-        merged = self.git("merge-tree", "--write-tree", origin_tip, head).splitlines()[0]
-
-        self.assertEqual(manifest["source"]["base"], origin_tip)
-        self.assertEqual(manifest["source"]["pr_base"], origin_tip)
-        self.assertEqual(manifest["source"]["head"], head)
-        self.assertEqual(manifest["source"]["source_tree"], self.git("rev-parse", f"{head}^{{tree}}"))
-        self.assertEqual(manifest["source"]["merge_tree"], merged)
-        self.assertNotEqual(manifest["source"]["merge_tree"], manifest["source"]["source_tree"])
-        self.assertEqual(manifest["snapshot"]["codex_tree"], merged)
-        self.assertEqual(manifest["snapshot"]["claude_tree"], merged)
-        snapshot_head = manifest["snapshot"]["snapshot_head"]
-        self.assertEqual(self.git("rev-parse", f"{snapshot_head}^{{tree}}"), merged)
-        diff = self.git("diff", "--name-status", origin_tip, snapshot_head)
-        self.assertEqual(diff, "A\tfeature.txt")
-        self.command("verify", "--manifest", str(manifest_path))
-        self.command("cleanup", "--manifest", str(manifest_path))
-        self.assertFalse(output.exists())
-
-    def test_pr_base_behind_dirty_source_differs_from_merge_tree(self):
+    def test_pr_base_behind_is_refused_with_the_remedy(self):
         origin_tip, _head = self.make_behind_feature()
-        (self.repo / "feature.txt").write_text("dirty\n")
-        output = self.root / "review output"
-        result = self.command(
-            "prepare", "--repo", str(self.repo), "--base-ref", "target",
-            "--pr-base", origin_tip, "--output-dir", str(output),
-        )
-        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
-        merged = self.git("merge-tree", "--write-tree", origin_tip, _head).splitlines()[0]
-        self.assertEqual(manifest["source"]["merge_tree"], merged)
-        self.assertNotEqual(manifest["snapshot"]["codex_tree"], merged)
-
-    def test_pr_base_behind_conflict_is_refused_before_any_worktree(self):
-        origin = self.root / "origin.git"
-        subprocess.run(["git", "clone", "--bare", "-q", str(self.repo), str(origin)],
-                       check=True, capture_output=True)
-        work = self.root / "work-conflict"
-        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
-        for key, value in (("user.name", "O"), ("user.email", "o@x.invalid")):
-            subprocess.run(["git", "-C", str(work), "config", key, value], check=True, capture_output=True)
-        (work / "tracked.txt").write_text("origin side\n")
-        subprocess.run(["git", "-C", str(work), "commit", "-qam", "origin: edit"],
-                       check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "HEAD:refs/heads/target"],
-                       check=True, capture_output=True)
-        origin_tip = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
-                                    check=True, capture_output=True, text=True).stdout.strip()
-        self.run_git("remote", "add", "origin", str(origin))
-        self.run_git("checkout", "-q", "-b", "feature", self.base)
-        (self.repo / "tracked.txt").write_text("feature side\n")
-        self.run_git("commit", "-qam", "feature: edit")
-        before_worktrees = self.git("worktree", "list", "--porcelain")
-        before_status = self.git("status", "--porcelain")
-
+        before = self.git("worktree", "list", "--porcelain")
         output = self.root / "review output"
         result = self.command(
             "prepare", "--repo", str(self.repo), "--base-ref", "target",
             "--pr-base", origin_tip, "--output-dir", str(output), expect=2,
         )
-        self.assertIn("does not merge cleanly onto PR base", result.stderr)
-        self.assertIn("tracked.txt", result.stderr)
-        self.assertEqual(self.git("worktree", "list", "--porcelain"), before_worktrees)
-        self.assertEqual(self.git("status", "--porcelain"), before_status)
+        self.assertIn("behind", result.stderr)
+        self.assertIn(origin_tip, result.stderr)
+        self.assertIn("merge target into the branch", result.stderr)
+        self.assertIn("carry-forward", result.stderr)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
 
 
 if __name__ == "__main__":

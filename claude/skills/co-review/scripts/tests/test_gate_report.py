@@ -586,8 +586,6 @@ class GateReportTests(unittest.TestCase):
         self.assertEqual(
             shape["codex_substitute"]["reasons"], ["quota", "auth", "unavailable"]
         )
-        self.assertIn("merge_tree", shape["expected_example"])
-        self.assertEqual(shape["bindings"]["manifest.source.merge_tree"], "expected.merge_tree")
 
     def test_schema_documents_the_delta_tier(self):
         shape = gate.schema()
@@ -738,29 +736,6 @@ class GateReportTests(unittest.TestCase):
             }
         ]
         self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
-
-    def test_merge_tree_binds_the_reviewed_tree(self):
-        merge_tree = "c" * 40
-        self.expected["merge_tree"] = merge_tree
-        self.report["reviewed_tree"] = merge_tree
-        self.assertEqual(self.verdict()["verdict"], "APPROVE")
-
-    def test_merge_tree_set_and_reviewed_head_tree_is_dirty(self):
-        self.expected["merge_tree"] = "c" * 40
-        result = self.verdict()
-        self.assertNotEqual(result["verdict"], "APPROVE")
-        self.assertIn("reviewed tree is dirty", result["reasons"])
-
-    def test_null_merge_tree_keeps_the_head_tree_rule(self):
-        self.expected["merge_tree"] = None
-        self.assertEqual(self.verdict()["verdict"], "APPROVE")
-
-    def test_invalid_merge_tree_is_refused(self):
-        self.expected["merge_tree"] = "bad"
-        self.report["reviewed_tree"] = "bad"
-        result = self.verdict()
-        self.assertNotEqual(result["verdict"], "APPROVE")
-        self.assertIn("expected merge_tree is invalid", result["reasons"])
 
     def test_material_findings_require_impact_evidence_shape(self):
         finding = {

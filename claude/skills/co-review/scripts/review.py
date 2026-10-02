@@ -436,10 +436,12 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "from git ls-remote; read the base from git, not baseRefOid"
             )
     # Behind: the PR base is not an ancestor of head, so the merge-base is older.
-    behind = pr_base is not None and base != pr_base
-    if pr_base is not None:
-        base = pr_base
-    merge_tree_value: str | None = None
+    if pr_base is not None and base != pr_base:
+        raise ReviewError(
+            f"branch is behind the live origin/{base_ref} tip {pr_base}; merge "
+            f"{base_ref} into the branch, then re-run (the carry-forward rule "
+            "keeps an APPROVE across a clean merge of the base)"
+        )
     before = status_porcelain(repo)
     original_index_tree = text_git(repo, "write-tree")
     staged = git(
@@ -513,31 +515,22 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         for path in available - selected_paths:
             if tree_contains(repo, tree, path):
                 raise ReviewError("unselected untracked input entered the snapshot")
-        snapshot_env = {
-            **index_env,
-            "GIT_AUTHOR_NAME": "review",
-            "GIT_AUTHOR_EMAIL": "review@example.invalid",
-            "GIT_COMMITTER_NAME": "review",
-            "GIT_COMMITTER_EMAIL": "review@example.invalid",
-        }
         snapshot_head = text_git(
-            repo, "commit-tree", tree, "-p", head, "-m", "co-review snapshot", env=snapshot_env
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            head,
+            "-m",
+            "co-review snapshot",
+            env={
+                **index_env,
+                "GIT_AUTHOR_NAME": "review",
+                "GIT_AUTHOR_EMAIL": "review@example.invalid",
+                "GIT_COMMITTER_NAME": "review",
+                "GIT_COMMITTER_EMAIL": "review@example.invalid",
+            },
         )
-        if behind:
-            # Review what the squash merge changes on the PR base: git's merge
-            # of the PR base with the frozen snapshot, never a reverse of main.
-            head_merge, head_conflicts = merge_tree(repo, base, head)
-            tree, snapshot_conflicts = merge_tree(repo, base, snapshot_head)
-            conflicts = sorted(set(head_conflicts) | set(snapshot_conflicts))
-            if conflicts:
-                raise ReviewError(
-                    f"head does not merge cleanly onto PR base {base}: {named_paths(conflicts)}"
-                )
-            merge_tree_value = head_merge
-            snapshot_head = text_git(
-                repo, "commit-tree", tree, "-p", snapshot_head, "-p", base,
-                "-m", "co-review merge dry-run", env=snapshot_env,
-            )
         patch.write_bytes(
             git(
                 repo,
@@ -632,7 +625,6 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "base_ref": base_ref,
                 "base_ref_tip": base_ref_tip,
                 "pr_base": pr_base,
-                "merge_tree": merge_tree_value,
                 "head": head,
                 "source_tree": text_git(repo, "rev-parse", f"{head}^{{tree}}"),
             },

@@ -440,12 +440,7 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     for field in ("head", "base", "tree", "reviewed_tree"):
         if not _sha(report.get(field)):
             reasons.append(f"report {field} is invalid")
-    # A branch behind its PR base is reviewed on git's merge dry-run tree.
-    merge_tree = expected.get("merge_tree")
-    if merge_tree is not None and not _sha(merge_tree):
-        reasons.append("expected merge_tree is invalid")
-    reviewed_target = report.get("tree") if merge_tree is None else merge_tree
-    if report.get("reviewed_tree") != reviewed_target:
+    if report.get("reviewed_tree") != report.get("tree"):
         reasons.append("reviewed tree is dirty")
     tier = report.get("class")
     if "class" not in expected or tier != expected.get("class"):
@@ -845,13 +840,11 @@ def schema() -> dict:
             "base": "40-char SHA",
             "base_ref": "main",
             "tree": "40-char SHA",
-            "merge_tree": "40-char SHA of git's merge of base and head, or null",
             "known_blockers": [],
             "class": "full",
         },
         "bindings": {
             "manifest.source.source_tree": "expected.tree",
-            "manifest.source.merge_tree": "expected.merge_tree",
             "snapshot.codex_tree": "report.reviewed_tree",
         },
         "seat_artifact_must_show": (
