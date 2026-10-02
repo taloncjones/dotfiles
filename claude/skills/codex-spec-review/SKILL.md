@@ -81,9 +81,10 @@ prompt, restricted to returning CLOSED or STILL-OPEN for the open critical
 and high findings; it raises a new finding only on a defect in the changed
 text that blocks closing one of them. Record it as its own row in the
 revision history like any call; it is the only call allowed past the cap.
-When no critical or high finding is open after the round at the cap, there is
-no closure check: fold the accepted fixes, list open findings as accepted residuals, and
-proceed. A critical or high finding still open after the closure check keeps
+When no critical or high finding is open after a complete round at the cap,
+there is no closure check: fold the accepted fixes, list open findings as
+accepted residuals, and proceed. An incomplete round at the cap never starts
+the closure check; it stops under the stop rule above. A critical or high finding still open after the closure check keeps
 the stop rule above.
 
 For `behavior`, probe recovery semantics explicitly: independently enumerate
