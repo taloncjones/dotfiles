@@ -63,3 +63,8 @@ is the staging tier, not an archive.
   error; a dead watch is not a failed run.
 - (2026-10) Launch each review seat as its own detached job and poll its result
   file; one shared background wrapper loses every seat at its tool limit.
+- (2026-10) Build a scratch or mutation copy from the whole tree (`git archive`
+  or a detached worktree); a partial `cp` misses the files a test imports.
+- (2026-10) Re-grep anchors after a Markdown Write/Edit: the formatter reflows.
+- (2026-10) Never pass `-c commit.gpgsign=false`; a locked signer means pause.
+- (2026-10) Size a background wait from the contract's `timeout_secs`.
