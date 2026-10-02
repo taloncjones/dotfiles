@@ -9,6 +9,7 @@ exit the file is unchanged. split_sections is the one boundary rule the
 dashboard renderer and the note writer share.
 """
 import hashlib
+import html
 import os
 import re
 import sys
@@ -17,12 +18,25 @@ NOTE_SECTIONS = ("Problem", "Solution", "Verification")
 MAX_NOTE_BYTES = 4000
 REFUSED = 2
 STALE = 3
+URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
+TOKEN_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)|(" + URL_RE.pattern + r")|\*\*([^*\n]+)\*\*")
+LIST_ITEM_RE = re.compile(r"^( *)([-*+]|\d+\.) +(.*)$")
+SUBHEAD_RE = re.compile(r"^#{3,6} +(.*)$")
 NOTE_HEADING_RE = re.compile(r"^#{1,6}( |$)")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class NoteRefused(Exception):
     pass
+
+
+def esc(s):
+    return html.escape(str(s), quote=True)
+
+
+def safe_href(url):
+    """Only http(s) URLs become links; anything else renders as text."""
+    return url if re.match(r"^https?://", url) else ""
 
 
 def is_fence(line):
@@ -64,6 +78,114 @@ def split_sections(text):
                 sections[-1][3] = start
             sections.append([line[3:].rstrip(" \t"), start, end, len(text)])
     return body_start, [tuple(s) for s in sections]
+
+
+# --- rendering ---------------------------------------------------------------
+
+def render_text(raw):
+    """Escape raw text, then turn links, bare URLs and **bold** into markup."""
+    out, pos = [], 0
+    for m in TOKEN_RE.finditer(raw):
+        out.append(esc(raw[pos:m.start()]))
+        label, target, bare, bold = m.groups()
+        if bare:
+            url = bare.rstrip(".,;")
+            out.append(f'<a href="{esc(url)}">{esc(url)}</a>{esc(bare[len(url):])}')
+        elif bold:
+            out.append(f"<strong>{render_text(bold)}</strong>")
+        elif safe_href(target):
+            out.append(f'<a href="{esc(target)}">{esc(label)}</a>')
+        else:
+            out.append(esc(m.group(0)))
+        pos = m.end()
+    out.append(esc(raw[pos:]))
+    return "".join(out)
+
+
+def render_inline(raw):
+    """Inline code first, so nothing inside backticks becomes markup."""
+    parts = re.split(r"`([^`\n]+)`", raw)
+    return "".join(f"<code>{esc(p)}</code>" if i % 2 else render_text(p)
+                   for i, p in enumerate(parts))
+
+
+def render_markdown(md):
+    """The todo-body markdown subset (spec R2.2) as HTML; all text escaped."""
+    out, para, items = [], [], []
+
+    def flush_para():
+        if para:
+            out.append(f"<p>{render_inline(' '.join(para))}</p>")
+            para.clear()
+
+    def flush_list():
+        if items:
+            lis = "".join(
+                f'<li class="d{depth}">'
+                + (f'<span class="num">{esc(num)}</span> ' if num else "")
+                + f"{render_inline(text)}</li>"
+                for depth, num, text in items)
+            out.append(f'<ul class="md">{lis}</ul>')
+            items.clear()
+
+    lines = md.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if is_fence(line) or line.startswith("|"):
+            flush_para()
+            flush_list()
+            if is_fence(line):
+                j = i + 1
+                while j < len(lines) and not lines[j].startswith(line[:3]):
+                    j += 1
+                block, i = lines[i + 1:j], j + 1
+            else:
+                j = i
+                while j < len(lines) and lines[j].startswith("|"):
+                    j += 1
+                block, i = lines[i:j], j
+            out.append("<pre>" + esc("\n".join(block)) + "</pre>")
+            continue
+        item = LIST_ITEM_RE.match(line)
+        sub = SUBHEAD_RE.match(line)
+        if not line.strip():
+            flush_para()
+            flush_list()
+        elif sub:
+            flush_para()
+            flush_list()
+            out.append(f"<h5>{render_inline(sub.group(1))}</h5>")
+        elif item:
+            flush_para()
+            indent, marker, text = item.groups()
+            num = marker if marker[0].isdigit() else ""
+            items.append([min(len(indent) // 2, 3), num, text])
+        elif items and line.startswith(" "):
+            items[-1][2] += " " + line.strip()
+        else:
+            flush_list()
+            para.append(line.strip())
+        i += 1
+    flush_para()
+    flush_list()
+    return "".join(out)
+
+
+def render_body(text, after_section=None):
+    """The rendered body: preamble, then every section under an <h4>.
+
+    after_section(name) -> HTML placed after the LAST section of that name.
+    """
+    body_start, sections = split_sections(text)
+    first = sections[0][1] if sections else len(text)
+    parts = [render_markdown(text[body_start:first])]
+    last = {s[0]: k for k, s in enumerate(sections)}
+    for k, (name, _, head_end, end) in enumerate(sections):
+        parts.append(f"<h4>{esc(name)}</h4>" + render_markdown(text[head_end:end]))
+        if after_section is not None and last[name] == k:
+            parts.append(after_section(name))
+    return "".join(parts)
 
 
 # --- appending a note --------------------------------------------------------

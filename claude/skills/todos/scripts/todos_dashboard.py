@@ -15,7 +15,7 @@ The page is written to a sibling temp file and renamed into place.
 """
 import argparse
 import datetime
-import html
+import hashlib
 import json
 import os
 import re
@@ -29,6 +29,7 @@ sys.path.insert(0, str(HERE.parents[1] / "lib"))
 import herdr_orch_core as core
 from workflow_context import account_scope, repository_context
 from workflow_context import git as context_git
+from todos_prd import NOTE_SECTIONS, URL_RE, esc, render_body, safe_href
 
 TODOS_SH = Path(os.environ.get("TODOS_DASHBOARD_TODOS_SH") or HERE / "todos.sh")
 TODOS_DIRNAME = ".todos"
@@ -39,7 +40,6 @@ DEFAULT_COMPLETED = 10
 SATISFIED = ("done", "merged")
 IN_FLIGHT_STATUSES = ("kickoff", "in-progress", "blocked", "review-dispatched",
                       "changes-requested", "reviewed", "completed")
-URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
 PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
@@ -59,15 +59,6 @@ def die(msg):
 
 def warn(msg):
     print(f"todos: {msg}", file=sys.stderr)
-
-
-def esc(s):
-    return html.escape(str(s), quote=True)
-
-
-def safe_href(url):
-    """Only http(s) URLs become links; anything else renders as text."""
-    return url if re.match(r"^https?://", url) else ""
 
 
 def git(args, cwd=None):
@@ -304,23 +295,38 @@ def herdr_status(tasks_dir, basename, *, confined=False):
     return st
 
 
-def read_text(path):
+def read_bytes(path):
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return path.read_bytes()
     except OSError as e:
         warn(f"skipping unreadable file: {path} ({e.strerror})")
         return None
 
 
+def decode_text(data):
+    """What Path.read_text(errors="replace") returns: universal newlines."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_text(path):
+    data = read_bytes(path)
+    return None if data is None else decode_text(data)
+
+
 def load_todo(path, resolver, tasks_dir, pending, confined_state):
-    text = read_text(path)
-    if text is None:
+    # One read feeds both the rendered body and the hash the note form
+    # sends back, so the page never shows one version and hashes another.
+    data = read_bytes(path)
+    if data is None:
         return None
+    text = decode_text(data)
     scalars, lists, body = frontmatter(text)
     basename = path.stem
     t = {
         "basename": basename,
         "path": path,
+        "text": text,
+        "sha256": hashlib.sha256(data).hexdigest(),
         "title": scalars.get("title") or basename,
         "created": scalars.get("created", ""),
         "area": scalars.get("area", ""),
@@ -900,6 +906,87 @@ ul.research > li:focus-within {
   border-color: var(--accent);
 }
 
+/* The PRD row under each todo: a full-width native <details>. */
+tr:has(+ tr.prd-row) > td {
+  border-bottom: 0;
+}
+
+tr.prd-row > td {
+  padding: 0 16px 14px;
+}
+
+details.prd > summary {
+  width: fit-content;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.prd-body {
+  max-width: 90ch;
+  padding: 4px 0 0 18px;
+  font-size: 14px;
+}
+
+.prd-body h4 {
+  margin: 16px 0 6px;
+  font-size: 14px;
+}
+
+.prd-body h5 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+}
+
+.prd-body p,
+.prd-body ul.md {
+  margin: 0 0 8px;
+}
+
+ul.md {
+  padding-left: 18px;
+}
+
+ul.md li.d1 { margin-left: 18px; }
+ul.md li.d2 { margin-left: 36px; }
+ul.md li.d3 { margin-left: 54px; }
+
+.prd-body pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.prd-body code {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+form.note {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+form.note textarea {
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+form.note button {
+  width: fit-content;
+}
+
 @media (hover: hover) {
   a:hover {
     color: var(--ink);
@@ -973,6 +1060,34 @@ def render_links(links):
     return " ".join(f'<a href="{esc(u)}">{esc(label)}</a>' for label, u in links)
 
 
+def note_form(t, section, token):
+    """Served pages only: append a note to one section (todos.sh note)."""
+    return ('<form class="note" method="post" action="/note">'
+            f'<input type="hidden" name="id" value="{esc(t["basename"])}">'
+            f'<input type="hidden" name="section" value="{esc(section)}">'
+            f'<input type="hidden" name="sha" value="{esc(t["sha256"])}">'
+            f'<input type="hidden" name="token" value="{esc(token)}">'
+            f'<label for="note-{esc(t["basename"])}-{esc(section)}">Add a note to {esc(section)}</label>'
+            f'<textarea id="note-{esc(t["basename"])}-{esc(section)}" name="note" rows="3" required></textarea>'
+            '<button type="submit">Add note</button></form>')
+
+
+def render_prd_row(t, ncols, edit=None):
+    """The full-width row under a todo: its rendered body in a <details>.
+
+    edit is None for the static page and for completed todos; on a served
+    page it is {"token", "open"} and each note section gets a form.
+    """
+    def forms(name):
+        return note_form(t, name, edit["token"]) if name in NOTE_SECTIONS else ""
+
+    is_open = " open" if edit and edit["open"] == t["basename"] else ""
+    body = render_body(t["text"], forms if edit else None)
+    return (f'<tr class="prd-row" data-prd="{esc(t["basename"])}"><td colspan="{ncols}">'
+            f'<details class="prd" id="prd-{esc(t["basename"])}"{is_open}><summary>PRD</summary>'
+            f'<div class="prd-body">{body}</div></details></td></tr>')
+
+
 def render_todo_cell(t):
     prio_cls = f"prio-{t['priority']}" if t["priority"] in PRIORITY_WEIGHT else ""
     chips = [chip(t["area"]), chip(t["priority"], prio_cls),
@@ -1005,7 +1120,7 @@ def open_bucket(t):
     return "ready"
 
 
-def render_open_table(todos):
+def render_open_table(todos, edit=None):
     rows = []
     for t in todos:
         state = "blocked" if t["blocked"] else "open"
@@ -1019,13 +1134,14 @@ def render_open_table(todos):
             f'data-state="{state}" data-task-status="{esc(status)}">'
             f'<td>{render_todo_cell(t)}</td><td class="dates">{dates}</td>'
             f'<td>{deps}</td><td>{render_herdr(t["herdr"])}</td>'
-            f'<td>{render_links(t["links"])}</td></tr>')
+            f'<td>{render_links(t["links"])}</td></tr>'
+            + render_prd_row(t, 5, edit))
     return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created / due</th>'
             '<th>Depends on</th><th>Herdr</th><th>Links</th></tr></thead><tbody>'
             + "".join(rows) + "</tbody></table></div>")
 
 
-def render_open(todos):
+def render_open(todos, edit=None):
     if not todos:
         return '<p class="empty">No open todos.</p>'
     grouped = {b: [] for b in BUCKET_ORDER}
@@ -1038,7 +1154,7 @@ def render_open(todos):
             continue
         heading = (f'<h3 data-bucket="{bucket}">{esc(BUCKET_LABELS[bucket])} '
                    f'<span class="bucket-count">{len(items)}</span></h3>')
-        table = render_open_table(items)
+        table = render_open_table(items, edit)
         if bucket == "someday":
             # A native, JS-free collapse -- someday items are real but not
             # meant to compete for attention with what is actionable now.
@@ -1058,7 +1174,8 @@ def render_completed(todos):
             f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
             f'data-task-status="{esc(status)}">'
             f'<td>{render_todo_cell(t)}</td><td class="dates">{esc(t["created"])}</td>'
-            f'<td>{render_herdr(t["herdr"])}</td><td>{render_links(t["links"])}</td></tr>')
+            f'<td>{render_herdr(t["herdr"])}</td><td>{render_links(t["links"])}</td></tr>'
+            + render_prd_row(t, 4))
     return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created</th>'
             '<th>Herdr</th><th>Links</th></tr></thead><tbody>'
             + "".join(rows) + "</tbody></table></div>")
@@ -1093,7 +1210,8 @@ def render_research(entries):
     return '<ul class="research">' + "".join(items) + "</ul>"
 
 
-def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed):
+def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed,
+                edit=None):
     # Every tile derives from open_bucket, which is mutually exclusive per
     # todo (blocked wins over in-flight): a todo that is both dependency-
     # blocked and herdr-in-flight must count once, in Blocked, not in both
@@ -1103,6 +1221,11 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
     n_flight = sum(1 for t in open_todos if open_bucket(t) == "in-flight")
     n_waiting = sum(1 for t in open_todos if open_bucket(t) == "waiting")
     n_someday = sum(1 for t in open_todos if open_bucket(t) == "someday")
+    if edit is None:
+        how = "Static page: rerun <span class=\"mono\">todos.sh dashboard</span> and reload to refresh."
+    else:
+        how = ("Served by <span class=\"mono\">todos.sh serve</span>: reload to refresh; "
+               "notes are appended to the todo file.")
     completed_html = ""
     if show_completed:
         completed_html = "<h2>Completed</h2>" + render_completed(completed)
@@ -1118,7 +1241,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 <main>
 <h1>{esc(repo_name)} board</h1>
 <div class="meta">generated {esc(stamp)} on <span class="mono">{esc(branch)}</span>.
-Static page: rerun <span class="mono">todos.sh dashboard</span> and reload to refresh.</div>
+{how}</div>
 <div class="counts">
 <div><b data-count="open">{n_open}</b><span>open</span></div>
 <div><b data-count="blocked">{n_blocked}</b><span>blocked</span></div>
@@ -1127,7 +1250,7 @@ Static page: rerun <span class="mono">todos.sh dashboard</span> and reload to re
 <div><b data-count="someday">{n_someday}</b><span>someday</span></div>
 </div>
 <h2>Open</h2>
-{render_open(open_todos)}
+{render_open(open_todos, edit)}
 {completed_html}
 <h2>Research</h2>
 {render_research(research)}

@@ -958,6 +958,83 @@ EOF
 }
 test_status_buckets
 
+test_prd_rows() {
+  local repo sr f
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-08-render-me <<'EOF'
+---
+created: 2026-05-08
+title: Render me
+priority: low
+---
+
+Preamble line.
+
+## Problem
+
+First line
+continues with `code <b>` and **bold** and [docs](https://example.com/a?b=1&c=2).
+See https://example.com/x.
+
+- top item
+  - nested item
+1. numbered
+   continuation
+
+### Sub heading
+
+```sh
+echo "<tag>"
+## not a section
+```
+
+| a | b |
+| - | - |
+
+<script>alert(1)</script> <img src=x onerror=y> [x](javascript:alert(1)) _not_italic_
+
+## Solution
+
+Fix it.
+EOF
+  mk_todo "$repo" completed 2026-05-06-shipped <<'EOF'
+---
+created: 2026-05-06
+title: Shipped
+---
+
+## Problem
+
+Done and dusted.
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "prd: exit 0" "$(rc)" "0"
+  assert_file_has "prd: open row gets a full-width details row" "$f" \
+    '<tr class="prd-row" data-prd="2026-05-08-render-me"><td colspan="5"><details class="prd" id="prd-2026-05-08-render-me"><summary>PRD</summary>'
+  assert_file_has "prd: completed row gets a details row" "$f" \
+    '<tr class="prd-row" data-prd="2026-05-06-shipped"><td colspan="4"><details class="prd" id="prd-2026-05-06-shipped"><summary>PRD</summary>'
+  assert_file_has "prd: preamble and section heading" "$f" '<p>Preamble line.</p><h4>Problem</h4>'
+  assert_file_has "prd: paragraph join, inline code, bold, link, bare URL" "$f" \
+    '<p>First line continues with <code>code &lt;b&gt;</code> and <strong>bold</strong> and <a href="https://example.com/a?b=1&amp;c=2">docs</a>. See <a href="https://example.com/x">https://example.com/x</a>.</p>'
+  assert_file_has "prd: flattened list with depth and literal number" "$f" \
+    '<ul class="md"><li class="d0">top item</li><li class="d1">nested item</li><li class="d0"><span class="num">1.</span> numbered continuation</li></ul>'
+  assert_file_has "prd: sub heading" "$f" '<h5>Sub heading</h5>'
+  assert_file_has "prd: fenced block is escaped pre" "$f" '<pre>echo &quot;&lt;tag&gt;&quot;'
+  assert_file_lacks "prd: heading inside a fence is not a section" "$f" '<h4>not a section</h4>'
+  assert_file_has "prd: table is pre" "$f" '<pre>| a | b |'
+  assert_file_has "prd: hostile text escaped" "$f" \
+    '<p>&lt;script&gt;alert(1)&lt;/script&gt; &lt;img src=x onerror=y&gt; [x](javascript:alert(1)) _not_italic_</p>'
+  assert_file_lacks "prd: no img tag" "$f" '<img'
+  assert_file_lacks "prd: no javascript href" "$f" 'href="javascript'
+  assert_file_lacks "prd: no italic" "$f" '<em>'
+  assert_file_has "prd: completed body rendered" "$f" '<h4>Problem</h4><p>Done and dusted.</p>'
+  assert_file_lacks "prd: static page has no script" "$f" '<script'
+  assert_file_lacks "prd: static page has no form" "$f" '<form'
+  if grep -qiE '<link|<iframe|@import|url\(|<script| on[a-z]+="' "$f"; then bad "prd: inert page" "script, link, iframe, import, url(), or on*= handler"; else ok "prd: inert page"; fi
+  rm_fixture "$repo" "$sr"
+}
+test_prd_rows
+
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
