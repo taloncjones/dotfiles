@@ -1384,6 +1384,40 @@ EOF
 test_note_exit_zero_after_replace
 
 
+test_local_lock() {
+  local repo lock holder i out rc
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-09-locked <<'EOF'
+---
+title: Locked
+---
+
+## Solution
+
+S.
+EOF
+  lock="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
+  python3 "$HERE/../todos_store.py" lock "$lock" 30 -- sleep 28.731 & holder=$!
+  for i in $(seq 1 50); do
+    python3 "$HERE/../todos_store.py" lock "$lock" 0 -- true; [ "$?" = 75 ] && break; sleep 0.1
+  done
+  out=$( (cd "$repo" && printf 'x' | TODOS_LOCK_WAIT=1 bash "$TODOS" note 2026-06-09-locked Solution) 2>&1 ); rc=$?
+  assert_eq "lock: busy local lock refuses note" "$rc|$out|$(grep -c '^x$' "$repo/.todos/pending/2026-06-09-locked.md")" \
+    "1|todos: .todos is busy|0"
+  out=$( (cd "$repo" && TODOS_LOCK_WAIT=1 bash "$TODOS" done 2026-06-09-locked) 2>&1 ); rc=$?
+  assert_eq "lock: busy local lock refuses done" "$rc|$out|$(ls "$repo/.todos/pending" | grep -c locked)" \
+    "1|todos: .todos is busy|1"
+  out=$( (cd "$repo" && TODOS_LOCK_WAIT=1 bash "$TODOS" depend 2026-06-09-locked pr:5) 2>&1 ); rc=$?
+  assert_eq "lock: busy local lock refuses depend" "$rc|$out|$(grep -c 'pr:5' "$repo/.todos/pending/2026-06-09-locked.md")" \
+    "1|todos: .todos is busy|0"
+  kill -9 "$holder"; wait "$holder" 2>/dev/null; pkill -f 'sleep 28.731' 2>/dev/null
+  (cd "$repo" && TODOS_LOCK_WAIT=1 bash "$TODOS" done 2026-06-09-locked) >/dev/null 2>&1; rc=$?
+  assert_eq "lock: killed holder frees the local lock" "$rc|$(ls "$repo/.todos/completed" | grep -c locked)" "0|1"
+  assert_note_refused "lock: note after done finds no pending todo" 2 "$repo" "x" 2026-06-09-locked Solution
+  rm -rf "$repo"
+}
+test_local_lock
+
 # --- store mode -------------------------------------------------------------
 # Cases set these per call; never inherit them from the developer's shell.
 unset TODOS_OFFLINE TODOS_SYNC_TIMEOUT TODOS_LOCK_WAIT TODOS_STORE_LOCKED CLAUDE_CODE_REMOTE

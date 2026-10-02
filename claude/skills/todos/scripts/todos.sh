@@ -817,7 +817,8 @@ cmd_done() {
   [ "$#" -ge 1 ] || die "done requires a slug or substring"
   local query="$1"
   store_setup
-  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  todos_locked
+  if [ -n "$STORE_REPO" ]; then store_begin; fi
   local root pending completed
   root=$(repo_root)
   pending="$root/$TODOS_DIRNAME/pending"
@@ -838,7 +839,8 @@ cmd_depend() {
   local query="$1"; shift
   [ "$#" -ge 1 ] || die "depend requires at least one ref"
   store_setup
-  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  todos_locked
+  if [ -n "$STORE_REPO" ]; then store_begin; fi
   local target base refs=() ref d
   target=$(find_pending "$query") || exit 1
   base=$(basename "$target" .md)
