@@ -70,6 +70,20 @@ class CarryForwardTests(unittest.TestCase):
     def proof(self, head: str = "HEAD") -> dict:
         return bd.carry_forward(self.repo, self.gated, head, "origin/main")
 
+    def test_merge_tree_lists_only_conflicted_paths(self):
+        review = bd._review
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", "side")
+        side = commit_file(self.repo, "both.txt", "side\n", "side")
+        git(self.repo, "checkout", "-q", "-b", "other", base)
+        other = commit_file(self.repo, "both.txt", "other\n", "other")
+        tree, conflicted = review.merge_tree(self.repo, side, other)
+        self.assertRegex(tree, r"^[0-9a-f]{40}$")
+        self.assertEqual(conflicted, ["both.txt"])
+        clean_tree, clean = review.merge_tree(self.repo, base, side)
+        self.assertEqual(clean, [])
+        self.assertEqual(clean_tree, git(self.repo, "rev-parse", f"{side}^{{tree}}"))
+
     def test_merge_main_only_with_untouched_files_passes(self):
         self.advance_main("main_only.txt", "a\nb\n")
         self.merge_main()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
 from pathlib import Path
 
 
@@ -37,19 +36,6 @@ def _names(repo: Path, old: str, new: str, paths: list[str] | None = None) -> li
     return [name for name in raw.decode("utf-8", "surrogateescape").split("\0") if name]
 
 
-def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
-    """Tree of git's own merge of ours and theirs, plus its conflicted paths."""
-    result = subprocess.run(
-        ["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
-        capture_output=True, env=_review.git_environment(), check=False,
-    )
-    if result.returncode not in (0, 1):
-        raise ProofError(result.stderr.decode(errors="replace").strip() or "git merge-tree failed")
-    fields = result.stdout.decode("utf-8", "surrogateescape").split("\0")
-    conflicted = [name for name in fields[1:] if name] if result.returncode else []
-    return fields[0], conflicted
-
-
 def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict:
     """Prove head differs from gated_head only by merges of upstream (spec R3-R5)."""
     record = {
@@ -81,7 +67,7 @@ def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict
         record.update(old_base=old_base, new_base=new_base)
         branch_own = proof("branch-files", ["diff", "--name-only", old_base, gated],
                           _names(repo, old_base, gated))
-        merged, conflicted = _merge_tree(repo, gated, new_base)
+        merged, conflicted = _review.merge_tree(repo, gated, new_base)
         for path in sorted(conflicted):
             reasons.append(f"{path}: merging upstream conflicts with the branch")
         # Whole tree, no pathspec: head must equal git's merge of the gated head

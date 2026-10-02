@@ -77,6 +77,28 @@ def full_commit(repo: Path, reference: str) -> str:
     return text_git(repo, "rev-parse", "--verify", f"{reference}^{{commit}}")
 
 
+def merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
+    """Tree of git's own merge of ours and theirs, plus its conflicted paths."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
+        capture_output=True,
+        env=git_environment(),
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise ReviewError(
+            result.stderr.decode(errors="replace").strip() or "git merge-tree failed"
+        )
+    fields = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    conflicted: list[str] = []
+    # An empty field ends the conflicted-file list; informational messages follow.
+    for name in fields[1:] if result.returncode else ():
+        if not name:
+            break
+        conflicted.append(name)
+    return fields[0], sorted(set(conflicted))
+
+
 _BRANCH_BAD = ("..", "@{", "~", "^", ":", "\\", " ")
 
 # Frozen artifact kinds: repository-relative root and required suffix. The
