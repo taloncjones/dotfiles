@@ -87,6 +87,8 @@ cleanup() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; rm -rf "$REPO" "$S
 trap cleanup EXIT
 for _ in $(seq 1 100); do [ -s "$OUT" ] && break; sleep 0.1; done
 URL=$(head -1 "$OUT")
+for _ in $(seq 1 100); do [ -s "$ERR" ] && break; sleep 0.1; done
+TOKEN=$(head -1 "$ERR" | sed -n 's/.*[?]t=\([^&]*\)$/\1/p')
 
 test_serve_url() {
   case "$URL" in
@@ -98,7 +100,7 @@ test_serve_url
 
 test_serve_page() {
   local r sha
-  r=$(http "$URL" GET /)
+  r=$(http "$URL" GET "/?t=$TOKEN")
   sha=$(sha_of "$F")
   assert_contains "serve: GET / is 200" "${r%%|*}" "200"
   assert_contains "serve: pending row has a note form" "$r" "name=\"id\" value=\"$ID\"><input type=\"hidden\" name=\"section\" value=\"Solution\">"
@@ -106,9 +108,9 @@ test_serve_page() {
   assert_contains "serve: completed row is rendered" "$r" 'data-prd="2026-05-30-finished"'
   assert_missing "serve: completed row has no form" "$r" 'name="id" value="2026-05-30-finished"'
   assert_missing "serve: page has no script" "$r" '<script'
-  r=$(http "$URL" GET "/?open=$ID")
+  r=$(http "$URL" GET "/?t=$TOKEN&open=$ID")
   assert_contains "serve: ?open= opens that row" "$r" "<details class=\"prd\" id=\"prd-$ID\" open>"
-  r=$(http "$URL" GET /nope)
+  r=$(http "$URL" GET "/nope?t=$TOKEN")
   assert_eq "serve: unknown path is 404" "${r%%|*}" "404"
 }
 test_serve_page
@@ -116,7 +118,7 @@ test_serve_page
 test_serve_host_and_token() {
   local r before
   before=$(cksum <"$F")
-  r=$(http "$URL" GET / "attacker.example:80")
+  r=$(http "$URL" GET "/?t=$TOKEN" "attacker.example:80")
   assert_eq "serve: foreign Host is 403" "${r%%|*}" "403"
   assert_missing "serve: foreign Host gets no board" "$r" "Serve target"
   r=$(http "$URL" POST /note "" "$(form id=$ID section=Solution sha="$(sha_of "$F")" token=wrong note='Lost idea.')")
@@ -126,13 +128,31 @@ test_serve_host_and_token() {
 }
 test_serve_host_and_token
 
+test_serve_get_requires_token() {
+  local r
+  for q in "" "?t=wrong" "?t=" "?x=$TOKEN" "?open=$ID" "?open=$ID&t=wrong"; do
+    r=$(http "$URL" GET "/$q")
+    assert_eq "serve: GET /$q is 403" "${r%%|*}" "403"
+    assert_missing "serve: GET /$q leaks no todo text" "$r" "Served problem."
+    assert_missing "serve: GET /$q leaks no title" "$r" "Serve target"
+    assert_missing "serve: GET /$q leaks no token" "$r" "$TOKEN"
+  done
+  r=$(http "$URL" GET "/nope")
+  assert_eq "serve: tokenless unknown path is 403" "${r%%|*}" "403"
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_eq "serve: GET with the token is 200" "${r%%|*}" "200"
+  assert_contains "serve: GET with the token shows the board" "$r" "Served problem."
+  assert_eq "serve: stderr names the tokenized URL once" "$(grep -c "^http://127.0.0.1:[0-9]*/[?]t=$TOKEN$" "$ERR")" "1"
+}
+test_serve_get_requires_token
+
 test_serve_post_note() {
   local page token sha old r
-  page=$(http "$URL" GET /)
+  page=$(http "$URL" GET "/?t=$TOKEN")
   token=$(printf '%s' "$page" | sed -n 's/.*name="token" value="\([^"]*\)".*/\1/p' | head -1)
   sha=$(sha_of "$F"); cp "$F" "$REPO/old.md"
   r=$(http "$URL" POST /note "" "$(form id=$ID section=Solution sha="$sha" token="$token" note=$'Served idea.\r\nSecond line.')")
-  assert_eq "serve: good post redirects back to the row" "${r%|*}" "303|/?open=$ID#prd-$ID"
+  assert_eq "serve: good post redirects back to the row" "${r%|*}" "303|/?t=$TOKEN&open=$ID#prd-$ID"
   assert_eq "serve: note appended as LF note LF, CRLF folded to LF" \
     "$(python3 - "$REPO/old.md" "$F" <<'PY'
 import sys
@@ -174,14 +194,14 @@ test_serve_body_cap
 
 test_serve_idle_socket() {
   local r
-  r=$(python3 - "$URL" <<'PY'
+  r=$(python3 - "$URL" "$TOKEN" <<'PY'
 import http.client, socket, sys, time, urllib.parse
 port = urllib.parse.urlsplit(sys.argv[1]).port
 idle = socket.create_connection(("127.0.0.1", port))
 time.sleep(0.2)
 start = time.monotonic()
 c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
-c.putrequest("GET", "/", skip_host=True)
+c.putrequest("GET", f"/?t={sys.argv[2]}", skip_host=True)
 c.putheader("Host", f"127.0.0.1:{port}")
 c.endheaders()
 status = c.getresponse().status
@@ -195,23 +215,26 @@ test_serve_idle_socket
 
 test_serve_frame_header() {
   local r
-  r=$(python3 - "$URL" <<'PY'
+  r=$(python3 - "$URL" "$TOKEN" <<'PY'
 import http.client, sys, urllib.parse
 port = urllib.parse.urlsplit(sys.argv[1]).port
-c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-c.putrequest("GET", "/", skip_host=True)
-c.putheader("Host", f"127.0.0.1:{port}")
-c.endheaders()
-print(c.getresponse().getheader("Content-Security-Policy"))
+for path in (f"/?t={sys.argv[2]}", "/"):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+    c.putrequest("GET", path, skip_host=True)
+    c.putheader("Host", f"127.0.0.1:{port}")
+    c.endheaders()
+    resp = c.getresponse()
+    print(resp.getheader("Content-Security-Policy"), resp.getheader("Referrer-Policy"))
 PY
 )
-  assert_eq "serve: pages refuse framing" "$r" "frame-ancestors 'none'"
+  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none' no-referrer
+frame-ancestors 'none' no-referrer"
 }
 test_serve_frame_header
 
 test_serve_nul_field() {
   local page token r
-  page=$(http "$URL" GET /)
+  page=$(http "$URL" GET "/?t=$TOKEN")
   token=$(printf '%s' "$page" | sed -n 's/.*name="token" value="\([^"]*\)".*/\1/p' | head -1)
   r=$(http "$URL" POST /note "" "id=$ID%00x&section=Solution&sha=0&token=$token&note=x")
   assert_eq "serve: a NUL in a form field is 400" "${r%%|*}" "400"
@@ -272,12 +295,14 @@ test_serve_ignores_inherited_lock_marker() {
   pid2=$!
   for _ in $(seq 1 100); do [ -s "$out2" ] && break; sleep 0.1; done
   url2=$(head -1 "$out2")
+  for _ in $(seq 1 100); do [ -s "$err2" ] && break; sleep 0.1; done
+  TOKEN2=$(head -1 "$err2" | sed -n 's/.*[?]t=\([^&]*\)$/\1/p')
   lock="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
   python3 "$HERE/../todos_store.py" lock "$lock" 30 -- sleep 26.519 & holder=$!
   for _ in $(seq 1 50); do
     python3 "$HERE/../todos_store.py" lock "$lock" 0 -- true; [ "$?" = 75 ] && break; sleep 0.1
   done
-  page=$(http "$url2" GET /)
+  page=$(http "$url2" GET "/?t=$TOKEN2")
   token=$(printf '%s' "$page" | sed -n 's/.*name="token" value="\([^"]*\)".*/\1/p' | head -1)
   cp "$F" "$REPO/pre-lock.md"
   r=$(http "$url2" POST /note "" "$(form id=$ID section=Solution sha="$(sha_of "$F")" token="$token" note='Locked out.')")

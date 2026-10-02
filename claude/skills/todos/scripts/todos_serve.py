@@ -5,9 +5,10 @@ Invoked as `todos.sh serve [--runtime claude|codex] [--personal] [--online]
 [--completed N] [--port N] [--open]`; see claude/skills/todos/SKILL.md
 ("Serve"). Every GET rebuilds the page with todos_dashboard; every note goes
 through `todos.sh note`, the one writer, so TODO.md, the lock and the store
-sync stay correct. Each form carries a per-run token and every request must
-name this server in its Host header, so another site cannot post notes or
-read the page.
+sync stay correct. Every request must name this server in its Host header
+and carry the per-run token (`?t=` on GETs, a form field on POSTs), so
+neither another site nor another local process can read the page or post
+notes. The token URL is printed once on stderr.
 """
 import argparse
 import hmac
@@ -90,19 +91,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
     def host_ok(self):
         return self.headers.get("Host") == f"{BIND_HOST}:{self.server.server_port}"
 
+    def token_ok(self, supplied):
+        return hmac.compare_digest(supplied.encode(), self.server.token.encode())
+
     def do_GET(self):
         if not self.host_ok():
             return self.send_page(403, message_page(TITLES[403], "Unexpected Host header."))
         url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query)
+        if not self.token_ok(query.get("t", [""])[0]):
+            return self.send_page(403, message_page(
+                TITLES[403], "Open the URL that todos.sh serve printed; it carries the run token."))
         if url.path != "/":
             return self.send_page(404, message_page("Not found", url.path))
-        open_id = urllib.parse.parse_qs(url.query).get("open", [""])[0]
+        open_id = query.get("open", [""])[0]
         edit = {"token": self.server.token, "open": open_id}
         self.send_page(200, board.build_page(self.server.ctx, self.server.args, edit))
 
@@ -128,10 +137,12 @@ class Handler(BaseHTTPRequestHandler):
 
         note_id, section, sha = field("id"), field("section"), field("sha")
         note = field("note").replace("\r\n", "\n").replace("\r", "\n")
-        back = f"/?open={urllib.parse.quote(note_id)}#prd-{urllib.parse.quote(note_id)}"
-        if not hmac.compare_digest(field("token").encode(), self.server.token.encode()):
+        if not self.token_ok(field("token")):
             return self.send_page(403, message_page(
-                TITLES[403], "This page is from an earlier server run; reload it.", note, back))
+                TITLES[403], "This page is from an earlier server run; reopen the URL "
+                "that todos.sh serve printed.", note))
+        back = (f"/?t={self.server.token}&open={urllib.parse.quote(note_id)}"
+                f"#prd-{urllib.parse.quote(note_id)}")
         if "\0" in note_id + section + sha:
             return self.send_page(400, message_page(
                 TITLES[400], "The form fields contain a NUL byte.", note, back))
@@ -170,9 +181,11 @@ def main(argv=None):
     except OSError as e:
         board.die(f"cannot listen on {BIND_HOST}:{args.port}: {e.strerror or e}")
     url = f"http://{BIND_HOST}:{server.server_port}/"
+    token_url = f"{url}?t={server.token}"
     print(url, flush=True)
+    print(token_url, file=sys.stderr, flush=True)
     if args.open:
-        board.open_file(url)
+        board.open_file(token_url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

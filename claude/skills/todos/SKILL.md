@@ -251,8 +251,9 @@ atomically so a half-written file is never seen.
 ## Serve and notes
 
 `todos.sh serve` renders the same board at `http://127.0.0.1:<port>/`
-and prints that URL (`--port 0`, the default, lets the OS pick; `--open`
-opens it). Every request re-reads `.todos/`, so a reload always shows the
+(`--port 0`, the default, lets the OS pick). It prints the bare address on
+stdout and the URL with the per-run token (`/?t=<token>`) on stderr;
+`--open` opens the token URL. Every request re-reads `.todos/`, so a reload always shows the
 files as they are now. In each pending todo's expanded row there is a form
 under its Problem, Solution and Verification sections; completed todos
 are read-only. Stop the server with Ctrl-C.
@@ -283,9 +284,12 @@ the repo that holds `.todos`, in local mode too, so they never lose each
 other's writes. A busy lock exits 1 after `TODOS_LOCK_WAIT` seconds.
 
 The server binds 127.0.0.1 only, answers only requests whose `Host`
-header names that address and port, and puts a per-run token in every
-form. Other websites can neither read the board nor post notes, and a tab
-left open across a server restart gets a 403 and must be reloaded.
+header names that address and port, and requires the per-run token on
+every request: `?t=<token>` on a GET, a hidden field on each form. A
+request without the right token gets a 403 that never shows a todo or the
+token, so other websites and other local processes can neither read the
+board nor post notes. Pages send `Referrer-Policy: no-referrer`. A tab
+left open across a server restart gets a 403; reopen the printed URL.
 
 ## Research reports
 

@@ -415,7 +415,8 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
     default; task and TODO state remain read-only. Use `--runtime codex`
     for Codex and retain `--personal` for a personal account in a work repo
   - Every dashboard row expands to the todo's rendered PRD. `todos.sh serve
-    [--open]` serves the same board on 127.0.0.1 with forms that append a
+    [--open]` serves the same board on 127.0.0.1 (the URL carries a per-run token;
+    a request without it is refused) with forms that append a
     note to a pending todo's Problem, Solution or Verification section
     through `todos.sh note <exact-id> <section>`
 - `review-change` - bounded single-seat development review
