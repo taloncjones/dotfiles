@@ -60,7 +60,7 @@ fallback policy into this adapter.
 
 The coordinator creates an expected identity before preparing the snapshot and
 retains it independently in `RUN_DIR`, separate from the report. It obtains PR repository, number, head,
-base branch, base SHA, and CI from the live PR. For a PR, confirm that `origin`
+base branch, base SHA (`baseRefOid`), and CI from the live PR. For a PR, confirm that `origin`
 is the target repository before using `--base-ref`; a fork's `origin` is not a
 valid target source. A local no-PR review may return `CHANGES` or `INCOMPLETE`
 but cannot claim PR readiness or `APPROVE`; it cannot fabricate a PR number.
@@ -69,8 +69,7 @@ includes a fresh `run_id`, and supplies `known_blockers` as an empty list when
 there are none.
 
 Do not read historical comments or markers for authority. Record a dirty source
-checkout, but still freeze it for findings; equality of the committed expected
-tree and reviewed tree is required later for approval. `SNAPSHOT_DIR` is empty
+checkout, but still freeze it for findings; equality of the reviewed tree with the committed expected tree, or with `expected.merge_tree` when it is set, is required later for approval. `SNAPSHOT_DIR` is empty
 and reserved only for `review.py`; `RUN_DIR` holds prompts, runtime results,
 diff, CI, expected identity, and report. Prepare and verify one snapshot:
 
@@ -79,18 +78,30 @@ POLICY=$(uv run --no-project python "$GATE_REPORT" policy --section POLICY) || e
 uv run --no-project python "$GATE_REPORT" schema >"$RUN_DIR/gate-schema.json" || exit 2
 git -C "$REPO" status --porcelain >"$RUN_DIR/source-status.txt"
 uv run --no-project python "$REVIEW_HELPER" prepare \
-  --repo "$REPO" --base-ref "$BASE_REF" --output-dir "$SNAPSHOT_DIR" >"$RUN_DIR/prepare.json"
-# Local no-PR review uses `--base "$BASE"` instead of `--base-ref`.
+    --repo "$REPO" --base-ref "$BASE_REF" --pr-base "$PR_BASE" --output-dir "$SNAPSHOT_DIR" >"$RUN_DIR/prepare.json"
+# PR_BASE is the live PR's baseRefOid (`gh pr view --json baseRefOid`).
+# Local no-PR review uses `--base "$BASE"` instead of `--base-ref` and `--pr-base`.
 # Parse the returned JSON's `manifest` field; do not assume its filename.
 MANIFEST=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest"])' "$RUN_DIR/prepare.json")
 uv run --no-project python "$REVIEW_HELPER" verify --manifest "$MANIFEST"
 ```
 
+For a PR gate, read the live PR's `baseRefOid` into `PR_BASE` before
+`prepare` and write it as `expected.base`; the manifest's `source.base`
+must equal it. After `verify` and before any seat runs, write
+`source.merge_tree` as `expected.merge_tree`, in the same write that sets
+`class`. When head does not contain the PR base, `prepare` freezes git's
+merge of the PR base and head, so the frozen diff below is the change the
+squash merge makes on the current base, and `report.reviewed_tree` must
+equal `expected.merge_tree`; when the PR base is the merge-base,
+`source.merge_tree` is null. An interruption between `prepare` and that
+write invalidates the run: start a new `run_id` with a fresh
+`SNAPSHOT_DIR`, and never patch an existing expected identity.
+
 Read `source.base`, `source.head`, `source.repo_id`, `source.source_tree`,
 `snapshot.codex_root`, `snapshot.claude_root`, and `snapshot.codex_tree` from
 the verified manifest. `source.source_tree` binds `expected.tree` and
-`snapshot.codex_tree` binds `report.reviewed_tree`; their mismatch is incomplete
-for approval, not an early review abort. Capture the frozen diff and CI JSON
+`snapshot.codex_tree` binds `report.reviewed_tree`; the reviewed tree must equal `expected.tree`, or `expected.merge_tree` when it is set; a mismatch is incomplete for approval, not an early review abort. Capture the frozen diff and CI JSON
 response for that exact expected head:
 
 ```bash
@@ -535,7 +546,7 @@ own co-review marker. A personal repository needs no go at all.
 
 Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
-expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
+expected `head`, `base` = expected `base` (the PR's `baseRefOid`), `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
 own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected
 `delta.prior_run` and `prior_sha` = expected `delta.prior_head`, in that order.

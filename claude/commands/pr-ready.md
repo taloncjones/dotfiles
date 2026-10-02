@@ -25,18 +25,17 @@ fails, so a cleanup-failed report is never active evidence for this command.
 
 Resolve the installed co-review helper root, then use its evaluator. Before
 evaluation, recheck the live PR's repository, number, full head, target branch,
-resolved base, and CI. Compare each to the independently retained expected
+PR base (`baseRefOid`), and CI. Compare each to the independently retained expected
 identity. Refresh the active report's exact-head CI payload and digest, then
 evaluate the report against that expected file:
 
 ```bash
 test -f "$ACTIVE_CO_REVIEW_REPORT" && test -f "$EXPECTED_IDENTITY" || exit 2
 GATE_REPORT="$REVIEW_ROOT/claude/skills/co-review/scripts/gate_report.py"
-REVIEW_HELPER="$REVIEW_ROOT/claude/skills/co-review/scripts/review.py"
-gh pr view --json number,headRefOid,baseRefName,statusCheckRollup > live-pr.json
+gh pr view --json number,headRefOid,baseRefName,baseRefOid,statusCheckRollup > live-pr.json
 # Resolve BASE_REPO from pulls REST .base.repo.full_name, normalize and compare
-# it with origin's real fetch URL. Extract PR_NUMBER, HEAD, and BASE_REF from
-# live-pr.json, then resolve BASE with review.py resolve-base for HEAD/BASE_REF.
+# it with origin's real fetch URL. Extract PR_NUMBER, HEAD, BASE_REF, and
+# BASE (baseRefOid) from live-pr.json.
 TREE=$(git rev-parse "$HEAD^{tree}")
 uv run --no-project python - "$EXPECTED_IDENTITY" "$BASE_REPO" "$PR_NUMBER" "$HEAD" "$BASE" "$BASE_REF" "$TREE" <<'PY'
 import json
@@ -48,6 +47,11 @@ for key, value in actual.items():
     if expected.get(key) != (int(value) if key == "pr_number" else value):
         raise SystemExit(f"active identity changed: {key}")
 PY
+MERGE_TREE=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("merge_tree") or "")' "$EXPECTED_IDENTITY") || exit 2
+if [ -n "$MERGE_TREE" ]; then
+  MERGED=$(git merge-tree --write-tree "$BASE" "$HEAD") || exit 2
+  [ "$MERGED" = "$MERGE_TREE" ] || exit 2
+fi
 # Normalize statusCheckRollup into the strict CI envelope with the actual
 # headRefOid, required check_runs/status_contexts arrays, and each returned
 # check identity/status/conclusion or context identity/state. Refresh the
@@ -56,7 +60,7 @@ uv run --no-project python "$GATE_REPORT" evaluate \
   --report "$ACTIVE_CO_REVIEW_REPORT" --expected "$EXPECTED_IDENTITY"
 ```
 
-Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
+A moved PR base fails the identity check (`active identity changed: base`); it needs a fresh co-review gate on the same head. Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
 missing active evidence, evaluator `CHANGES`/`INCOMPLETE`, or CI failure stops
 and returns control to the user. Preserve the calling workflow's stop; do not
 turn it into an automatic review request. Evaluator approval does not authorize a merge:

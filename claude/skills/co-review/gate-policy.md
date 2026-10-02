@@ -161,10 +161,16 @@ repaired in place.
 ### Frozen inputs and report construction
 
 Prepare one immutable snapshot with `review.py prepare`, then run
-`review.py verify --manifest` before dispatch, before evaluation, and before
-cleanup. Freeze a dirty source when requested, record its state, and make the
-result incomplete unless the committed expected tree equals the frozen reviewed
-tree. `manifest.source.source_tree` binds `expected.tree`; the verified
+`review.py verify --manifest` before dispatch, before evaluation, and before cleanup.
+
+A PR gate passes the PR's `baseRefOid` as `--pr-base`. When head does not
+contain that base, the snapshot is git's merge dry-run of the base and
+head; `manifest.source.merge_tree` binds `expected.merge_tree`, and
+`report.reviewed_tree` must equal it in place of `expected.tree`. Every
+live recheck (`merge-ready`, `/pr-ready`, ship step 4) recomputes that
+merge from the live base and head.
+ Freeze a dirty source when requested, record its state, and make the
+result incomplete unless the frozen reviewed tree equals the committed expected tree, or `expected.merge_tree` when it is set. `manifest.source.source_tree` binds `expected.tree`; the verified
 `manifest.snapshot.codex_tree` binds `report.reviewed_tree`. Capture the exact
 frozen Git diff bytes without universal-newline normalization. Capture the CI
 payload for the expected head as a regular report artifact. Hash every artifact
