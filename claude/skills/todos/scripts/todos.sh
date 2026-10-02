@@ -23,6 +23,7 @@
 #   todos.sh share                      stop ignoring .todos/ (commit in this repo)
 #   todos.sh path                       print the .todos/ directory path
 #   todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]   render the HTML board
+#   todos.sh serve [--port N] [--open] [--online] [--completed N]   serve the board on 127.0.0.1 with note forms
 #   todos.sh note <exact-id> <Problem|Solution|Verification> [--expect-sha HEX]   append stdin to a section
 #   todos.sh sync                       commit, pull and push a store-backed .todos
 #   todos.sh import <dir>               merge a directory of todos in (newest wins)
@@ -1177,7 +1178,7 @@ cmd_repos() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|note|index|share|path|register|repos|brief|today|sync|import} ..."
+  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|note|index|share|path|register|repos|brief|today|sync|import|dashboard|serve} ..."
   TODOS_ARGV=("$@")
   local cmd="$1" ref; shift
   case "$cmd" in
@@ -1195,6 +1196,7 @@ main() {
     import)   cmd_import "$@" ;;
     _pull)    cmd_pull_locked ;;
     dashboard) store_setup; exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@" ;;
+    serve)    store_setup; exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_serve.py" "$@" ;;
     today)    today ;;
     register) cmd_register "$@" ;;
     repos)    cmd_repos "$@" ;;

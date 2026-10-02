@@ -1393,8 +1393,9 @@ def visibility_warning(root):
          "before saving research there")
 
 
-def main(argv=None):
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+def board_context(args):
+    """Repo, account scope and paths: everything a page build needs that
+    does not change between builds (todos.sh serve builds one per request)."""
     rc, root = git(["rev-parse", "--show-toplevel"])
     if rc != 0 or not root:
         die("not inside a git repository")
@@ -1408,29 +1409,45 @@ def main(argv=None):
     if rc != 0:
         remote = ""
     slug = core.repo_slug(remote, context["common_dir"])
-    _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
-
-    todos_dir = root / TODOS_DIRNAME
     state_root = default_state_root(scope)
-    tasks_dir = state_root / slug / "tasks"
-    confined_state = not bool(os.environ.get("TODOS_STATE_ROOT"))
-    out = Path(args.out) if args.out else default_out_dir(scope["account_id"]) / f"{slug}.html"
-    out = out if out.is_absolute() else Path.cwd() / out
-    guard_out_path(out, [(f"{TODOS_DIRNAME}/", todos_dir), ("the herdr state root", state_root)])
+    return {
+        "root": root,
+        "scope": scope,
+        "slug": slug,
+        "todos_dir": root / TODOS_DIRNAME,
+        "state_root": state_root,
+        "tasks_dir": state_root / slug / "tasks",
+        "confined_state": not bool(os.environ.get("TODOS_STATE_ROOT")),
+    }
 
-    if todos_dir.is_dir():
-        visibility_warning(root)
+
+def build_page(ctx, args, edit=None):
+    """Read the board fresh and render it; edit as in render_prd_row."""
+    root, todos_dir = ctx["root"], ctx["todos_dir"]
+    _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
     resolver = Resolver(root, args.online)
-    pending = load_dir(todos_dir / "pending", resolver, tasks_dir, True, confined_state)
-    completed = load_dir(todos_dir / "completed", resolver, tasks_dir, False, confined_state)
+    pending = load_dir(todos_dir / "pending", resolver, ctx["tasks_dir"], True, ctx["confined_state"])
+    completed = load_dir(todos_dir / "completed", resolver, ctx["tasks_dir"], False, ctx["confined_state"])
     pending.sort(key=open_sort_key)
     completed.sort(key=lambda t: (t["created"], t["basename"]), reverse=True)
     completed = completed[:args.completed]
     known = {t["basename"] for t in pending} | {t["basename"] for t in completed}
     research = load_research(todos_dir / "research", known)
-
     stamp = os.environ.get("TODOS_DASHBOARD_NOW") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    page = render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0)
+    return render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0, edit)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    ctx = board_context(args)
+    todos_dir = ctx["todos_dir"]
+    out = Path(args.out) if args.out else default_out_dir(ctx["scope"]["account_id"]) / f"{ctx['slug']}.html"
+    out = out if out.is_absolute() else Path.cwd() / out
+    guard_out_path(out, [(f"{TODOS_DIRNAME}/", todos_dir), ("the herdr state root", ctx["state_root"])])
+
+    if todos_dir.is_dir():
+        visibility_warning(ctx["root"])
+    page = build_page(ctx, args)
 
     tmp = out.with_name(out.name + f".tmp.{os.getpid()}")
     try:

@@ -105,6 +105,7 @@ sh claude/hooks/director-rollover.test.sh
 sh claude/skills/co-review/scripts/tests/review_test.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh
+bash claude/skills/todos/scripts/tests/todos_serve_test.sh
 bash claude/skills/repo-recall/scripts/tests/recall_test.sh
 bash claude/skills/voice/scripts/tests/voice_test.sh
 sh claude/skills/pr-status/scripts/tests/pr_status_test.sh
