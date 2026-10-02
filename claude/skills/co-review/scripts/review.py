@@ -47,14 +47,19 @@ def git(
     *args: str,
     input_data: bytes | None = None,
     env: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        input=input_data,
-        capture_output=True,
-        env=git_environment(env),
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            input=input_data,
+            capture_output=True,
+            env=git_environment(env),
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ReviewError(f"git {args[0]} timed out after {timeout}s") from error
     if result.returncode:
         raise ReviewError(
             result.stderr.decode(errors="replace").strip() or "git command failed"
@@ -76,6 +81,17 @@ def resolved_repo(value: str) -> Path:
 
 def full_commit(repo: Path, reference: str) -> str:
     return text_git(repo, "rev-parse", "--verify", f"{reference}^{{commit}}")
+
+
+def live_branch_tip(repo: Path, branch: str) -> str:
+    """Tip of origin's branch from git ls-remote; any failure is an error."""
+    try:
+        listed = text_git(repo, "ls-remote", "origin", f"refs/heads/{branch}", timeout=30).split()
+    except ReviewError as error:
+        raise ReviewError(f"cannot read the live origin/{branch} tip with git ls-remote: {error}") from error
+    if len(listed) != 2 or not _SHA40.fullmatch(listed[0]):
+        raise ReviewError(f"git ls-remote did not list origin/{branch} exactly once")
+    return listed[0]
 
 
 def merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
@@ -412,6 +428,13 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             f"PR base {pr_base} is not the fetched origin/{base_ref} tip "
             f"{base_ref_tip}; re-read the PR"
         )
+    if pr_base is not None:
+        live = live_branch_tip(repo, base_ref)
+        if pr_base != live:
+            raise ReviewError(
+                f"PR base {pr_base} is not the live origin/{base_ref} tip {live} "
+                "from git ls-remote; read the base from git, not baseRefOid"
+            )
     # Behind: the PR base is not an ancestor of head, so the merge-base is older.
     behind = pr_base is not None and base != pr_base
     if pr_base is not None:

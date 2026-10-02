@@ -1058,6 +1058,43 @@ class ReviewHelperTests(unittest.TestCase):
         self.assertIn(origin_tip, result.stderr)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
 
+    def git_shim_env(self, ls_remote_body: str) -> dict[str, str]:
+        """PATH whose git answers `ls-remote` with ls_remote_body and runs the rest."""
+        shim_dir = self.root / "git shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            f'  if [ "$arg" = ls-remote ]; then\n    {ls_remote_body}\n  fi\n'
+            "done\n"
+            f'exec {shlex.quote(shutil.which("git") or "git")} "$@"\n'
+        )
+        shim.chmod(0o755)
+        return {"PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}"}
+
+    def prepare_pr_base_at_tip(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        origin_tip = self.make_origin_target("origin_only")
+        self.run_git("fetch", "-q", "origin", "target")
+        self.run_git("checkout", "-q", "-b", "feature", origin_tip)
+        output = self.root / "review output"
+        return self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+            expect=2, extra_env=env,
+        )
+
+    def test_pr_base_must_equal_the_ls_remote_tip(self):
+        other = "e" * 40
+        env = self.git_shim_env(f'printf "{other}\\trefs/heads/target\\n"; exit 0')
+        result = self.prepare_pr_base_at_tip(env)
+        self.assertIn("git ls-remote", result.stderr)
+        self.assertIn(other, result.stderr)
+
+    def test_unreadable_ls_remote_tip_refuses(self):
+        result = self.prepare_pr_base_at_tip(self.git_shim_env("exit 1"))
+        self.assertIn("git ls-remote", result.stderr)
+
     def test_pr_base_requires_base_ref(self):
         output = self.root / "review output"
         result = self.command(
