@@ -97,6 +97,9 @@ def merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
         if not name:
             break
         conflicted.append(name)
+    # Exit 1 is a conflict even when no path is staged (a directory-rename split).
+    if result.returncode and not conflicted:
+        conflicted.append("(conflict with no path listed)")
     return fields[0], sorted(set(conflicted))
 
 
