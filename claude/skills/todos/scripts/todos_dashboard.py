@@ -366,6 +366,31 @@ def open_sort_key(t):
     return ("1" + pw + (t["created"] or "9999-99-99"), t["basename"])
 
 
+def view_matches(t, view):
+    """Served pages: does todo t pass the filter form's q, area and priority?"""
+    haystack = (t["basename"] + "\n" + t["text"]).lower()
+    if not all(term in haystack for term in view["q"].lower().split()):
+        return False
+    if view["area"] and t["area"] != view["area"]:
+        return False
+    return not view["priority"] or t["priority"] == view["priority"]
+
+
+def sort_open(todos, sort):
+    """Order open todos in place. Any sort other than priority or created
+    keeps open_sort_key, which already puts due dates first."""
+    if sort == "priority":
+        todos.sort(key=lambda t: (PRIORITY_WEIGHT.get(t["priority"], "3"),
+                                  t["created"] or "9999-99-99", t["basename"]))
+    elif sort == "created":
+        # Two stable passes: newest first, equal dates by basename, and a
+        # missing date ("") last.
+        todos.sort(key=lambda t: t["basename"])
+        todos.sort(key=lambda t: t["created"], reverse=True)
+    else:
+        todos.sort(key=open_sort_key)
+
+
 def load_research(research_dir, known_basenames):
     entries = []
     if not research_dir.is_dir():
@@ -1422,13 +1447,18 @@ def board_context(args):
 
 
 def build_page(ctx, args, edit=None):
-    """Read the board fresh and render it; edit as in render_prd_row."""
+    """Read the board fresh and render it; edit as in render_prd_row, plus,
+    on a served page, edit["view"]: the filter form's q, area, priority, sort."""
     root, todos_dir = ctx["root"], ctx["todos_dir"]
     _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
     resolver = Resolver(root, args.online)
     pending = load_dir(todos_dir / "pending", resolver, ctx["tasks_dir"], True, ctx["confined_state"])
     completed = load_dir(todos_dir / "completed", resolver, ctx["tasks_dir"], False, ctx["confined_state"])
-    pending.sort(key=open_sort_key)
+    view = edit["view"] if edit else None
+    if view:
+        pending = [t for t in pending if view_matches(t, view)]
+        completed = [t for t in completed if view_matches(t, view)]
+    sort_open(pending, view["sort"] if view else "")
     completed.sort(key=lambda t: (t["created"], t["basename"]), reverse=True)
     completed = completed[:args.completed]
     known = {t["basename"] for t in pending} | {t["basename"] for t in completed}

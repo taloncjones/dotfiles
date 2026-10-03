@@ -352,5 +352,119 @@ test_serve_open_keeps_token_out_of_argv() {
 }
 test_serve_open_keeps_token_out_of_argv
 
+# Board-search fixtures. Written after the note tests so those cases keep
+# their one-pending-todo board; every GET below re-reads .todos/.
+cat >"$REPO/.todos/pending/2026-07-01-alpha.md" <<'EOF'
+---
+created: 2026-07-01
+title: Alpha
+area: board
+priority: low
+due: 2026-09-01
+---
+
+## Problem
+
+Needle zebra.
+EOF
+cat >"$REPO/.todos/pending/2026-07-02-beta.md" <<'EOF'
+---
+created: 2026-07-02
+title: Beta
+area: board
+priority: high
+---
+
+## Problem
+
+Needle only.
+EOF
+cat >"$REPO/.todos/pending/2026-07-03-gamma.md" <<'EOF'
+---
+created: 2026-07-03
+title: Gamma
+area: store
+priority: med
+due: 2026-08-01
+---
+
+## Problem
+
+Other words.
+EOF
+cat >"$REPO/.todos/completed/2026-07-04-delta.md" <<'EOF'
+---
+created: 2026-07-04
+title: Delta
+---
+
+## Problem
+
+Needle in a finished todo.
+EOF
+
+# open_order <page> -> pending row ids in page order (completed rows carry no data-state)
+open_order() { printf '%s' "$1" | python3 -c 'import re, sys; print(" ".join(re.findall(r"data-todo=\"([^\"]+)\" data-state", sys.stdin.read())))'; }
+
+test_serve_search() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN&q=zebra")
+  assert_eq "search: one term keeps only the matching row" "$(open_order "$r")" "2026-07-01-alpha"
+  r=$(http "$URL" GET "/?t=$TOKEN&q=needle")
+  assert_eq "search: matches body text" "$(open_order "$r")" "2026-07-01-alpha 2026-07-02-beta"
+  assert_contains "search: matching completed row shown" "$r" 'data-todo="2026-07-04-delta"'
+  assert_missing "search: other completed row hidden" "$r" 'data-todo="2026-05-30-finished"'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=NEEDLE+zebra")
+  assert_eq "search: terms are ANDed, case-insensitive" "$(open_order "$r")" "2026-07-01-alpha"
+  r=$(http "$URL" GET "/?t=wrong&q=needle")
+  assert_eq "search: stale token is 403" "${r%%|*}" "403"
+  assert_missing "search: stale token shows no todo" "$r" "Needle"
+}
+test_serve_search
+
+test_serve_filter_area() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN&area=board")
+  assert_eq "area: only that area" "$(open_order "$r")" "2026-07-01-alpha 2026-07-02-beta"
+}
+test_serve_filter_area
+
+test_serve_filter_priority() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN&priority=high")
+  assert_eq "priority: only that priority" "$(open_order "$r")" "2026-07-02-beta"
+  r=$(http "$URL" GET "/?t=$TOKEN&priority=urgent")
+  assert_eq "priority: unknown value matches nothing" "$(open_order "$r")" ""
+}
+test_serve_filter_priority
+
+test_serve_sort() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_eq "sort: default is due date, then priority" "$(open_order "$r")" "2026-07-03-gamma 2026-07-01-alpha 2026-07-02-beta $ID"
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=priority")
+  assert_eq "sort: priority" "$(open_order "$r")" "2026-07-02-beta 2026-07-03-gamma 2026-07-01-alpha $ID"
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=created")
+  assert_eq "sort: newest first" "$(open_order "$r")" "2026-07-03-gamma 2026-07-02-beta 2026-07-01-alpha $ID"
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=bogus")
+  assert_eq "sort: unknown value keeps the default" "$(open_order "$r")" "2026-07-03-gamma 2026-07-01-alpha 2026-07-02-beta $ID"
+}
+test_serve_sort
+
+test_serve_filter_before_cap() {
+  local r n
+  # Ten newer completed todos push 2026-05-30-finished past the default
+  # --completed 10 cap, so only filtering before the cap can show it.
+  for n in 01 02 03 04 05 06 07 08 09 10; do
+    printf -- '---\ncreated: 2026-08-%s\ntitle: Filler %s\n---\n' "$n" "$n" \
+      >"$REPO/.todos/completed/2026-08-$n-filler.md"
+  done
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_missing "cap: unfiltered board hides the oldest completed row" "$r" 'data-todo="2026-05-30-finished"'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=finished")
+  assert_contains "cap: a search reaches completed rows past the cap" "$r" 'data-todo="2026-05-30-finished"'
+}
+test_serve_filter_before_cap
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
