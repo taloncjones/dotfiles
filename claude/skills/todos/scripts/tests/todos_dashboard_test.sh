@@ -284,6 +284,8 @@ test_render_fixture() {
   assert_file_has "render: bad record unreadable" "$f" 'data-todo="2026-05-05-bad-record" data-state="open" data-task-status="unreadable"'
   assert_file_has "render: title escaped" "$f" '&lt;script&gt;alert(1)&lt;/script&gt;'
   assert_file_lacks "render: no raw script tag" "$f" '<script'
+  assert_file_lacks "render: no filter form" "$f" 'class="filters"'
+  assert_file_lacks "render: no match count" "$f" 'data-match'
   assert_file_has "render: stamp" "$f" 'generated 2026-05-07 09:00'
   if grep -qiE '<link|<iframe|@import|url\(|<script| on[a-z]+="' "$f"; then bad "render: inert page" "script, link, iframe, import, url(), or on*= handler"; else ok "render: inert page"; fi
   ok "render: fixture board"

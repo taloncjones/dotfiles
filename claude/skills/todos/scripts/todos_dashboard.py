@@ -1012,6 +1012,33 @@ form.note button {
   width: fit-content;
 }
 
+form.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+form.filters input,
+form.filters select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+form.filters input[type="search"] {
+  flex: 1 1 16em;
+}
+
+form.filters .meta {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 @media (hover: hover) {
   a:hover {
     color: var(--ink);
@@ -1235,8 +1262,41 @@ def render_research(entries):
     return '<ul class="research">' + "".join(items) + "</ul>"
 
 
+SORT_CHOICES = (("", "Due date, then priority"), ("priority", "Priority"), ("created", "Newest"))
+
+
+def render_select(name, label, choices, current):
+    opts = "".join(
+        f'<option value="{esc(value)}"{" selected" if value == current else ""}>{esc(text)}</option>'
+        for value, text in choices)
+    return f'<select name="{name}" aria-label="{label}">{opts}</select>'
+
+
+def render_filters(view, todos, token, shown, total):
+    """Served pages: the GET form behind view_matches and sort_open.
+
+    The URL's area or priority is listed even when no todo has it, so the
+    form always shows the state the page was built from.
+    """
+    def choices(key, all_label):
+        values = {t[key] for t in todos if t[key]} | ({view[key]} if view[key] else set())
+        return [("", all_label)] + [(v, v) for v in sorted(values)]
+
+    sort = view["sort"] if view["sort"] in dict(SORT_CHOICES) else ""
+    return ('<form class="filters" method="get" action="/">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'<input type="search" name="q" value="{esc(view["q"])}" placeholder="Search" aria-label="Search">'
+            + render_select("area", "Area", choices("area", "All areas"), view["area"])
+            + render_select("priority", "Priority", choices("priority", "All priorities"), view["priority"])
+            + render_select("sort", "Sort", SORT_CHOICES, sort)
+            + '<button type="submit">Apply</button>'
+            f'<a href="/?t={esc(token)}">Clear</a>'
+            f'<p class="meta" data-match="{shown}/{total}">Showing {shown} of {total} open todos.</p>'
+            "</form>")
+
+
 def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed,
-                edit=None):
+                edit=None, filters=""):
     # Every tile derives from open_bucket, which is mutually exclusive per
     # todo (blocked wins over in-flight): a todo that is both dependency-
     # blocked and herdr-in-flight must count once, in Blocked, not in both
@@ -1275,6 +1335,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 <div><b data-count="someday">{n_someday}</b><span>someday</span></div>
 </div>
 <h2>Open</h2>
+{filters}
 {render_open(open_todos, edit)}
 {completed_html}
 <h2>Research</h2>
@@ -1455,8 +1516,11 @@ def build_page(ctx, args, edit=None):
     pending = load_dir(todos_dir / "pending", resolver, ctx["tasks_dir"], True, ctx["confined_state"])
     completed = load_dir(todos_dir / "completed", resolver, ctx["tasks_dir"], False, ctx["confined_state"])
     view = edit["view"] if edit else None
+    filters = ""
     if view:
-        pending = [t for t in pending if view_matches(t, view)]
+        shown = [t for t in pending if view_matches(t, view)]
+        filters = render_filters(view, pending + completed, edit["token"], len(shown), len(pending))
+        pending = shown
         completed = [t for t in completed if view_matches(t, view)]
     sort_open(pending, view["sort"] if view else "")
     completed.sort(key=lambda t: (t["created"], t["basename"]), reverse=True)
@@ -1464,7 +1528,8 @@ def build_page(ctx, args, edit=None):
     known = {t["basename"] for t in pending} | {t["basename"] for t in completed}
     research = load_research(todos_dir / "research", known)
     stamp = os.environ.get("TODOS_DASHBOARD_NOW") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    return render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0, edit)
+    return render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0, edit,
+                       filters)
 
 
 def main(argv=None):

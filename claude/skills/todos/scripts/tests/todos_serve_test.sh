@@ -450,6 +450,28 @@ test_serve_sort() {
   assert_eq "sort: unknown value keeps the default" "$(open_order "$r")" "2026-07-03-gamma 2026-07-01-alpha 2026-07-02-beta $ID"
 }
 test_serve_sort
+test_serve_filter_form() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "form: no filter counts every open todo" "$r" 'data-match="4/4"'
+  assert_contains "form: clear link keeps only the token" "$r" "<a href=\"/?t=$TOKEN\">Clear</a>"
+  r=$(http "$URL" GET "/?t=$TOKEN&q=needle")
+  assert_contains "form: search box keeps the query" "$r" 'name="q" value="needle"'
+  assert_contains "form: count shows matches of total" "$r" 'data-match="2/4"'
+  r=$(http "$URL" GET "/?t=$TOKEN&area=board")
+  assert_contains "form: area option selected" "$r" '<option value="board" selected>board</option>'
+  assert_contains "form: other areas listed" "$r" '<option value="store">store</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&priority=urgent")
+  assert_contains "form: unknown priority stays selected" "$r" '<option value="urgent" selected>urgent</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=priority")
+  assert_contains "form: sort option selected" "$r" '<option value="priority" selected>Priority</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=bogus")
+  assert_contains "form: unknown sort selects the default" "$r" '<option value="" selected>Due date, then priority</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=%22%3E%3Cscript%3Ex%3C%2Fscript%3E")
+  assert_contains "form: query is escaped" "$r" 'name="q" value="&quot;&gt;&lt;script&gt;x&lt;/script&gt;"'
+  assert_missing "form: query never becomes markup" "$r" '<script>x</script>'
+}
+test_serve_filter_form
 
 test_serve_filter_before_cap() {
   local r n
