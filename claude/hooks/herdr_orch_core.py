@@ -4043,7 +4043,9 @@ def row_settlement(task, index, *, done, review, head, payload_root, ship_report
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
     work. Rules 0b-5 rest on facts that stay true once written; rules 7-8 read
-    mutable evidence and only ever authorize an agent exit, not a pane close.
+    mutable evidence and authorize an agent exit. Whether the pane may close
+    is row_releases_pane's call: of the mutable reasons only ship-report
+    releases one, because a ship.md rewrite only moves its mtime forward.
     The ship rule reads a write-once ship.json snapshot and may authorize a
     pane close: settle persists it as exit_requested (rule 0b) before /exit."""
     workers = task.get("workers") if isinstance(task.get("workers"), list) else []
@@ -4091,6 +4093,26 @@ def row_settlement(task, index, *, done, review, head, payload_root, ship_report
         if reviews and head and is_reviewed(task, review, head, reviews[-1].get("workspace_id")):
             return "review-approved"
     return None
+
+
+# Phases whose rows release their pane on any settled reason.
+PANE_CLOSING_PHASES = ("review", "ship")
+
+
+def row_releases_pane(task, index, reason):
+    """Whether workers[index] lets settle close its pane, apart from being
+    settled. A plan or implement row releases only on facts that stay true:
+    a stored exit_requested of review-approved or plan-confirmed meant "the
+    agent may exit", never "the pane may close"."""
+    workers = task["workers"]
+    row = workers[index]
+    if row.get("phase") in PANE_CLOSING_PHASES:
+        return True
+    return ("ship-report" in (reason, row.get("exit_requested"))
+            or task.get("status") in _TERMINAL_TASK
+            or row.get("status") == "launch_failed"
+            or any(isinstance(w, dict) and w.get("phase") == row.get("phase")
+                   for w in workers[index + 1:]))
 
 
 # herdr reports `done` for a finished turn in an unfocused workspace; it is as

@@ -1544,6 +1544,11 @@ def _is_live(agents, row):
 _EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
 _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 
+# herdr says the agent is gone: agent_not_running (it left the pane during
+# --wait) or agent_not_found (nothing to deliver to). Only a fresh agent
+# list decides; settle never reads the pane or sends keys after these.
+_EXIT_GONE_CODES = frozenset({"agent_not_running", "agent_not_found"})
+
 
 def _exit_agent(herdr_cli, row, workspace_id, env):
     try:
@@ -1557,6 +1562,9 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
         message = str(exc)
         code = (message[len(_EXIT_DELIVERED_PREFIX):]
                 if message.startswith(_EXIT_DELIVERED_PREFIX) else None)
+        if code in _EXIT_GONE_CODES:
+            agents, _panes = _snapshot(herdr_cli, workspace_id, env)
+            return "still-live" if _is_live(agents, row) else "exited"
         if code not in _EXIT_DELIVERED_CODES:
             return "still-live"
     agents, _panes = _snapshot(herdr_cli, workspace_id, env)
@@ -1581,10 +1589,6 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
     return "still-live"
 
 
-# Rows whose pane settle may close once every row sharing it is settled.
-PANE_CLOSING_PHASES = ("review", "ship")
-
-
 def _pane_verdict(task, row, agents, panes, reasons):
     pane_id = row["pane_id"]
     if pane_id not in [p.get("pane_id") for p in panes]:
@@ -1596,9 +1600,7 @@ def _pane_verdict(task, row, agents, panes, reasons):
     # The first row's pane is the workspace root; a repair may still follow.
     if pane_id == task["workers"][0].get("pane_id"):
         return "kept-shared"
-    if any(task["workers"][i].get("phase") not in PANE_CLOSING_PHASES
-           and "ship-report" not in (reasons(i), task["workers"][i].get("exit_requested"))
-           for i in sharing):
+    if not all(core.row_releases_pane(task, i, reasons(i)) for i in sharing):
         return "kept-shared"
     if any(reasons(i) is None for i in sharing):
         return "kept-unsettled"
@@ -1708,7 +1710,7 @@ def _settlement_reasons(task, rd, task_id, head):
 
 def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
            runtime="claude", herdr_cli="herdr", env=None, personal=False):
-    """Exit a settled worker row's idle agent and close its pane if only review or ship rows used it."""
+    """Exit a settled worker row's idle agent and close its pane once every row that used it releases it."""
     child_env, repository, scope, rd = _settle_context(
         repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "settle")
     try:
@@ -1732,7 +1734,7 @@ def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
 
 def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
           runtime="claude", herdr_cli="herdr", env=None, personal=False):
-    """Settle every review and ship row of the task in one workspace, oldest first."""
+    """Settle every worker row of the task in one workspace, oldest first."""
     child_env, repository, scope, rd = _settle_context(
         repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "sweep")
     try:
@@ -1745,8 +1747,7 @@ def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
             rows = [_settle_index(herdr_cli, task_path, task, i, reasons,
                                   workspace_id, child_env)
                     for i, w in enumerate(task.get("workers", []))
-                    if isinstance(w, dict) and w.get("phase") in PANE_CLOSING_PHASES
-                    and w.get("workspace_id") == workspace_id]
+                    if isinstance(w, dict) and w.get("workspace_id") == workspace_id]
             return {"status": "swept", "rows": rows}
     except (OSError, ValueError) as exc:
         raise DispatchError(f"sweep could not hold the owner fence: {exc}") from exc

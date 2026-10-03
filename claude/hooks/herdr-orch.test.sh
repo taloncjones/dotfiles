@@ -11770,6 +11770,30 @@ assert rs({"status": "in-progress", "workers": [dict(plan, exit_requested="plan-
 assert rs({"status": "in-progress", "workers": [plan, impl]}, 0) is None  # no plan-advanced rule
 PY
 
+check "row_releases_pane: stable facts release a plan or implement pane, mutable reasons do not" <<'PY'
+import importlib.util, sys
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+def row(phase, lid, **kw):
+    return {"phase": phase, "launch_id": lid, "status": "launched", **kw}
+def task(status, *workers):
+    return {"status": status, "workers": list(workers)}
+I, R, S = row("implement", "I"), row("review", "R"), row("ship", "S")
+assert c.row_releases_pane(task("changes-requested", I, R), 1, None) is True
+assert c.row_releases_pane(task("changes-requested", I, S), 1, "handoff-recorded") is True
+assert c.row_releases_pane(task("changes-requested", I, row("implement", "I2")), 0, "superseded") is True
+assert c.row_releases_pane(task("merged", I), 0, "task-terminal") is True
+assert c.row_releases_pane(task("in-progress", row("implement", "F", status="launch_failed")), 0, "launch-failed") is True
+assert c.row_releases_pane(task("reviewed", I), 0, "ship-report") is True
+assert c.row_releases_pane(task("reviewed", dict(I, exit_requested="ship-report")), 0, "exit-requested") is True
+assert c.row_releases_pane(task("reviewed", I, R), 0, "review-approved") is False
+assert c.row_releases_pane(task("reviewed", dict(I, exit_requested="review-approved"), R), 0, "exit-requested") is False
+assert c.row_releases_pane(task("in-progress", dict(row("plan", "P"), exit_requested="plan-confirmed")), 0, "exit-requested") is False
+assert c.row_releases_pane(task("changes-requested", dict(I, exit_requested="review-approved"), row("implement", "I2")), 0, "exit-requested") is True
+assert c.row_releases_pane(task("changes-requested", I, R), 0, None) is False
+PY
+
 check "row_settlement: an implementer under review, a repair and a ship row stay unsettled" <<'PY'
 import importlib.util, os, sys, tempfile
 sys.path.insert(0, "claude/hooks")
@@ -12067,6 +12091,26 @@ assert "settle --launch-id" in sec4, "section 4 names the settle verb"
 assert f"never runs {tick}launch{tick} while a {tick}settle{tick} or {tick}sweep{tick}" in sec4, "serialization rule"
 sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
 assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
+PY
+
+check "docs: settle releases superseded repair panes, re-reads after agent_not_running, and terminal tasks are swept" <<'PY'
+import re
+flat = re.sub(r"\s+", " ", open("claude/skills/herdr-orchestration/SKILL.md").read())
+sec4 = flat.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+sec5 = flat.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
+sec6a = flat.split("## 6a. Director merge", 1)[1].split("## 7.", 1)[0]
+assert "a pane any plan, implement or repair row used" not in flat, "old never-close sentence removed"
+assert "Close the task's live panes" not in flat, "unguarded pane close removed"
+for phrase in ("its root pane", "superseded, failed at launch", "`agent_not_running`",
+               "`agent_not_found`", "rerun it before any launch",
+               "After `write-task` records `failed`, run one `sweep`"):
+    assert phrase in sec4, phrase
+assert "superseded implement and repair workers" in sec5
+for phrase in ("6. Run the adapter's `sweep` for the task workspace, then close the task's todo",
+               "run the adapter's `sweep` for the task workspace, and run teardown",
+               "run the adapter's `sweep` for the task workspace, then rerun teardown",
+               "Only the writes, the sweeps and teardown below are director-only"):
+    assert phrase in sec6a, phrase
 PY
 
 check "docs: the director ship step is config-driven and the old never-push sentence is gone" <<'PY'
