@@ -1557,7 +1557,9 @@ check-in report while it holds, with no mutating retry.
    and the branch is kept. A dirty worktree stops it the same way:
    `write-task` `teardown_blocked: "<reason>"` (carrying every field) and
    surface it; a human finishes `/post-merge`. Lessons distillation stays a
-   human step.
+   human step. Director-mode teardown ends with `archive-task` for the
+   task; a refusal is reported as `archive deferred` and the task stays in
+   place for the backfill.
 
 ## 7. Worker-created panes (self-managed)
 

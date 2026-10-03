@@ -4039,6 +4039,145 @@ def present_all(rd, *, apply, herdr_cli=None, env=None, timeout_secs=None):
     return rows, stopped
 
 
+ARCHIVE_WS_SIDECARS = (".events.jsonl", ".wake.json", ".wake.jsonl")
+ARCHIVE_MONTH_RE = re.compile(r"\d{4}-\d{2}\Z")
+
+
+def _entry_kind(path):
+    """'file', 'dir', 'other', or None when absent. Never follows a link."""
+    try:
+        with coordination.payload_parent(path) as (parent, name):
+            mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(mode):
+        return "file"
+    return "dir" if stat.S_ISDIR(mode) else "other"
+
+
+def archive_months(rd):
+    """archive/<YYYY-MM> directory names, oldest first."""
+    return sorted(p.name for p in payload_files(Path(rd) / "archive", "*")
+                  if ARCHIVE_MONTH_RE.match(p.name))
+
+
+def claimed_workspaces(rd, task_id):
+    """Workspaces whose live index names the task. An archived index never
+    claims: a reused workspace id belongs to its newer task."""
+    rd = Path(rd)
+    ids = (f.name[:-len(".json")] for f in payload_files(rd / "workspaces", "*.json"))
+    return sorted(ws for ws in ids if valid_workspace_id(ws)
+                  and (read_index(rd, ws) or {}).get("task_id") == task_id)
+
+
+def archive_month(rd, task_id, now=None):
+    """-> (month, None) or (None, "already-archived"). The month holding the
+    archived primary wins; the primary moves first, so an interrupted run
+    never splits a task across months."""
+    held = [m for m in archive_months(rd)
+            if _entry_kind(Path(rd) / "archive" / m / "tasks" / f"{task_id}.json")]
+    if len(held) > 1:
+        return None, "already-archived"
+    return (held[0] if held else time.strftime("%Y-%m", time.gmtime(now))), None
+
+
+def archive_moves(rd, task_id, claimed):
+    """The task's entries still at their source, in move order: the primary
+    first (it pins the month), each workspace's index after its sidecars (an
+    interrupted workspace stays claimed by its live index)."""
+    rd = Path(rd)
+    primary = f"{task_id}.json"
+    names = sorted(p.name for p in payload_files(rd / "tasks", f"{task_id}.*"))
+    moves = [f"tasks/{primary}"] if primary in names else []
+    if _entry_kind(rd / "artifacts" / task_id):
+        moves.append(f"artifacts/{task_id}")
+    moves += [f"tasks/{n}" for n in names if n != primary]
+    for ws in claimed:
+        moves += [f"workspaces/{ws}{s}" for s in ARCHIVE_WS_SIDECARS + (".json",)
+                  if _entry_kind(rd / "workspaces" / f"{ws}{s}")]
+    return moves
+
+
+def _eligibility_fields_ok(task):
+    """The fields the eligibility checks read have their expected types; a
+    malformed one refuses the task instead of being skipped."""
+    workers = task.get("workers")
+    if workers is None:
+        workers = []
+    if not isinstance(workers, list) or not all(isinstance(w, dict) for w in workers):
+        return False
+    values = [task.get("worktree")]
+    values += [w.get(key) for w in workers for key in ("worktree", "workspace_id")]
+    return all(v is None or isinstance(v, str) for v in values)
+
+
+def archive_task(rd, task_id, poll, now=None):
+    """Move one finished, torn-down task into archive/<month>/ by rename.
+    -> ("archived", month, count) or ("refused", reason, None). Every check
+    runs before the first rename; nothing is copied, rewritten or deleted,
+    and each call replans from disk so an interrupted run resumes."""
+    rd = Path(rd)
+    month, conflict = archive_month(rd, task_id, now)
+    if conflict:
+        return "refused", conflict, None
+    live = rd / "tasks" / f"{task_id}.json"
+    archived = rd / "archive" / month / "tasks" / f"{task_id}.json"
+    live_kind, archived_kind = _entry_kind(live), _entry_kind(archived)
+    if live_kind and archived_kind:
+        return "refused", "already-archived", None
+    if not live_kind and not archived_kind:
+        return "refused", "not-found", None
+    try:
+        task = json.loads(read_payload_text(live if live_kind else archived))
+    except (OSError, ValueError):
+        task = None
+    if (not isinstance(task, dict) or task.get("task_id") != task_id
+            or not _eligibility_fields_ok(task)):
+        return "refused", "unreadable", None
+    status = task.get("status")
+    if not isinstance(status, str) or status not in CHECKIN_TERMINAL:
+        return "refused", "not-terminal", None
+    if task.get("teardown_blocked") is not None:
+        return "refused", "teardown-blocked", None
+    workers = task.get("workers") or []
+    trees = [task.get("worktree")] + [w.get("worktree") for w in workers]
+    if any(t and os.path.lexists(t) for t in trees):
+        return "refused", "worktree-present", None
+    if poll is None:
+        return "refused", "poll-unavailable", None
+    claimed = claimed_workspaces(rd, task_id)
+    spaces = set(claimed) | {w["workspace_id"] for w in workers if w.get("workspace_id")}
+    if spaces & poll["known"]:
+        return "refused", "workspace-listed", None
+    moves = archive_moves(rd, task_id, claimed)
+    dest = rd / "archive" / month
+    if any(_entry_kind(dest / rel) for rel in moves):
+        return "refused", "destination-exists", None
+    if any(_entry_kind(rd / rel) != ("dir" if rel == f"artifacts/{task_id}" else "file")
+           for rel in moves):
+        return "refused", "unexpected-type", None
+    for rel in moves:
+        with coordination.payload_parent(rd / rel) as (src, name), \
+                coordination.payload_parent(dest / rel, create=True) as (dst, _):
+            os.rename(name, name, src_dir_fd=src, dst_dir_fd=dst)
+    return "archived", month, len(moves)
+
+
+def archived_tasks(rd):
+    """status --archived: {task_id: {"status", "archive"}} per readable record."""
+    out = {}
+    for month in archive_months(rd):
+        for tf in task_record_files(Path(rd) / "archive" / month / "tasks"):
+            try:
+                rec = json.loads(read_payload_text(tf))
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                out[tf.name[:-len(".json")]] = {"status": rec.get("status"), "archive": month}
+    return out
+
+
+
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
@@ -4883,7 +5022,8 @@ def _main(argv=None) -> int:
     ck.add_argument("--agents-json", default=None)
     ck.add_argument("--workspaces-json", default=None)
     ck.add_argument("--all", action="store_true")
-    add("status")
+    st = add("status")
+    st.add_argument("--archived", action="store_true")
     add("pending")
     add("review-deadlines")
     add("task-lead-status")
@@ -4914,6 +5054,9 @@ def _main(argv=None) -> int:
     pt.add_argument("--apply", action="store_true")
     pt.add_argument("--session", default=None)
     pt.add_argument("--fence", type=int, default=None)
+    ak = add("archive-task", "--task-id", fenced=True)
+    ak.add_argument("--agents-json", default=None)
+    ak.add_argument("--workspaces-json", default=None)
     ns = ap.parse_args(argv)
 
     if ns.cmd == "resume-owner":
@@ -6854,6 +6997,9 @@ def _main(argv=None) -> int:
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         rd = repo_dir(ns.repo_slug)
+        if ns.archived:
+            print(json.dumps(archived_tasks(rd), sort_keys=True))
+            return 0
         # Associate each workspace's events with its task via the workspace index,
         # then order per-task events chronologically (ts, event tie-breaker).
         by_task = {}
@@ -7038,6 +7184,17 @@ def _main(argv=None) -> int:
                 sys.stderr.write(f"[X] present-task: {result['reason']}\n")
                 return 1
             return 0
+    if ns.cmd == "archive-task":
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        # Poll first: no herdr subprocess runs under the owner lock.
+        poll, _ = _checkin_poll(ns)
+        with _fenced(ns) as rd:
+            outcome, detail, count = archive_task(rd, ns.task_id, poll)
+        if outcome == "refused":
+            print(f"refused {ns.task_id} reason={detail}")
+            return 1
+        print(f"archived {ns.task_id} archive/{detail} files={count}")
+        return 0
     if ns.cmd == "merge-ready":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")

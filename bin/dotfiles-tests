@@ -77,6 +77,7 @@ sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/herdr-capabilities.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
+sh claude/hooks/herdr-orch-archive.test.sh
 sh claude/hooks/herdr-coordination.test.sh
 sh claude/hooks/herdr-stop-gate.test.sh
 bash claude/hooks/agent-runtime.test.sh
