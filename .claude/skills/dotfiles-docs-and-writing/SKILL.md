@@ -112,8 +112,8 @@ skills catalog).
 
 ### New slash command (`claude/commands/<name>.md`)
 
-Current style is YAML frontmatter, as in `claude/commands/handoff.md:1-3` and
-`kickoff.md`:
+Existing commands are plain markdown with an H1 title (`claude/commands/pr.md`);
+handoff and kickoff are skills. Optional YAML frontmatter looks like:
 
 ```yaml
 ---
@@ -173,8 +173,8 @@ grep -rl 'passed, .* failed' "$HOME/dotfiles" --include='*.sh'   #   (runner's o
    `bin/setup-claude` only writes `.git/info/exclude` entries and no CLAUDE.md
    template ships in the repo. Grep for references before deleting the claim
    (Code Cleanup rule in claude/CLAUDE.md).
-5. Command frontmatter split: only `handoff.md` and `kickoff.md` use the
-   current YAML style; the other 20 commands are legacy H1 (see Templates).
+5. Command style: every command is plain markdown with an H1 title (see
+   Templates); handoff and kickoff are skills, not commands.
 6. `GSD_HOOK_REPAIR`/`GSD_HOOK_ISOLATE` env-flag names in
    `git/hooks/post-checkout` (documented in README "Global Git Hooks") outlived
    the GSD retirement. Functional; naming-only drift.
