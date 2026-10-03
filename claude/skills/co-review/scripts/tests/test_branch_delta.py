@@ -70,6 +70,45 @@ class CarryForwardTests(unittest.TestCase):
     def proof(self, head: str = "HEAD") -> dict:
         return bd.carry_forward(self.repo, self.gated, head, "origin/main")
 
+    def test_merge_tree_lists_only_conflicted_paths(self):
+        review = bd._review
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", "side")
+        side = commit_file(self.repo, "both.txt", "side\n", "side")
+        git(self.repo, "checkout", "-q", "-b", "other", base)
+        other = commit_file(self.repo, "both.txt", "other\n", "other")
+        tree, conflicted = review.merge_tree(self.repo, side, other)
+        self.assertRegex(tree, r"^[0-9a-f]{40}$")
+        self.assertEqual(conflicted, ["both.txt"])
+        clean_tree, clean = review.merge_tree(self.repo, base, side)
+        self.assertEqual(clean, [])
+        self.assertEqual(clean_tree, git(self.repo, "rev-parse", f"{side}^{{tree}}"))
+
+    def split_directory_rename(self) -> tuple[str, str]:
+        # One side splits a/ across b/ and c/; the other adds a/z.txt. Git exits 1
+        # with a directory-rename conflict and stages no conflicted path.
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", "split", base)
+        commit_file(self.repo, "a/x.txt", "x1\nx2\nx3\n", "a x")
+        commit_file(self.repo, "a/y.txt", "y1\ny2\ny3\n", "a y")
+        before = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "mv", "a/x.txt", "b_x.txt")
+        (self.repo / "b").mkdir()
+        git(self.repo, "mv", "b_x.txt", "b/x.txt")
+        (self.repo / "c").mkdir()
+        git(self.repo, "mv", "a/y.txt", "c/y.txt")
+        git(self.repo, "commit", "-q", "-m", "split a")
+        splitter = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", "adder", before)
+        adder = commit_file(self.repo, "a/z.txt", "z\n", "add to a")
+        return splitter, adder
+
+    def test_merge_tree_exit_one_without_a_listed_path_is_a_conflict(self):
+        splitter, adder = self.split_directory_rename()
+        tree, conflicted = bd._review.merge_tree(self.repo, splitter, adder)
+        self.assertRegex(tree, r"^[0-9a-f]{40}$")
+        self.assertTrue(conflicted, "a nonzero merge-tree exit must report a conflict")
+
     def test_merge_main_only_with_untouched_files_passes(self):
         self.advance_main("main_only.txt", "a\nb\n")
         self.merge_main()

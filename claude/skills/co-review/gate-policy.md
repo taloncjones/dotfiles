@@ -162,7 +162,15 @@ repaired in place.
 
 Prepare one immutable snapshot with `review.py prepare`, then run
 `review.py verify --manifest` before dispatch, before evaluation, and before
-cleanup. Freeze a dirty source when requested, record its state, and make the
+cleanup.
+
+A PR gate passes the live base tip from `git ls-remote origin refs/heads/<base>` as `--pr-base`; `baseRefOid` can lag and is not the live base. The gate
+needs an up-to-date branch: `prepare` refuses a head that does not contain that
+base, and every live recheck (`merge-ready`, `/pr-ready`, ship step 4) refuses
+one too. Merge the base into the branch and re-run; carry-forward keeps an
+APPROVE across a clean merge of the base.
+
+Freeze a dirty source when requested, record its state, and make the
 result incomplete unless the committed expected tree equals the frozen reviewed
 tree. `manifest.source.source_tree` binds `expected.tree`; the verified
 `manifest.snapshot.codex_tree` binds `report.reviewed_tree`. Capture the exact

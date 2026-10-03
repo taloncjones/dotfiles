@@ -13,6 +13,10 @@ MIRROR = (REPO / "codex/skills/co-review/SKILL.md").read_text(encoding="utf-8")
 SHIP = (REPO / "claude/skills/ship/SKILL.md").read_text(encoding="utf-8")
 SPEC_REVIEW = (REPO / "claude/skills/codex-spec-review/SKILL.md").read_text(encoding="utf-8")
 PLAN_REVIEW = (REPO / "claude/skills/codex-plan-review/SKILL.md").read_text(encoding="utf-8")
+POLICY_FILE = (REPO / "claude/skills/co-review/gate-policy.md").read_text(encoding="utf-8")
+HERDR = (REPO / "claude/skills/herdr-orchestration/SKILL.md").read_text(encoding="utf-8")
+BRIEF = (REPO / "claude/skills/herdr-orchestration/references/brief-template.md").read_text(encoding="utf-8")
+PR_READY = (REPO / "claude/commands/pr-ready.md").read_text(encoding="utf-8")
 
 
 def _extract_block(text, contains_needle):
@@ -336,6 +340,43 @@ class ShipSkillText(unittest.TestCase):
                        "herdr-ship-prior-handoff:", "herdr-ship-delta-caps:",
                        "is not a relaunch after a fix"):
             self.assertIn(needle, SHIP)
+
+
+class PrBasePinText(unittest.TestCase):
+    def test_both_entrypoints_pin_the_pr_base(self):
+        for text in (CO_REVIEW, MIRROR):
+            for needle in ("baseRefOid", "--pr-base", "up-to-date branch", "carry-forward"):
+                self.assertIn(needle, text)
+            self.assertNotIn("merge_tree", text)
+
+    def test_co_review_prepare_passes_the_pr_base(self):
+        block = _extract_block(CO_REVIEW, '"$REVIEW_HELPER" prepare')
+        self.assertIn('--pr-base "$PR_BASE"', block)
+
+    def test_policy_frozen_inputs_require_an_up_to_date_branch(self):
+        start = POLICY_FILE.index("### Frozen inputs and report construction")
+        end = POLICY_FILE.index("\n### ", start + 1)
+        section = POLICY_FILE[start:end]
+        for needle in ("baseRefOid", "up-to-date branch", "carry-forward"):
+            self.assertIn(needle, section)
+        self.assertNotIn("merge_tree", section)
+
+    def test_herdr_section_6_names_the_pr_base(self):
+        start = HERDR.index("\n## 6. ")
+        end = HERDR.index("\n## 6a. ")
+        self.assertIn("baseRefOid", HERDR[start:end])
+        self.assertIn("up-to-date branch", HERDR[start:end])
+
+    def test_pr_ready_and_ship_require_the_base_inside_the_head(self):
+        for needle in ("baseRefOid", "git ls-remote", "merge-base --is-ancestor"):
+            self.assertIn(needle, PR_READY)
+            self.assertIn(needle, SHIP)
+        self.assertNotIn("resolve-base", PR_READY)
+        for text in (PR_READY, SHIP):
+            self.assertNotIn("merge_tree", text)
+
+    def test_ship_handoff_base_sha_is_the_pr_base(self):
+        self.assertIn("baseRefOid", BRIEF)
 
 
 if __name__ == "__main__":

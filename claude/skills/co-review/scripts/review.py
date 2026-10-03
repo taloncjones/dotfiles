@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -46,14 +47,19 @@ def git(
     *args: str,
     input_data: bytes | None = None,
     env: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        input=input_data,
-        capture_output=True,
-        env=git_environment(env),
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            input=input_data,
+            capture_output=True,
+            env=git_environment(env),
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ReviewError(f"git {args[0]} timed out after {timeout}s") from error
     if result.returncode:
         raise ReviewError(
             result.stderr.decode(errors="replace").strip() or "git command failed"
@@ -77,7 +83,44 @@ def full_commit(repo: Path, reference: str) -> str:
     return text_git(repo, "rev-parse", "--verify", f"{reference}^{{commit}}")
 
 
+def live_branch_tip(repo: Path, branch: str) -> str:
+    """Tip of origin's branch from git ls-remote; any failure is an error."""
+    try:
+        listed = text_git(repo, "ls-remote", "origin", f"refs/heads/{branch}", timeout=30).split()
+    except ReviewError as error:
+        raise ReviewError(f"cannot read the live origin/{branch} tip with git ls-remote: {error}") from error
+    if len(listed) != 2 or not _SHA40.fullmatch(listed[0]):
+        raise ReviewError(f"git ls-remote did not list origin/{branch} exactly once")
+    return listed[0]
+
+
+def merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
+    """Tree of git's own merge of ours and theirs, plus its conflicted paths."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
+        capture_output=True,
+        env=git_environment(),
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise ReviewError(
+            result.stderr.decode(errors="replace").strip() or "git merge-tree failed"
+        )
+    fields = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    conflicted: list[str] = []
+    # An empty field ends the conflicted-file list; informational messages follow.
+    for name in fields[1:] if result.returncode else ():
+        if not name:
+            break
+        conflicted.append(name)
+    # Exit 1 is a conflict even when no path is staged (a directory-rename split).
+    if result.returncode and not conflicted:
+        conflicted.append("(conflict with no path listed)")
+    return fields[0], sorted(set(conflicted))
+
+
 _BRANCH_BAD = ("..", "@{", "~", "^", ":", "\\", " ")
+_SHA40 = re.compile(r"[0-9a-f]{40}")
 
 # Frozen artifact kinds: repository-relative root and required suffix. The
 # contract is the herdr verification contract (untracked, git-ignored); its
@@ -372,9 +415,33 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise ReviewError(
             "head must be the source repository's current HEAD when freezing local changes"
         )
-    base, base_ref, base_ref_tip = resolve_base(
-        repo, args.base, getattr(args, "base_ref", None), head
-    )
+    pr_base = getattr(args, "pr_base", None)
+    base_ref_arg = getattr(args, "base_ref", None)
+    if pr_base is not None:
+        if args.base or not base_ref_arg:
+            raise ReviewError("--pr-base requires --base-ref and excludes --base")
+        if not _SHA40.fullmatch(pr_base):
+            raise ReviewError("--pr-base must be a full 40-character lowercase commit SHA")
+    base, base_ref, base_ref_tip = resolve_base(repo, args.base, base_ref_arg, head)
+    if pr_base is not None and pr_base != base_ref_tip:
+        raise ReviewError(
+            f"PR base {pr_base} is not the fetched origin/{base_ref} tip "
+            f"{base_ref_tip}; re-read the PR"
+        )
+    if pr_base is not None:
+        live = live_branch_tip(repo, base_ref)
+        if pr_base != live:
+            raise ReviewError(
+                f"PR base {pr_base} is not the live origin/{base_ref} tip {live} "
+                "from git ls-remote; read the base from git, not baseRefOid"
+            )
+    # Behind: the PR base is not an ancestor of head, so the merge-base is older.
+    if pr_base is not None and base != pr_base:
+        raise ReviewError(
+            f"branch is behind the live origin/{base_ref} tip {pr_base}; merge "
+            f"{base_ref} into the branch, then re-run (the carry-forward rule "
+            "keeps an APPROVE across a clean merge of the base)"
+        )
     before = status_porcelain(repo)
     original_index_tree = text_git(repo, "write-tree")
     staged = git(
@@ -557,6 +624,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "base": base,
                 "base_ref": base_ref,
                 "base_ref_tip": base_ref_tip,
+                "pr_base": pr_base,
                 "head": head,
                 "source_tree": text_git(repo, "rev-parse", f"{head}^{{tree}}"),
             },
@@ -685,6 +753,7 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--repo", required=True)
     prepare_parser.add_argument("--base")
     prepare_parser.add_argument("--base-ref", dest="base_ref")
+    prepare_parser.add_argument("--pr-base", dest="pr_base")
     prepare_parser.add_argument("--head")
     prepare_parser.add_argument("--output-dir", required=True)
     prepare_parser.add_argument("--include-untracked", action="append")

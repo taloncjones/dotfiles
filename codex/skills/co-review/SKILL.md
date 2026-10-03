@@ -61,6 +61,11 @@ The coordinator independently creates and retains a fresh expected-identity JSON
 separate from the report before the snapshot. It gets repository, PR number, full head,
 full base, base branch, committed tree, and CI for the actual target. Verify
 that the PR target repository is the fetch target before resolving `--base-ref`.
+For a PR, read the live base tip from `git ls-remote origin refs/heads/<base>` (not `baseRefOid`, which can lag) before `prepare`, write it as
+`expected.base`, and pass it as `--pr-base` with `--base-ref`. The gate needs
+an up-to-date branch: `prepare` refuses a head behind that base. Merge the base
+into the branch and re-run; the carry-forward rule keeps an APPROVE across a
+clean merge of the base.
 Prepare and verify one frozen snapshot with `review.py prepare` and
 `review.py verify`; a dirty source is still frozen for findings, but a committed
 tree mismatch makes approval incomplete. A local no-PR review cannot fabricate a
@@ -461,7 +466,7 @@ own co-review marker. A personal repository needs no go at all.
 
 Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
-expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
+expected `head`, `base` = expected `base` (the live `git ls-remote` tip, not `baseRefOid`), `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
 own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected
 `delta.prior_run` and `prior_sha` = expected `delta.prior_head`, in that order.

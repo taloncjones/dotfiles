@@ -59,13 +59,13 @@ interactively the co-review Delta tier section runs its one fresh full
 gate.
 
 4. **Recheck gate evidence.** Immediately before presenting a merge-ready
-   result, fetch live PR head, base branch, target base, and CI. The active
+   result, fetch live PR head, base branch, target base (the live tip from `git ls-remote origin refs/heads/<base branch>`, not the lagging `baseRefOid`), and CI. The active
    report path and successfully finalized expected-identity path must both be
    present from this same uninterrupted workflow. Cleanup failure invalidates
    and removes the active expected identity, so it always requires a new gate.
    Read the expected file and stop unless its
    repository, PR number, head, base, base branch, and tree exactly equal the
-   live values. Refresh its exact-head CI artifact and digest, then
+   live values. Also stop unless `git merge-base --is-ancestor <live-base> <head>` succeeds; a behind branch needs the base merged in, then carry-forward. Refresh its exact-head CI artifact and digest, then
    invoke `gate_report.py evaluate --report REPORT --expected EXPECTED`. The
    co-review snapshot has already been verified and cleaned; this step checks
    live source/PR identity and retained report artifacts, not a deleted manifest.

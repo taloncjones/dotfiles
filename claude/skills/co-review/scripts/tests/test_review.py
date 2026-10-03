@@ -1021,6 +1021,127 @@ class ReviewHelperTests(unittest.TestCase):
         self.assertEqual(payload["base"], self.base)
         self.assertEqual(payload["base_ref_tip"], origin_tip)
 
+    def test_pr_base_up_to_date_matches_the_tip(self):
+        origin_tip = self.make_origin_target("origin_only")
+        self.run_git("fetch", "-q", "origin", "target")
+        self.run_git("checkout", "-q", "-b", "feature", origin_tip)
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature: work")
+        head = self.git("rev-parse", "HEAD")
+
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+
+        self.assertEqual(manifest["source"]["base"], origin_tip)
+        self.assertEqual(manifest["source"]["base_ref_tip"], origin_tip)
+        self.assertEqual(manifest["source"]["pr_base"], origin_tip)
+        self.assertEqual(manifest["snapshot"]["codex_tree"], self.git("rev-parse", f"{head}^{{tree}}"))
+        diff = self.git("diff", "--name-status", origin_tip, manifest["snapshot"]["snapshot_head"])
+        self.assertEqual(diff, "A\tfeature.txt")
+
+    def test_pr_base_must_equal_the_fetched_tip(self):
+        origin_tip = self.make_origin_target("origin_only")
+        before = self.git("worktree", "list", "--porcelain")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", self.base, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("is not the fetched", result.stderr)
+        self.assertIn(self.base, result.stderr)
+        self.assertIn(origin_tip, result.stderr)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+
+    def git_shim_env(self, ls_remote_body: str) -> dict[str, str]:
+        """PATH whose git answers `ls-remote` with ls_remote_body and runs the rest."""
+        shim_dir = self.root / "git shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            f'  if [ "$arg" = ls-remote ]; then\n    {ls_remote_body}\n  fi\n'
+            "done\n"
+            f'exec {shlex.quote(shutil.which("git") or "git")} "$@"\n'
+        )
+        shim.chmod(0o755)
+        return {"PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}"}
+
+    def prepare_pr_base_at_tip(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        origin_tip = self.make_origin_target("origin_only")
+        self.run_git("fetch", "-q", "origin", "target")
+        self.run_git("checkout", "-q", "-b", "feature", origin_tip)
+        output = self.root / "review output"
+        return self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+            expect=2, extra_env=env,
+        )
+
+    def test_pr_base_must_equal_the_ls_remote_tip(self):
+        other = "e" * 40
+        env = self.git_shim_env(f'printf "{other}\\trefs/heads/target\\n"; exit 0')
+        result = self.prepare_pr_base_at_tip(env)
+        self.assertIn("git ls-remote", result.stderr)
+        self.assertIn(other, result.stderr)
+
+    def test_unreadable_ls_remote_tip_refuses(self):
+        result = self.prepare_pr_base_at_tip(self.git_shim_env("exit 1"))
+        self.assertIn("git ls-remote", result.stderr)
+
+    def test_pr_base_requires_base_ref(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base", self.base,
+            "--pr-base", self.base, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("--pr-base requires --base-ref", result.stderr)
+
+    def test_pr_base_alone_is_refused(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo),
+            "--pr-base", self.base, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("--pr-base requires --base-ref", result.stderr)
+
+    def test_pr_base_must_be_a_full_sha(self):
+        self.make_origin_target("origin_only")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", "target", "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("40-character", result.stderr)
+
+    def make_behind_feature(self):
+        """origin target = base + origin_only; checked-out feature = base + feature."""
+        origin_tip = self.make_origin_target("origin_only")
+        self.run_git("checkout", "-q", "-b", "feature", self.base)
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature: work")
+        return origin_tip, self.git("rev-parse", "HEAD")
+
+    def test_pr_base_behind_is_refused_with_the_remedy(self):
+        origin_tip, _head = self.make_behind_feature()
+        before = self.git("worktree", "list", "--porcelain")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("behind", result.stderr)
+        self.assertIn(origin_tip, result.stderr)
+        self.assertIn("merge target into the branch", result.stderr)
+        self.assertIn("carry-forward", result.stderr)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

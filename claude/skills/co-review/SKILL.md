@@ -60,7 +60,7 @@ fallback policy into this adapter.
 
 The coordinator creates an expected identity before preparing the snapshot and
 retains it independently in `RUN_DIR`, separate from the report. It obtains PR repository, number, head,
-base branch, base SHA, and CI from the live PR. For a PR, confirm that `origin`
+base branch, base SHA (from `git ls-remote origin refs/heads/<base branch>`, never the lagging `baseRefOid`), and CI from the live PR. For a PR, confirm that `origin`
 is the target repository before using `--base-ref`; a fork's `origin` is not a
 valid target source. A local no-PR review may return `CHANGES` or `INCOMPLETE`
 but cannot claim PR readiness or `APPROVE`; it cannot fabricate a PR number.
@@ -79,12 +79,21 @@ POLICY=$(uv run --no-project python "$GATE_REPORT" policy --section POLICY) || e
 uv run --no-project python "$GATE_REPORT" schema >"$RUN_DIR/gate-schema.json" || exit 2
 git -C "$REPO" status --porcelain >"$RUN_DIR/source-status.txt"
 uv run --no-project python "$REVIEW_HELPER" prepare \
-  --repo "$REPO" --base-ref "$BASE_REF" --output-dir "$SNAPSHOT_DIR" >"$RUN_DIR/prepare.json"
-# Local no-PR review uses `--base "$BASE"` instead of `--base-ref`.
+    --repo "$REPO" --base-ref "$BASE_REF" --pr-base "$PR_BASE" --output-dir "$SNAPSHOT_DIR" >"$RUN_DIR/prepare.json"
+# PR_BASE is the live tip from `git ls-remote origin refs/heads/$BASE_REF`, not `baseRefOid`.
+# Local no-PR review uses `--base "$BASE"` instead of `--base-ref` and `--pr-base`.
 # Parse the returned JSON's `manifest` field; do not assume its filename.
 MANIFEST=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest"])' "$RUN_DIR/prepare.json")
 uv run --no-project python "$REVIEW_HELPER" verify --manifest "$MANIFEST"
 ```
+
+For a PR gate, read the live base tip from `git ls-remote` (not `baseRefOid`, which can lag) into `PR_BASE` before
+`prepare` and write it as `expected.base`; the manifest's `source.base`
+must equal it. The gate needs an up-to-date branch: `prepare` refuses a head
+that does not contain the live base. When it refuses, merge the base into the
+branch and re-run; the carry-forward rule keeps an APPROVE across a clean
+merge of the base. The reviewed tree is the head tree, which a squash merge of
+an up-to-date branch reproduces exactly.
 
 Read `source.base`, `source.head`, `source.repo_id`, `source.source_tree`,
 `snapshot.codex_root`, `snapshot.claude_root`, and `snapshot.codex_tree` from
@@ -535,7 +544,7 @@ own co-review marker. A personal repository needs no go at all.
 
 Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
-expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
+expected `head`, `base` = expected `base` (the live `git ls-remote` tip, not `baseRefOid`), `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
 own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected
 `delta.prior_run` and `prior_sha` = expected `delta.prior_head`, in that order.

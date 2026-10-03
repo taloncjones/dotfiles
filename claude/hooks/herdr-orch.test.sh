@@ -2827,8 +2827,13 @@ def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 def build(repo, tid="td-merge", launch="ship-a1"):
-    slug = c._context_slug(w.repository_context(str(repo)))
     head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+    base = head  # a real object, contained in head
+    origin = sb / f"origin-{repo.name}.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-q", "origin", f"{base}:refs/heads/main")
+    slug = c._context_slug(w.repository_context(str(repo)))
     c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
                                       "runtime": "claude", "personal": False})())
     rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
@@ -2839,12 +2844,12 @@ def build(repo, tid="td-merge", launch="ship-a1"):
     (ld / "ci.json").write_text(json.dumps(ci))
     rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
     for obj in (rep, exp):
-        obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base="b" * 40, base_ref="main")
+        obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base=base, base_ref="main")
     rep["reviewed_tree"] = tree
     rep["preconditions"].update(head=head, tree=tree)
     (ld / "report.json").write_text(json.dumps(rep)); (ld / "expected.json").write_text(json.dumps(exp))
     hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
-            "base_ref": "main", "base_sha": "b" * 40, "tree_sha": tree,
+            "base_ref": "main", "base_sha": base, "tree_sha": tree,
             "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
             "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
             "verdict": "APPROVE", "written_at": "t"}
@@ -2855,7 +2860,7 @@ def build(repo, tid="td-merge", launch="ship-a1"):
             "merge_check": None}
     (rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
     pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
-          "headRefOid": head, "baseRefName": "main", "baseRefOid": "b" * 40,
+          "headRefOid": head, "baseRefName": "main", "baseRefOid": base,
           "statusCheckRollup": [{"__typename": "CheckRun", "name": "tests",
                                  "status": "COMPLETED", "conclusion": "SUCCESS"}]}
     rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
@@ -2912,7 +2917,22 @@ expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json
 expect("hash", file_edit=lambda: (ld / "report.json").write_text("{}"))
 expect("handoff", state="stale", task_edit=lambda t: t.update(review_head_sha="c" * 40))
 expect("head-moved", pr_edit=lambda p: p.update(headRefOid="c" * 40))
-expect("base-moved", pr_edit=lambda p: p.update(baseRefOid="d" * 40))
+# baseRefOid lags: it still equals the handoff base, but origin's live tip moved on.
+live_base = git(personal, "rev-parse", "HEAD")
+sub = subprocess.run(["git", "-C", str(personal), "commit-tree", "-m", "newer main", "HEAD^{tree}"],
+                     check=True, capture_output=True, text=True,
+                     env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                          "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
+newer = sub.stdout.strip()
+git(personal, "push", "-q", "-f", "origin", f"{newer}:refs/heads/main")
+out = expect("base-moved")
+assert any(newer in r["detail"] for r in out["reasons"] if r["code"] == "base-moved"), out
+git(personal, "push", "-q", "-f", "origin", f"{live_base}:refs/heads/main")
+# An unreadable live base fails closed.
+gone = sb / "origin-p.git.gone"
+(sb / f"origin-{personal.name}.git").rename(gone)
+expect("base-moved")
+gone.rename(sb / f"origin-{personal.name}.git")
 expect("identity", rp_edit=lambda r: r.update(defaultBranchRef={"name": "dev"}))
 expect("identity", rp_edit=lambda r: r.update(nameWithOwner="x/y"))
 expect("pr-state", pr_edit=lambda p: p.update(isDraft=True))
@@ -2941,10 +2961,10 @@ assert rc == 1 and out["handoff_state"] == "current", out
 head0 = task["review_head_sha"]
 expect("merge-refused", task_edit=lambda t: t.update(merge_check={
     "result": "fail", "reason": "protected", "branch_head_sha": head0,
-    "base_main_sha": "b" * 40, "ts": "t"}))
+    "base_main_sha": pr["baseRefOid"], "ts": "t"}))
 # The same refusal at an older head is stale and does not block.
 t_old = dict(task, merge_check={"result": "fail", "reason": "protected",
-                                "branch_head_sha": "c" * 40, "base_main_sha": "b" * 40, "ts": "t"})
+                                "branch_head_sha": "c" * 40, "base_main_sha": pr["baseRefOid"], "ts": "t"})
 (rd / "tasks" / f"{tid}.json").write_text(json.dumps(t_old))
 rc, out = run(personal, slug, tid, pr, rp)
 assert rc == 0 and out["ready"] is True, out
@@ -2969,6 +2989,141 @@ wslug, wrd, wtid, wld, wtask, wpr, wrp = build(work)
 rc, out = run(work, wslug, wtid, wpr, wrp)
 assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], out
 import shutil; shutil.rmtree(sb)
+PY
+
+check "merge-ready: only a head that contains the live PR base is ready" <<'PY'
+import contextlib, hashlib, io, json, os, subprocess, sys, tempfile
+from pathlib import Path
+for k in ("CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
+          "CLAUDE_WORK_TREE", "CLAUDE_WORK_CONFIG_DIR"):
+    os.environ.pop(k, None)
+for k in [k for k in os.environ if k.startswith("GIT_")]:
+    os.environ.pop(k)
+sb = Path(tempfile.mkdtemp()); os.environ["HOME"] = str(sb)
+sys.path[:0] = ["claude/hooks", "claude/skills/lib", "claude/skills/co-review/scripts/tests"]
+import herdr_orch_core as c, workflow_context as w, test_gate_report as tg
+
+def git(cwd, *a):
+    return subprocess.run(["git", "-C", str(cwd), *a], check=True,
+                          capture_output=True, text=True).stdout.strip()
+def commit_file(cwd, name, body, msg):
+    (Path(cwd) / name).write_text(body)
+    git(cwd, "add", name)
+    git(cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", msg)
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+repo = sb / "Git" / "personal" / "p"; repo.mkdir(parents=True)
+git(repo, "init", "-q")
+commit_file(repo, "t.txt", "base\n", "base")
+fork = git(repo, "rev-parse", "HEAD")
+git(repo, "checkout", "-q", "-b", "upstream")
+commit_file(repo, "origin_only.txt", "o\n", "upstream moves")
+pr_base = git(repo, "rev-parse", "HEAD")
+origin = sb / "origin-p.git"
+subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+git(repo, "remote", "add", "origin", str(origin))
+git(repo, "push", "-q", "origin", f"{pr_base}:refs/heads/main")
+git(repo, "checkout", "-q", "-b", "topic", fork)
+commit_file(repo, "feature.txt", "f\n", "feature")
+head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+merged = git(repo, "merge-tree", "--write-tree", pr_base, head)
+assert merged != tree
+
+slug = c._context_slug(w.repository_context(str(repo)))
+c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
+                                  "runtime": "claude", "personal": False})())
+rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
+tid, launch = "td-merge-tree", "ship-m1"
+ld = rd / "artifacts" / tid / f"ship-{launch}"; ld.mkdir(parents=True)
+t = tg.GateReportTests(); t.setUp(); t.root = ld
+rep = t._report(); exp = dict(t.expected)
+ci = json.loads((ld / "ci.json").read_text()); ci["head"] = head
+(ld / "ci.json").write_text(json.dumps(ci))
+rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
+for obj in (rep, exp):
+    obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base=pr_base, base_ref="main")
+exp["merge_tree"] = merged
+rep["reviewed_tree"] = merged
+rep["preconditions"].update(head=head, tree=tree)
+(rd / "tasks").mkdir(parents=True, exist_ok=True)
+task = {"task_id": tid, "status": "reviewed", "review_head_sha": head,
+        "ship_launch_id": launch, "worktree": str(repo), "branch": "topic",
+        "merge_check": None}
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
+pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+      "headRefOid": head, "baseRefName": "main", "baseRefOid": pr_base,
+      "statusCheckRollup": [{"__typename": "CheckRun", "name": "tests",
+                             "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
+
+def write_gate(expected):
+    (ld / "report.json").write_text(json.dumps(rep))
+    (ld / "expected.json").write_text(json.dumps(expected))
+    hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
+            "base_ref": "main", "base_sha": pr_base, "tree_sha": tree,
+            "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
+            "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
+            "verdict": "APPROVE", "written_at": "t"}
+    (ld / "ship.json").write_text(json.dumps(hand))
+
+def run():
+    pf = sb / "pr.json"; pf.write_text(json.dumps(pr))
+    rf = sb / "repo.json"; rf.write_text(json.dumps(rp))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = c.main(["merge-ready", "--repo-slug", slug, "--repo-path", str(repo),
+                     "--task-id", tid, "--pr-json", str(pf), "--repo-json", str(rf)])
+    return rc, json.loads(buf.getvalue())
+
+# A head behind the live PR base is never ready, even when the handoff carries a
+# stray merge_tree that matches git's merge of the two.
+rep["reviewed_tree"] = merged
+write_gate(dict(exp, merge_tree=merged))
+rc, out = run()
+codes = [r["code"] for r in out["reasons"]]
+assert rc == 1 and out["ready"] is False and "identity" in codes, out
+
+# Same head, no merge_tree: still behind, still not ready.
+rep["reviewed_tree"] = tree
+bare = {k: v for k, v in exp.items() if k != "merge_tree"}
+write_gate(bare)
+rc, out = run()
+codes = [r["code"] for r in out["reasons"]]
+assert rc == 1 and out["ready"] is False and "identity" in codes, out
+
+# Main moved: base-moved alone, so section 6 rule (c) re-gates.
+# baseRefOid still equals the handoff base (it lags); only origin's live tip shows the move.
+git(repo, "checkout", "-q", "upstream")
+commit_file(repo, "origin_newer.txt", "n\n", "main moves again")
+git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+git(repo, "checkout", "-q", "topic")
+rc, out = run()
+assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+# An unreadable live base fails closed.
+git(repo, "push", "-q", "-f", "origin", f"{pr_base}:refs/heads/main")
+origin.rename(sb / "origin-p.git.gone")
+rc, out = run()
+assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+(sb / "origin-p.git.gone").rename(origin)
+
+# A head that contains the live PR base stays ready.
+git(repo, "checkout", "-q", "-b", "uptodate", pr_base)
+commit_file(repo, "feature2.txt", "f2\n", "feature on top of base")
+head2 = git(repo, "rev-parse", "HEAD"); tree2 = git(repo, "rev-parse", "HEAD^{tree}")
+ci["head"] = head2
+(ld / "ci.json").write_text(json.dumps(ci))
+rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
+for obj in (rep, bare):
+    obj.update(head=head2, tree=tree2)
+rep["reviewed_tree"] = tree2
+rep["preconditions"].update(head=head2, tree=tree2)
+head, tree = head2, tree2
+pr["headRefOid"] = head2
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(dict(task, review_head_sha=head2, branch="uptodate")))
+write_gate(bare)
+rc, out = run()
+assert rc == 0 and out["ready"] is True, out
 PY
 
 check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
