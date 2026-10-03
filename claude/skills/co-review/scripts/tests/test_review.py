@@ -671,10 +671,10 @@ class ReviewHelperTests(unittest.TestCase):
         content = " ".join((DOTFILES_ROOT / "claude/skills/codex-spec-review/SKILL.md").read_text().split())
         self.assertRegex(
             content,
-            r"\|\s*codex-spec-review\s*\|\s*4\s*\|\s*the kickoff instruction only\s*\|",
+            r"\|\s*codex-spec-review\s*\|\s*2\s*\|\s*the kickoff instruction only\s*\|",
         )
         self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
-        self.assertIn('SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"', content)
+        self.assertIn('SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-2}"', content)
         self.assertIn('ROUND_DIFF="$OUTPUT_DIR/spec-round-$ROUND.diff"', content)
         self.assertIn('OPEN_FINDINGS="$OUTPUT_DIR/spec-open-findings-$ROUND.md"', content)
         self.assertIn('diff -u "$PREVIOUS_FROZEN_SPEC" "$FROZEN_SPEC" >"$ROUND_DIFF" || DIFF_STATUS=$?', content)

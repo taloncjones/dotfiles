@@ -1583,6 +1583,210 @@ rc=0; $CLI claim-owner --repo-slug slug-m --session S --host h --pid abc >/dev/n
 [ "$rc" = 2 ]        # argparse type=int rejects cleanly (exit 2), no traceback
 SH
 
+check "liveness helper: a codex record gets no verdict; the same claude record is pid-dead" <<PY
+$LOAD
+import random, shutil, subprocess
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = os.path.join(root, "herdr-orch", "slug-unit"); os.makedirs(rd)
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+try:
+    p = subprocess.Popen(["true"]); p.wait(); dead = p.pid
+    sock = sockdir + "/%d.sock" % dead
+    open(sock, "w").close()
+    cur = {"session_id": "S", "fence": 1, "pid": dead, "runtime": "claude",
+           "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
+    mirror = os.path.join(rd, "owner.json")
+    json.dump(dict(cur, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, cur, "h") == "pid-dead"
+    codex = dict(cur, runtime="codex", thread_id="t")
+    json.dump(dict(codex, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, codex, "h") is None
+finally:
+    shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
+check "liveness helper: never raises -- no lease, missing/bad mirror, oversized pid" <<PY
+$LOAD
+import random, shutil, subprocess
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = os.path.join(root, "herdr-orch", "slug-unit"); os.makedirs(rd)
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+try:
+    p = subprocess.Popen(["true"]); p.wait(); dead = p.pid
+    cur = {"session_id": "S", "fence": 1, "pid": dead, "runtime": "claude",
+           "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
+    mirror = os.path.join(rd, "owner.json")
+    assert c._launcher_holder_gone(rd, None) is None
+    assert c._launcher_holder_gone(rd, cur, "h") is None
+    open(mirror, "w").write("not json")
+    assert c._launcher_holder_gone(rd, cur, "h") is None
+    open(mirror, "w").write("[]")
+    assert c._launcher_holder_gone(rd, cur, "h") is None
+    open(sockdir + "/%d.sock" % dead, "w").close()
+    json.dump(dict(cur, pid_ns=c.pid_namespace_id(), messaging_socket=sockdir + "/%d.sock" % dead), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, cur, "h") == "pid-dead"
+    for key, other in (("session_id", "S-other"), ("fence", 2), ("pid", dead + 1)):
+        json.dump(dict(cur, pid_ns=c.pid_namespace_id(), messaging_socket=sockdir + "/%d.sock" % dead, **{key: other}), open(mirror, "w"))
+        assert c._launcher_holder_gone(rd, cur, "h") is None, key
+    big = dict(cur, pid=2**64)
+    json.dump(dict(big, pid_ns=c.pid_namespace_id(), messaging_socket=sockdir + "/%d.sock" % 2**64), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, big, "h") is None
+finally:
+    shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
+check "liveness: a dead holder pid is taken over despite a fresh heartbeat (pid-dead)" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+F1=$($CLI claim-owner --repo-slug slug-gone --session S1 --host h --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock")
+F2=$($CLI claim-owner --repo-slug slug-gone --session S2 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>"$SOCKS/err")
+[ "$F2" = $((F1 + 1)) ]
+[ "$(grep -c '^\[INFO\] lease holder gone (pid-dead): pid '"$DEAD"' session S1; claimed fence '"$F2"'$' "$SOCKS/err")" = 1 ]
+python3 - "$root/herdr-orch/slug-gone" "$DEAD" "$F1" <<'PY'
+import json, sys
+rd, dead, f1 = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+o = json.load(open(rd + "/owner.json"))
+assert o["session_id"] == "S2" and o["fence"] == f1 + 1, o
+last = json.loads(open(rd + "/rollover.jsonl").read().splitlines()[-1])
+assert last["v"] == 2 and last["event"] == "takeover", last
+assert (last["reason"], last["from_session"], last["from_fence"], last["from_pid"], last["session"]) == ("pid-dead", "S1", f1, dead, "S2"), last
+PY
+SH
+
+check "liveness: a dead-looking holder on another host keeps BUSY and its fence" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+F1=$($CLI claim-owner --repo-slug slug-host --session S1 --host host-a --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock")
+rc=0; out=$($CLI claim-owner --repo-slug slug-host --session S2 --host host-b --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>"$SOCKS/err") || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+if grep -q 'lease holder gone' "$SOCKS/err"; then exit 1; fi
+[ ! -e "$root/herdr-orch/slug-host/rollover.jsonl" ]
+python3 -c "import json,sys; o=json.load(open(sys.argv[1])); assert o['session_id']=='S1' and o['fence']==int(sys.argv[2]), o" "$root/herdr-orch/slug-host/owner.json" "$F1"
+SH
+
+check "liveness: a dead-looking holder in another PID namespace keeps BUSY and its fence" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+F1=$(HERDR_ORCH_PIDNS=pidns-a $CLI claim-owner --repo-slug slug-ns --session S1 --host h --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock")
+rc=0; out=$(HERDR_ORCH_PIDNS=pidns-b $CLI claim-owner --repo-slug slug-ns --session S2 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>"$SOCKS/err") || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+if grep -q 'lease holder gone' "$SOCKS/err"; then exit 1; fi
+[ ! -e "$root/herdr-orch/slug-ns/rollover.jsonl" ]
+python3 -c "import json,sys; o=json.load(open(sys.argv[1])); assert o['session_id']=='S1' and o['fence']==int(sys.argv[2]), o" "$root/herdr-orch/slug-ns/owner.json" "$F1"
+F3=$(HERDR_ORCH_PIDNS=pidns-a $CLI claim-owner --repo-slug slug-ns --session S3 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock" 2>/dev/null)
+[ "$F3" = $((F1 + 1)) ]
+SH
+
+check "liveness helper: pid-recycled and socket-missing need the claimant's host" <<PY
+$LOAD
+import random, shutil, subprocess
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = os.path.join(root, "herdr-orch", "slug-unit"); os.makedirs(rd)
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+try:
+    me = os.getpid()
+    sock = sockdir + "/%d.sock" % me
+    mirror = os.path.join(rd, "owner.json")
+    base = {"session_id": "S", "fence": 1, "pid": me, "runtime": "claude",
+            "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0,
+            "host": "host-a"}
+    start = c.coordination.process_start_id(me)
+    recycled = dict(base, pid_start=start.split(":", 1)[0] + ":other")
+    json.dump(dict(recycled, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, recycled, "host-a") == "pid-recycled"
+    assert c._launcher_holder_gone(rd, recycled, "host-b") is None
+    nosock = dict(base)
+    json.dump(dict(nosock, pid_ns=c.pid_namespace_id(), messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, nosock, "host-a") == "socket-missing"
+    assert c._launcher_holder_gone(rd, nosock, "host-b") is None
+finally:
+    shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
+check "liveness: a live holder with its socket keeps BUSY" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+: > "$SOCKS/$$.sock"
+F1=$($CLI claim-owner --repo-slug slug-live --session S1 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock")
+rc=0; out=$($CLI claim-owner --repo-slug slug-live --session S2 --host h --pid 1 --messaging-socket "$SOCKS/1.sock" 2>"$SOCKS/err") || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+if grep -q 'lease holder gone' "$SOCKS/err"; then exit 1; fi
+[ ! -e "$root/herdr-orch/slug-live/rollover.jsonl" ]
+python3 -c "import json,sys; o=json.load(open(sys.argv[1])); assert o['session_id']=='S1' and o['fence']==int(sys.argv[2]), o" "$root/herdr-orch/slug-live/owner.json" "$F1"
+SH
+
+check "liveness: a confirmed-live holder keeps BUSY even with its socket file gone" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+F1=$($CLI claim-owner --repo-slug slug-nosock --session S1 --host h --pid $$ --messaging-socket "$SOCKS/$$.sock")
+[ ! -e "$SOCKS/$$.sock" ]
+rc=0; out=$($CLI claim-owner --repo-slug slug-nosock --session S2 --host h --pid 1 --messaging-socket "$SOCKS/1.sock" 2>"$SOCKS/err") || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+[ ! -e "$root/herdr-orch/slug-nosock/rollover.jsonl" ]
+SH
+
+check "liveness: a dead pid claimed without a socket gets no verdict (BUSY)" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+$CLI claim-owner --repo-slug slug-nosock2 --session S1 --host h --pid "$DEAD" >/dev/null
+rc=0; out=$($CLI claim-owner --repo-slug slug-nosock2 --session S2 --host h --pid 1 2>/dev/null) || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+[ ! -e "$root/herdr-orch/slug-nosock2/rollover.jsonl" ]
+SH
+
+check "liveness: a dead holder whose socket a refresh nulled gets no verdict (BUSY)" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+F1=$($CLI claim-owner --repo-slug slug-null --session S1 --host h --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock")
+$CLI refresh-owner --repo-slug slug-null --session S1 --fence "$F1" --messaging-socket ""
+python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['messaging_socket'] is None" "$root/herdr-orch/slug-null/owner.json"
+rc=0; out=$($CLI claim-owner --repo-slug slug-null --session S2 --host h --pid 1 2>/dev/null) || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+[ ! -e "$root/herdr-orch/slug-null/rollover.jsonl" ]
+SH
+
+check "liveness: a mirror that names another pid gets no verdict (BUSY)" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+mkdir -m 700 "$SOCKS"; trap 'rm -rf "$SOCKS"' EXIT
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$SOCKS/$DEAD.sock"
+$CLI claim-owner --repo-slug slug-mm --session S1 --host h --pid "$DEAD" --messaging-socket "$SOCKS/$DEAD.sock" >/dev/null
+python3 -c "import json,sys; p=sys.argv[1]; o=json.load(open(p)); o['pid']=o['pid']+1; json.dump(o, open(p, 'w'))" "$root/herdr-orch/slug-mm/owner.json"
+rc=0; out=$($CLI claim-owner --repo-slug slug-mm --session S2 --host h --pid 1 2>/dev/null) || rc=$?
+[ "$rc" = 1 ]
+[ "$out" = BUSY ]
+[ ! -e "$root/herdr-orch/slug-mm/rollover.jsonl" ]
+SH
+
 check "wake_line shape, nonce uniqueness within one second" <<PY
 $LOAD
 import json as J

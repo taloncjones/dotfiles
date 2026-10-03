@@ -1119,6 +1119,305 @@ EOF
 }
 test_ready_untrustworthy_todo_dependencies
 
+# --- note (append to a PRD section) ------------------------------------------
+
+# assert_note_refused <name> <want-rc> <repo> <note-text> <note args...>: the
+# exit code is <want-rc> and every pending and completed file is unchanged.
+assert_note_refused() {
+  local n="$1" want="$2" repo="$3" text="$4" rc before after; shift 4
+  before=$(cat "$repo"/.todos/pending/*.md "$repo"/.todos/completed/*.md 2>/dev/null | cksum)
+  (cd "$repo" && printf '%s' "$text" | bash "$TODOS" note "$@") >/dev/null 2>&1; rc=$?
+  after=$(cat "$repo"/.todos/pending/*.md "$repo"/.todos/completed/*.md 2>/dev/null | cksum)
+  assert_eq "$n" "$rc|$after" "$want|$before"
+}
+
+test_prd_split_sections() {
+  local out
+  out=$(python3 - "$HERE/.." <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import todos_prd as p
+print(p.split_sections("---\ntitle: x\n---\n"))
+print(p.split_sections("plain\ntext\n"))
+print(p.split_sections("---\nt: x\n---\n## Problem\n```\n## Solution\n```\n### Sub\n## Problem  \nb\n"))
+PY
+)
+  assert_eq "prd: frontmatter only, no headings, fence and duplicate headings" "$out" \
+"(17, [])
+(0, [])
+(13, [('Problem', 13, 24, 52), ('Problem', 52, 65, 67)])"
+}
+test_prd_split_sections
+
+test_note_append_exact() {
+  local repo f rc
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-01-note-target <<'EOF'
+---
+created: 2026-06-01
+title: Note target
+priority: med
+files:
+---
+
+## Problem
+
+Problem line one.
+
+## Solution
+
+Solution line one.
+- item
+
+## Verification
+
+- check one
+EOF
+  f="$repo/.todos/pending/2026-06-01-note-target.md"; cp "$f" "$repo/before.md"
+  (cd "$repo" && printf 'A new idea.\n' | bash "$TODOS" note 2026-06-01-note-target Solution) >/dev/null 2>&1; rc=$?
+  assert_eq "note: append exits 0" "$rc" "0"
+  assert_eq "note: inserts exactly LF note LF after the section's last line" \
+    "$(python3 - "$repo/before.md" "$f" <<'PY'
+import sys
+old = open(sys.argv[1], "rb").read()
+new = open(sys.argv[2], "rb").read()
+p = old.index(b"- item\n") + len(b"- item\n")
+print(new == old[:p] + b"\nA new idea.\n" + old[p:], b"\r" in new, new.endswith(b"\n"))
+PY
+)" "True False True"
+  assert_eq "note: no temp file left" "$(ls -A "$repo/.todos/pending" | grep -c '\.tmp\.')" "0"
+  assert_contains "note: TODO.md regenerated" "$(cat "$repo/.todos/TODO.md")" "2026-06-01-note-target"
+  rm -rf "$repo"
+}
+test_note_append_exact
+
+test_note_section_targets() {
+  local repo f
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-02-dup <<'EOF'
+---
+created: 2026-06-02
+title: Dup
+---
+
+## Problem
+
+## Solution
+
+## Problem
+
+Filled problem.
+
+## Solution
+
+Filled solution.
+EOF
+  mk_todo "$repo" 2026-06-03-empty <<'EOF'
+---
+title: Empty
+---
+
+## Problem
+
+## Solution
+
+x
+EOF
+  mk_todo "$repo" 2026-06-04-fence <<'EOF'
+---
+title: Fence
+---
+
+## Solution
+
+Real.
+
+## Verification
+
+```text
+## Solution
+```
+EOF
+  (cd "$repo" && printf 'P\n' | bash "$TODOS" note 2026-06-02-dup Problem \
+    && printf 'S\n' | bash "$TODOS" note 2026-06-02-dup Solution \
+    && printf 'E\n' | bash "$TODOS" note 2026-06-03-empty Problem \
+    && printf 'F\n' | bash "$TODOS" note 2026-06-04-fence Solution) >/dev/null 2>&1
+  f="$repo/.todos/pending"
+  assert_eq "note: a duplicated heading takes the note in its last occurrence" "$(cat "$f/2026-06-02-dup.md")" \
+"---
+created: 2026-06-02
+title: Dup
+---
+
+## Problem
+
+## Solution
+
+## Problem
+
+Filled problem.
+
+P
+
+## Solution
+
+Filled solution.
+
+S"
+  assert_eq "note: an empty section takes the note after its heading" "$(cat "$f/2026-06-03-empty.md")" \
+"---
+title: Empty
+---
+
+## Problem
+
+E
+
+## Solution
+
+x"
+  assert_eq "note: a heading inside a fence is not a section" "$(cat "$f/2026-06-04-fence.md")" \
+"---
+title: Fence
+---
+
+## Solution
+
+Real.
+
+F
+
+## Verification
+
+\`\`\`text
+## Solution
+\`\`\`"
+  rm -rf "$repo"
+}
+test_note_section_targets
+
+test_note_refusals() {
+  local repo f sha out
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-05-target <<'EOF'
+---
+title: Target
+---
+
+## Problem
+
+P.
+
+## Solution
+
+S.
+EOF
+  mkdir -p "$repo/.todos/completed"
+  cp "$repo/.todos/pending/2026-06-05-target.md" "$repo/.todos/completed/2026-05-01-finished.md"
+  f="$repo/.todos/pending/2026-06-05-target.md"
+  assert_note_refused "note: empty note refused, zero diff" 2 "$repo" "" 2026-06-05-target Solution
+  assert_note_refused "note: whitespace-only note refused" 2 "$repo" $'  \n\n' 2026-06-05-target Solution
+  assert_note_refused "note: CR refused" 2 "$repo" $'a\r\nb' 2026-06-05-target Solution
+  assert_note_refused "note: emoji refused" 2 "$repo" $'ok \xf0\x9f\x98\x80' 2026-06-05-target Solution
+  assert_note_refused "note: non-UTF-8 refused" 2 "$repo" $'bad \xff' 2026-06-05-target Solution
+  assert_note_refused "note: heading line refused" 2 "$repo" $'fine\n## Sneaky' 2026-06-05-target Solution
+  assert_note_refused "note: fence line refused" 2 "$repo" $'```' 2026-06-05-target Solution
+  assert_note_refused "note: over 4000 bytes refused" 2 "$repo" "$(printf 'x%.0s' $(seq 1 4001))" 2026-06-05-target Solution
+  assert_note_refused "note: unknown section refused" 2 "$repo" "x" 2026-06-05-target Ask
+  assert_note_refused "note: lowercase section refused" 2 "$repo" "x" 2026-06-05-target solution
+  assert_note_refused "note: absent section refused" 2 "$repo" "x" 2026-06-05-target Verification
+  assert_note_refused "note: completed id refused" 2 "$repo" "x" 2026-05-01-finished Solution
+  assert_note_refused "note: traversal id refused" 2 "$repo" "x" ../completed/2026-05-01-finished Solution
+  assert_note_refused "note: absolute path refused" 2 "$repo" "x" "$f" Solution
+  assert_note_refused "note: substring id refused" 2 "$repo" "x" target Solution
+  assert_note_refused "note: id with .md refused" 2 "$repo" "x" 2026-06-05-target.md Solution
+  assert_note_refused "note: malformed --expect-sha refused" 2 "$repo" "x" 2026-06-05-target Solution --expect-sha abc
+  assert_note_refused "note: stale --expect-sha refused" 3 "$repo" "x" 2026-06-05-target Solution \
+    --expect-sha 0000000000000000000000000000000000000000000000000000000000000000
+  out=$( (cd "$repo" && printf 'x' | bash "$TODOS" note 2026-05-01-finished Solution) 2>&1 )
+  assert_eq "note: refusal names the id" "$out" "todos: note: no pending todo '2026-05-01-finished'"
+  out=$( (cd "$repo" && printf 'ok \360\237\230\200' | bash "$TODOS" note 2026-06-05-target Solution) 2>&1 )
+  assert_contains "note: emoji refusal names the code point" "$out" "U+1F600"
+  sha=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$f")
+  (cd "$repo" && printf 'Fresh.\n' | bash "$TODOS" note 2026-06-05-target Solution --expect-sha "$sha") >/dev/null 2>&1
+  assert_eq "note: matching --expect-sha writes" "$?|$(tail -1 "$f")" "0|Fresh."
+  rm -rf "$repo"
+}
+test_note_refusals
+
+test_note_file_preconditions() {
+  local repo
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-06-crlf < <(printf -- '---\r\ntitle: CRLF\r\n---\r\n\r\n## Solution\r\n\r\nS.\r\n')
+  mk_todo "$repo" 2026-06-07-nolf < <(printf -- '---\ntitle: No LF\n---\n\n## Solution\n\nS.')
+  ln -s "$repo/.todos/pending/2026-06-07-nolf.md" "$repo/.todos/pending/2026-06-08-link.md"
+  assert_note_refused "note: CRLF file refused" 2 "$repo" "x" 2026-06-06-crlf Solution
+  assert_note_refused "note: file without final LF refused" 2 "$repo" "x" 2026-06-07-nolf Solution
+  assert_note_refused "note: symlinked todo refused" 2 "$repo" "x" 2026-06-08-link Solution
+  rm -rf "$repo"
+}
+test_note_file_preconditions
+
+test_note_exit_zero_after_replace() {
+  local repo f out rc
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-10-index-fails <<'EOF'
+---
+title: Index fails
+---
+
+## Solution
+
+S.
+EOF
+  f="$repo/.todos/pending/2026-06-10-index-fails.md"
+  if [ "$(id -u)" = 0 ]; then ok "note: exit 0 after replace when TODO.md cannot be written (skipped as root)"; rm -rf "$repo"; return; fi
+  # .todos itself read-only: the note lands in pending/, TODO.md cannot.
+  chmod 555 "$repo/.todos"
+  out=$( (cd "$repo" && printf 'Kept.\n' | bash "$TODOS" note 2026-06-10-index-fails Solution) 2>&1 ); rc=$?
+  chmod 755 "$repo/.todos"
+  assert_eq "note: exit 0 after replace when TODO.md cannot be written" \
+    "$rc|$(printf '%s' "$out" | grep -c 'todos: note: written; TODO.md not regenerated, run todos.sh index')|$(tail -1 "$f")" \
+    "0|1|Kept."
+  rm -rf "$repo"
+}
+test_note_exit_zero_after_replace
+
+
+test_local_lock() {
+  local repo lock holder i out rc
+  repo=$(mk_repo)
+  mk_todo "$repo" 2026-06-09-locked <<'EOF'
+---
+title: Locked
+---
+
+## Solution
+
+S.
+EOF
+  lock="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
+  python3 "$HERE/../todos_store.py" lock "$lock" 30 -- sleep 28.731 & holder=$!
+  for i in $(seq 1 50); do
+    python3 "$HERE/../todos_store.py" lock "$lock" 0 -- true; [ "$?" = 75 ] && break; sleep 0.1
+  done
+  out=$( (cd "$repo" && printf 'x' | TODOS_LOCK_WAIT=1 bash "$TODOS" note 2026-06-09-locked Solution) 2>&1 ); rc=$?
+  assert_eq "lock: busy local lock refuses note" "$rc|$out|$(grep -c '^x$' "$repo/.todos/pending/2026-06-09-locked.md")" \
+    "1|todos: .todos is busy|0"
+  out=$( (cd "$repo" && TODOS_LOCK_WAIT=1 bash "$TODOS" done 2026-06-09-locked) 2>&1 ); rc=$?
+  assert_eq "lock: busy local lock refuses done" "$rc|$out|$(ls "$repo/.todos/pending" | grep -c locked)" \
+    "1|todos: .todos is busy|1"
+  out=$( (cd "$repo" && TODOS_LOCK_WAIT=1 bash "$TODOS" depend 2026-06-09-locked pr:5) 2>&1 ); rc=$?
+  assert_eq "lock: busy local lock refuses depend" "$rc|$out|$(grep -c 'pr:5' "$repo/.todos/pending/2026-06-09-locked.md")" \
+    "1|todos: .todos is busy|0"
+  kill -9 "$holder"; wait "$holder" 2>/dev/null; pkill -f 'sleep 28.731' 2>/dev/null
+  (cd "$repo" && TODOS_LOCK_WAIT=1 bash "$TODOS" done 2026-06-09-locked) >/dev/null 2>&1; rc=$?
+  assert_eq "lock: killed holder frees the local lock" "$rc|$(ls "$repo/.todos/completed" | grep -c locked)" "0|1"
+  assert_note_refused "lock: note after done finds no pending todo" 2 "$repo" "x" 2026-06-09-locked Solution
+  rm -rf "$repo"
+}
+test_local_lock
+
 # --- store mode -------------------------------------------------------------
 # Cases set these per call; never inherit them from the developer's shell.
 unset TODOS_OFFLINE TODOS_SYNC_TIMEOUT TODOS_LOCK_WAIT TODOS_STORE_LOCKED CLAUDE_CODE_REMOTE
@@ -1665,6 +1964,35 @@ test_import_skips_leftover_temp() {
   rm -rf "$root"
 }
 test_import_skips_leftover_temp
+
+test_store_note_commits() {
+  local root f id; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  f=$( (cd "$root/a" && TODOS_OFFLINE=1 st new "Note me") 2>/dev/null ); id=$(basename "$f" .md)
+  (cd "$root/a" && printf 'Stored idea.\n' | TODOS_OFFLINE=1 st note "$id" Problem) >/dev/null 2>&1
+  assert_eq "store: note commits only the todo" \
+    "$(stg -C "$root/a-store" log -1 --format=%s)|$(stg -C "$root/a-store" show --name-only --format= HEAD)" \
+    "todos: note|repos/dotfiles/.todos/pending/$id.md"
+  assert_contains "store: note text survives the lock re-run" "$(cat "$f")" $'## Problem\n\nStored idea.\n'
+  rm -rf "$root"
+}
+test_store_note_commits
+
+test_store_note_busy_lock() {
+  local root f id lock holder i out rc; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  f=$( (cd "$root/a" && TODOS_OFFLINE=1 st new "Busy note") 2>/dev/null ); id=$(basename "$f" .md)
+  lock="$(stg -C "$root/a-store" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
+  python3 "$HERE/../todos_store.py" lock "$lock" 30 -- sleep 27.913 & holder=$!
+  for i in $(seq 1 50); do
+    python3 "$HERE/../todos_store.py" lock "$lock" 0 -- true; [ "$?" = 75 ] && break; sleep 0.1
+  done
+  out=$( (cd "$root/a" && printf 'x' | TODOS_OFFLINE=1 TODOS_LOCK_WAIT=1 st note "$id" Problem) 2>&1 ); rc=$?
+  assert_eq "store: busy lock refuses note" "$rc|$out|$(grep -c '^x$' "$f")" "1|todos: store is busy|0"
+  kill -9 "$holder"; wait "$holder" 2>/dev/null; pkill -f 'sleep 27.913' 2>/dev/null
+  rm -rf "$root"
+}
+test_store_note_busy_lock
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

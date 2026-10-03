@@ -2278,6 +2278,74 @@ def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) 
     )
 
 
+def pid_namespace_id():
+    """Identity of this process's PID namespace, or None where it has none
+    (macOS). HERDR_ORCH_PIDNS overrides it for tests; "none" means None."""
+    forced = os.environ.get("HERDR_ORCH_PIDNS")
+    if forced is not None:
+        return None if forced == "none" else forced
+    try:
+        ns = os.readlink("/proc/self/ns/pid")
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
+    return f"{ns}@{boot}"
+
+
+def _launcher_holder_gone(rd, cur, host=None):
+    """Why the Claude process behind launcher lease cur is provably gone, or
+    None. Only a lease whose private mirror matches cur and names a valid
+    socket for its pid qualifies: without one, pid is whatever --pid was.
+    A lease from another host or PID namespace is never judged: pids are
+    local to both. host=None skips those checks (callers without a claimant)."""
+    if (cur is None or cur.get("control_tier", "launcher") != "launcher"
+            or cur.get("runtime", "claude") != "claude"):
+        return None
+    if host is not None and cur.get("host") is not None and cur["host"] != host:
+        return None
+    try:
+        mirror = json.loads(read_payload_text(_owner_path(rd)))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(mirror, dict) or any(
+            mirror.get(k) != cur[k] for k in ("session_id", "fence", "pid")):
+        return None
+    if host is not None and mirror.get("pid_ns") != pid_namespace_id():
+        return None
+    pid = cur["pid"]
+    sock, _sock_pid, reason = validate_messaging_socket(
+        mirror.get("messaging_socket"), expect_pid=pid)
+    if reason != "ok":
+        return None
+    # A live handover marker reserves this lease for its named successor.
+    marker = read_rollover_pending(rd)
+    if marker is not None and marker_live(marker, cur["session_id"], cur["fence"]):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "pid-dead"
+    except PermissionError:
+        pass
+    except (OSError, OverflowError):
+        return None
+    recorded = cur.get("pid_start")
+    current = coordination.process_start_id(pid)
+    if isinstance(recorded, str) and isinstance(current, str):
+        if recorded == current:
+            return None
+        # linux: versus ps: is a probe change, not a different process.
+        if recorded.split(":", 1)[0] == current.split(":", 1)[0]:
+            return "pid-recycled"
+    try:
+        os.lstat(sock)
+    except FileNotFoundError:
+        return "socket-missing"
+    except OSError:
+        pass
+    return None
+
+
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
                 control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None,
@@ -2439,14 +2507,31 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                                   session=session_id, fence=handover_from[1] + 1,
                                   pane=marker["pane"])
             clear_rollover_pending(rd, marker["token"])
+        old = tx.current
+        gone = None
+        # A handover or a same-process adoption already proves who holds it.
+        if (old is not None and handover_from is None
+                and not tx._adoptable(old, adopt_pid, runtime, thread_id, adopt_start)):
+            gone = _launcher_holder_gone(rd, old, host)
+        takeover = gone is not None and old["session_id"] != session_id
+        if takeover:
+            # Logged before the lease, like adopted: a line with no matching
+            # lease reads as an attempt.
+            append_rollover_event(rd, event="takeover", reason=gone,
+                                  from_session=old["session_id"], from_fence=old["fence"],
+                                  from_pid=old["pid"], session=session_id)
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
                          runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid,
                          pid_start=pid_start, adopt_start=adopt_start,
-                         handover_from=handover_from)
+                         handover_from=handover_from, holder_gone=gone is not None)
         if fence is not None:
+            if takeover:
+                print(f"[INFO] lease holder gone ({gone}): pid {old['pid']} "
+                      f"session {old['session_id']}; claimed fence {fence}", file=sys.stderr)
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
-            write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
+            write_json_atomic(_owner_path(rd), dict(
+                tx.current, messaging_socket=sock, pid_ns=pid_namespace_id()))
         return fence
 
 
@@ -2622,7 +2707,9 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
                 if reason == "ok":
                     print("[WARNING] messaging socket ignored (pid-mismatch)", file=sys.stderr)
                 sock = None
-            write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
+            pid_ns = old.get("pid_ns") if isinstance(old, dict) else None
+            write_json_atomic(_owner_path(rd), dict(
+                tx.current, messaging_socket=sock, pid_ns=pid_ns))
             return True
     except (OSError, ValueError):
         return False
