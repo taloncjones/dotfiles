@@ -1092,6 +1092,38 @@ button.copy {
 """
 
 
+# Served pages only. todos_serve.py allows exactly this text by its hash in
+# the CSP header, so the header follows any edit here.
+BOARD_JS = r"""
+document.addEventListener("click", function (event) {
+  var button = event.target.closest("button.copy");
+  if (!button) return;
+  if (!button.dataset.label) button.dataset.label = button.textContent;
+  function show(text) {
+    button.textContent = text;
+    setTimeout(function () { button.textContent = button.dataset.label; }, 1500);
+  }
+  if (!navigator.clipboard) return show("copy failed");
+  navigator.clipboard.writeText(button.dataset.copy).then(
+    function () { show("copied"); },
+    function () { show("copy failed"); });
+});
+
+function openFromHash() {
+  var match = /^#(?:todo|prd)-(.+)$/.exec(location.hash);
+  if (!match) return;
+  var id;
+  try { id = decodeURIComponent(match[1]); } catch (e) { return; }
+  var details = document.getElementById("prd-" + id);
+  if (!details || details.tagName !== "DETAILS") return;
+  details.open = true;
+  (document.getElementById("todo-" + id) || details).scrollIntoView();
+}
+window.addEventListener("hashchange", openFromHash);
+openFromHash();
+"""
+
+
 def chip(text, cls=""):
     # cls is always a literal from this file, never user data; escaped anyway.
     return f'<span class="chip {esc(cls)}">{esc(text)}</span>' if text else ""
@@ -1339,6 +1371,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
     else:
         how = ("Served by <span class=\"mono\">todos.sh serve</span>: reload to refresh; "
                "notes are appended to the todo file.")
+    script = f"<script>{BOARD_JS}</script>" if edit is not None else ""
     completed_html = ""
     if show_completed:
         completed_html = "<h2>Completed</h2>" + render_completed(completed)
@@ -1368,6 +1401,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 {completed_html}
 <h2>Research</h2>
 {render_research(research)}
+{script}
 </main>
 </body>
 </html>

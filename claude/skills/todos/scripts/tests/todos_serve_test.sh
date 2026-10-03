@@ -107,7 +107,6 @@ test_serve_page() {
   assert_contains "serve: form carries the file's hash" "$r" "name=\"sha\" value=\"$sha\""
   assert_contains "serve: completed row is rendered" "$r" 'data-prd="2026-05-30-finished"'
   assert_missing "serve: completed row has no form" "$r" 'name="id" value="2026-05-30-finished"'
-  assert_missing "serve: page has no script" "$r" '<script'
   r=$(http "$URL" GET "/?t=$TOKEN&open=$ID")
   assert_contains "serve: ?open= opens that row" "$r" "<details class=\"prd\" id=\"prd-$ID\" open>"
   r=$(http "$URL" GET "/nope?t=$TOKEN")
@@ -216,7 +215,7 @@ test_serve_idle_socket
 test_serve_frame_header() {
   local r
   r=$(python3 - "$URL" "$TOKEN" <<'PY'
-import http.client, sys, urllib.parse
+import http.client, re, sys, urllib.parse
 port = urllib.parse.urlsplit(sys.argv[1]).port
 for path in (f"/?t={sys.argv[2]}", "/"):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
@@ -224,11 +223,12 @@ for path in (f"/?t={sys.argv[2]}", "/"):
     c.putheader("Host", f"127.0.0.1:{port}")
     c.endheaders()
     resp = c.getresponse()
-    print(resp.getheader("Content-Security-Policy"), resp.getheader("Referrer-Policy"))
+    csp = re.sub(r"'sha256-[A-Za-z0-9+/]{43}='", "'sha256-H'", resp.getheader("Content-Security-Policy"))
+    print(csp, resp.getheader("Referrer-Policy"))
 PY
 )
-  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none' no-referrer
-frame-ancestors 'none' no-referrer"
+  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none'; script-src 'sha256-H' no-referrer
+frame-ancestors 'none'; script-src 'sha256-H' no-referrer"
 }
 test_serve_frame_header
 
@@ -481,6 +481,30 @@ test_serve_copy_chips() {
   assert_missing "chips: none on completed rows" "$r" 'data-copy="2026-05-30-finished"'
 }
 test_serve_copy_chips
+
+test_serve_board_script() {
+  local r
+  r=$(python3 - "$URL" "$TOKEN" <<'PY'
+import base64, hashlib, http.client, re, sys, urllib.parse
+port = urllib.parse.urlsplit(sys.argv[1]).port
+c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+c.putrequest("GET", f"/?t={sys.argv[2]}", skip_host=True)
+c.putheader("Host", f"127.0.0.1:{port}")
+c.endheaders()
+resp = c.getresponse()
+page = resp.read().decode()
+scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+print(page.count("<script"))
+print(len(scripts) == 1 and "hashchange" in scripts[0] and "clipboard" in scripts[0])
+digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode() if scripts else ""
+print(resp.getheader("Content-Security-Policy") == f"frame-ancestors 'none'; script-src 'sha256-{digest}'")
+PY
+)
+  assert_eq "script: one board script, allowed by its hash in the CSP" "$r" "1
+True
+True"
+}
+test_serve_board_script
 
 test_serve_filter_before_cap() {
   local r n

@@ -11,6 +11,8 @@ neither another site nor another local process can read the page or post
 notes. The token URL is printed once on stderr.
 """
 import argparse
+import base64
+import hashlib
 import hmac
 import os
 import html
@@ -32,6 +34,10 @@ NOTE_TIMEOUT = 120
 # idle socket (browsers open speculative ones) would otherwise block it.
 IDLE_TIMEOUT = 1
 NOTE_STATUS = {0: 303, 2: 400, 3: 409}
+# The board script is the only script a served page may run.
+CSP = ("frame-ancestors 'none'; script-src 'sha256-"
+       + base64.b64encode(hashlib.sha256(board.BOARD_JS.encode("utf-8")).digest()).decode("ascii")
+       + "'")
 TITLES = {400: "Note refused", 403: "Forbidden", 409: "The todo changed on disk",
           500: "Note failed", 504: "Note still running"}
 USAGE = ("usage: todos.sh serve [--runtime claude|codex] [--personal] [--online] "
@@ -94,7 +100,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", CSP)
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)

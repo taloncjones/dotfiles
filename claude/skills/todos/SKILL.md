@@ -113,7 +113,7 @@ normally on the next `git add`.
 | `todos.sh share`                                                                                             | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
 | `todos.sh path`                                                                                              | Print the `.todos/` directory path                                                            |
 | `todos.sh dashboard [--runtime claude\|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]` | Render the local HTML board in the selected account scope                                     |
-| `todos.sh serve [--runtime claude\|codex] [--personal] [--port N] [--open] [--online] [--completed N]`       | Serve the board on 127.0.0.1 with note forms on pending todos                                 |
+| `todos.sh serve [--runtime claude\|codex] [--personal] [--port N] [--open] [--online] [--completed N]`       | Serve the board on 127.0.0.1 with search, filters, copy chips and note forms                  |
 
 `new`, `done`, `depend` and `note` regenerate `TODO.md` automatically, so the index never drifts.
 
@@ -257,6 +257,23 @@ stdout and the URL with the per-run token (`/?t=<token>`) on stderr;
 files as they are now. In each pending todo's expanded row there is a form
 under its Problem, Solution and Verification sections; completed todos
 are read-only. Stop the server with Ctrl-C.
+
+A filter form above the Open tables narrows the board. The search box
+(`q`) keeps a todo when every word appears in its id or file text, in any
+case. The area and priority selects (`area`, `priority`) list the exact
+values on the board. The sort (`sort=priority`, or `sort=created` for
+newest first) defaults to due date, then priority. The filter applies to
+open and completed rows, and the line under the form counts the matching
+open todos. The choice lives in the URL, so a reload or a bookmark keeps it
+for the life of the server run. After a restart the old token gets a 403:
+open the newly printed URL and filter again.
+
+Each pending row has chips that copy its id, `todos.sh done <id>` and
+`kick off <id>` (the director's phrase). A URL ending in `#todo-<id>`
+opens and scrolls to that todo's PRD. Chips and the fragment need the
+page's one script; the server's `Content-Security-Policy` allows only that
+script, by hash (`script-src 'sha256-...'`). The static `dashboard` page
+has none of these controls.
 
 The form goes through `todos.sh note`, the only writer, which agents can
 call directly:
