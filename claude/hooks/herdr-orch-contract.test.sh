@@ -533,7 +533,7 @@ rev = t[t.index("## Reviewer brief variant"):t.index("## Deep-think brief varian
 ok = (all(n in fp for n in ["no spec or plan exists", "Solution is the plan",
                            "--reason needs_design", "--phase implement",
                            "--launch-id <launch_id>", "verify-contract"])
-      and all(n in plan for n in ["ARTIFACT_CLASS", "4 spec rounds", "2 plan rounds"])
+      and all(n in plan for n in ["ARTIFACT_CLASS", "2 spec rounds", "2 plan rounds"])
       and "<fast-path-line>" in rev and "took the fast path" in rev)
 sys.exit(0 if ok else 1)
 PY

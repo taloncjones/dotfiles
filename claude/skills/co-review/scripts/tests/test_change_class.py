@@ -68,5 +68,67 @@ class ClassifyCliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("garbage\n").stdout, "full\n")
 
 
+def hunk(path: str, added: int = 1, removed: int = 1) -> str:
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n"
+            + "".join(f"-old {n}\n" for n in range(removed))
+            + "".join(f"+new {n}\n" for n in range(added)))
+
+
+class DeltaClassTests(unittest.TestCase):
+    def test_path_classes(self):
+        cases = {
+            "claude/skills/co-review/SKILL.md": "gate",
+            ".github/workflows/ci.yml": "ci",
+            "Jenkinsfile": "ci",
+            ".gitmodules": "submodule",
+            "claude/hooks/x.py": "auth",
+            "claude/settings.json.tmpl": "auth",
+            "lib/auth_util.py": "auth",
+            "CODEOWNERS": "auth",
+            "src/tests/a.py": "tests",
+            "test_x.py": "tests",
+            "x_test.go": "tests",
+            "a.test.sh": "tests",
+            "README.md": "docs",
+            "docs/x.txt": "docs",
+            "src/app.py": "source",
+        }
+        for path, expected in cases.items():
+            self.assertEqual(cc.path_class(path), expected, path)
+
+    def test_file_cap_edge(self):
+        five = "".join(hunk(f"src/f{n}.py") for n in range(5))
+        self.assertTrue(cc.delta_class(cc.delta_stats(five), 5, 150)["eligible"])
+        six = five + hunk("src/f5.py")
+        verdict = cc.delta_class(cc.delta_stats(six), 5, 150)
+        self.assertEqual(verdict, {"eligible": False,
+                                   "reasons": ["6 files exceed max_files 5"]})
+
+    def test_line_cap_edge(self):
+        at_cap = cc.delta_stats(hunk("src/a.py", added=75, removed=75))
+        self.assertEqual((at_cap["added"], at_cap["removed"]), (75, 75))
+        self.assertTrue(cc.delta_class(at_cap, 5, 150)["eligible"])
+        over = cc.delta_class(cc.delta_stats(hunk("src/a.py", added=76, removed=75)), 5, 150)
+        self.assertEqual(over["reasons"], ["151 changed lines exceed max_lines 150"])
+
+    def test_binary_and_submodule_changes_are_ineligible(self):
+        binary = ("diff --git a/img.png b/img.png\nindex 1..2 100644\n"
+                  "Binary files a/img.png and b/img.png differ\n")
+        self.assertIn("delta has a binary change",
+                      cc.delta_class(cc.delta_stats(binary), 5, 150)["reasons"])
+        pin = ("diff --git a/vendor/x b/vendor/x\nindex 1111111..2222222 160000\n"
+               "--- a/vendor/x\n+++ b/vendor/x\n@@ -1 +1 @@\n"
+               "-Subproject commit 1111111\n+Subproject commit 2222222\n")
+        self.assertIn("delta touches a submodule path",
+                      cc.delta_class(cc.delta_stats(pin), 5, 150)["reasons"])
+
+    def test_blocking_class_and_empty_diff_are_ineligible(self):
+        self.assertIn("delta touches a ci path",
+                      cc.delta_class(cc.delta_stats(hunk(".github/workflows/ci.yml")), 5, 150)["reasons"])
+        self.assertIsNone(cc.delta_stats(""))
+        self.assertEqual(cc.delta_class(None, 5, 150),
+                         {"eligible": False, "reasons": ["delta diff is empty or unparsable"]})
+
+
 if __name__ == "__main__":
     unittest.main()

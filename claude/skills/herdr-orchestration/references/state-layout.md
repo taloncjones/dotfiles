@@ -61,7 +61,7 @@ STATE_ROOT/
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
     rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
-    rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
+    rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed|takeover, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
@@ -200,10 +200,27 @@ STATE_ROOT/
   `linux:<boot_id>:<starttime>` or `ps:<lstart>`) is written at claim.
   Same-process adoption requires it to match; a record without it (written
   before this field) still adopts by pid alone for one release.
-- Preflight claims if the file is absent or `heartbeat_ts` is stale (e.g.
-  > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
-  > director whose claim fails **yields** to read-only reporting and
-  > offers an explicit takeover.
+- **Liveness:** `claim-owner` takes the lease when the record is absent,
+  when `heartbeat_ts` is older than `--stale-secs` (default 900 s; the owner
+  refreshes it each turn), or when the holder is gone. "Gone" is judged
+  only for a Claude launcher lease on the claimant's own `host` (a lease
+  with no `host` field is corrupt and rejected) and in the claimant's own PID
+  namespace, whose private mirror matches the shared record (`session_id`, `fence`, `pid`) and names a valid
+  `messaging_socket` for that `pid`, while no live `rollover-pending.json`
+  names the lease. The mirror's `pid_ns` records the claimant's PID
+  namespace (Linux: `/proc/self/ns/pid` link plus `boot_id`; `null` on
+  macOS). Any difference from the new claimant's, or a missing field while
+  the claimant's is non-null, forbids early takeover; a stale heartbeat
+  still expires the lease. The verdicts: the `pid` has no process (`pid-dead`); its start
+  identity differs from `pid_start` under the same scheme
+  (`pid-recycled`); or its identity is unconfirmed (no `pid_start`, or no
+  probe result) and the socket path is missing (`socket-missing`). A holder
+  whose start identity matches keeps the heartbeat rule, socket or not. A
+  handover or same-process adoption is never judged. A takeover appends a
+  `takeover` line to `rollover.jsonl` before writing the lease and prints
+  `[INFO] lease holder gone (<reason>)` on stderr. A second director whose
+  claim fails **yields** to read-only reporting and offers an explicit
+  takeover.
 
 ### `rollover-pending.json`
 
@@ -356,7 +373,11 @@ config error.
 
 `ship` is optional and read only by the director's ship step (SKILL.md
 section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
-"merge": "auto"}}`. `push` and `pr` are booleans defaulting to true; `merge`
+"merge": "auto"}}`. An optional
+`"delta": {"max_files": 5, "max_lines": 150}` (positive ints, those defaults
+when absent) sets the caps the director's delta-tier step (SKILL.md section 6)
+passes to `delta-class` and binds in the ship brief. `push` and `pr` are
+booleans defaulting to true; `merge`
 is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
 the owner's confirm). When the block or `merge` is absent, `merge` is
 `"auto"` when `claude/skills/lib/workflow_context.py account-scope --cwd

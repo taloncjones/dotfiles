@@ -581,11 +581,21 @@ class GateReportTests(unittest.TestCase):
         self.assertNotIn("required_seats", shape)
         self.assertEqual(
             shape["codex_substitute"]["seats"],
-            {"light": ["codex"], "full": ["codex", "breaker"]},
+            {"light": ["codex"], "full": ["codex", "breaker"], "delta": []},
         )
         self.assertEqual(
             shape["codex_substitute"]["reasons"], ["quota", "auth", "unavailable"]
         )
+
+    def test_schema_documents_the_delta_tier(self):
+        shape = gate.schema()
+        self.assertEqual(shape["delta_seats"], ["claude", "verifier"])
+        self.assertEqual(
+            sorted(shape["delta"]["expected_fields"]),
+            ["anchor_head", "max_files", "max_lines", "prior_head", "prior_run"],
+        )
+        self.assertIn("blast_radius", shape["delta"]["report_fields"])
+        self.assertIn("escalate", shape["result_fields"])
 
     def test_lesson_shape_limit_seat_is_incomplete(self):
         body = json.dumps({"runtime": "claude", "status": "error",
@@ -846,7 +856,8 @@ class GateReportTests(unittest.TestCase):
         result = self._cli_audit(self.root)
         self.assertEqual(result.returncode, 0, result.stderr)
         body = result.stdout
-        self.assertEqual(body.count(f"<!-- co-review-audit head={SHA_A} run=run-1 -->"), 1)
+        self.assertEqual(
+            body.count(f"<!-- co-review-audit head={SHA_A} run=run-1 tier=full -->"), 1)
         self.assertTrue(body.startswith("<!-- co-review-audit"))
         for text in ("Co-review gate: APPROVE", "- Run: run-1", f"- Head: {SHA_A}",
                      "- Tier: full (4 seats)", "- CI: 1/1 checks passed"):

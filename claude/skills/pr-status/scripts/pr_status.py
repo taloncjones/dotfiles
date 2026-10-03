@@ -22,7 +22,7 @@ PR_FIELDS = ("number,title,url,state,headRefName,headRefOid,isDraft,reviewDecisi
 RUN_FIELDS = "databaseId,headSha,status,conclusion,createdAt,url"
 DONE_STATUSES = frozenset({"merged", "abandoned", "failed"})
 CI_IGNORED = frozenset({"SKIPPED", "NEUTRAL"})
-AUDIT_RE = re.compile(r"^<!-- co-review-audit head=(?P<sha>[0-9a-f]{40}) run=(?P<run>\S+) -->$")
+AUDIT_RE = re.compile(r"^<!-- co-review-audit head=(?P<sha>[0-9a-f]{40}) run=(?P<run>\S+)(?: \S+=\S+)* -->$")
 CHECKED_RE = re.compile(r"^\s*- \[[xX]\] (?P<text>.*)$")
 UNCHECKED_RE = re.compile(r"^\s*- \[ \]")
 EVIDENCE_RE = re.compile(r"\b(run|stand|uat|evidence)\b", re.IGNORECASE)

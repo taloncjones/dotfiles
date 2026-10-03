@@ -268,6 +268,15 @@
             "command": "~/.claude/hooks/cache_jira_url.py"
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/pr_post_guard.py"
+          }
+        ]
       }
     ],
     "SessionStart": [

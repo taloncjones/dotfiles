@@ -13,7 +13,9 @@ runtime's equivalent read, edit, shell, and connector tools; paths under
 
 Run this once a PR is merged. It does the teardown and Jira hygiene that a merge
 leaves behind. Everything is **propose-confirm-apply**: gather state, show the
-plan, get a yes, then act. Never destroy or transition before confirmation.
+plan, get the owner's answer to one `AskUserQuestion` prompt, then act (Codex,
+which has no such tool here, asks in prose and ends the turn). Never destroy
+or transition before confirmation.
 
 **Director mode.** Invoked by the herdr director from herdr-orchestration
 section 6a in a personal repository, the user's standing authorization is
@@ -78,7 +80,12 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
 Show a concise plan: which worktree/branch get removed, whether the remote
 branch needs deleting, what leftovers get swept, and — if a key was found — the
 Jira issue's current status and the exact changes (→ Done, assignee, sprint,
-epic, comment). Then confirm. Default is "do all".
+epic, comment). Then ask once with `AskUserQuestion`. The options are "Do all
+(Recommended)", "Skip the Jira comment", "Skip the Jira fields" and "Teardown
+only"; drop the options for parts that do not apply. In a work repository,
+put the exact Jira comment text in the preview of every option that posts it:
+that answer is the go for the comment. Other direction comes through the
+free-form option.
 
 ## Step 3 — Apply teardown
 
@@ -122,7 +129,7 @@ or create a second config copy. Its fields are:
 `cloud_id` is the Jira cloudId, `jira_account_id` is my accountId,
 `default_epic` is the epic to file under, and `sprint_board_name` /
 `sprint_board_id` identify the team's sprint board. No config block → show the
-discovered values and confirm before writing.
+discovered values and confirm with `AskUserQuestion` before writing.
 
 1. **Transition to Done.** `getTransitionsForJiraIssue`, then pick the
    transition whose `to.statusCategory.key == "done"` and name is `Done` (do not
@@ -141,12 +148,19 @@ discovered values and confirm before writing.
    - `parent` → the shared epic key.
      The discovered epic should normally match `default_epic` (e.g. `PROJ-123`)
      and the active sprint should live on `sprint_board_name`
-     (`sprint_board_id`, e.g. board id 42). If the area is ambiguous, show the
-     discovered epic/sprint and confirm before writing.
+     (`sprint_board_id`, e.g. board id 42). If the area is ambiguous, ask
+     with `AskUserQuestion` before writing, the discovered epic/sprint first.
      Apply in one `editJiraIssue`: `{assignee, customfield_10020, parent}`.
      Note: `editJiraIssue` echoes a huge editmeta blob — don't parse it; verify
      with a follow-up `getJiraIssue` on `[status, assignee, parent, customfield_10020]`.
-4. **Resolution comment.** `addCommentToJiraIssue`, markdown. Reflect **current
+4. **Resolution comment.** The comment's first line is exactly
+   `Resolved by <PR URL>`. First read the issue's comments (`getJiraIssue`
+   with comments) and skip this item only when a comment's first line starts
+   with `Resolved by` and contains this PR's `<owner>/<repo>/pull/<n>`
+   followed by a non-digit or the line end (Jira may render the URL as a
+   link); an interrupted run may have posted it. `/pr-ready`'s
+   `Ready for review` comment carries the PR link too, but not that line, so
+   it never counts. `addCommentToJiraIssue`, markdown. Reflect **current
    state** with the PR link and a one-line "what shipped" — not a changelog of
    internal commits. Keep the issue _description_ as the durable problem/solution
    spec; resolution events go in comments. No emojis.
@@ -160,10 +174,11 @@ read its header before proposing. Steps 1-3 below are read-only
 classification; ALL writes (rules edit, todos) happen in step 5 only,
 after the step 4 confirmation.
 
-1. **Fallback question (always, even when Step 1 harvested tags):** "Any
-   recurring or preventable agent failure from this branch worth a standing
-   rule, beyond the tagged ones? (usually no)". Zero harvested + "no" ends
-   the step.
+1. **Fallback question (always, even when Step 1 harvested tags):** ask
+   with `AskUserQuestion` "Any recurring or preventable agent failure from
+   this branch worth a standing rule, beyond the tagged ones?", with the
+   options "No (Recommended)" and "Yes"; the owner describes it in the
+   free-form option. Zero harvested + "no" ends the step.
 2. **Filter** each candidate through the rules file's admission filter
    (process failure; recurring; not already covered; public-safe).
    Duplicates of existing rules/CLAUDE.md/AGENTS.md/hooks: drop with a one-line note
@@ -177,14 +192,15 @@ after the step 4 confirmation.
    that todo — never done inline here. Shared policy todos must name both
    Claude and Codex adapters and their tests; prefer a git hook when its
    event covers the policy across runtimes. Not hookable -> a one-line rule.
-4. **Propose (one combined confirmation):** the exact new rule line(s) AND
+4. **Propose (one `AskUserQuestion` confirmation):** the exact new rule line(s) AND
    the exact todo title(s)/body for hookable ones; at cap, which existing
    rule to drop or merge; for any prune candidate (dated 6+ calendar
    months back), prune / keep-and-redate / file a graduation todo (moving
    a rule into operating-principles.md is its own edit — never done inline
    here). State that apply pushes `talon/agent-lesson-<slug>` and opens a
-   PR; this one confirmation covers both, inside herdr or not. Decline =
-   no writes of any kind, step over.
+   PR; this one confirmation covers both, inside herdr or not. Show the exact
+   lines in the preview of "Apply and open the lessons PR (Recommended)"; the
+   other option is "Skip lessons". Decline = no writes of any kind, step over.
 5. **Apply (all approved writes):** file approved todos via
    `todos.sh new`. For the rules edit: re-read `agent-lessons.md`
    immediately before editing (a concurrent session may have moved it);
@@ -253,6 +269,8 @@ after the step 4 confirmation.
 
 - Propose-confirm-apply. One pass, no loop. Step 5 runs its own confirm —
   teardown approval never pre-approves lesson writes.
+- Answers are not stored. After an interruption, re-run Step 1 and ask
+  again; never act on an answer from an earlier turn.
 - Teardown is destructive — confirm the worktree is clean and the PR is merged
   before removing anything.
 - If only the git half or only the Jira half applies, do that half and say which

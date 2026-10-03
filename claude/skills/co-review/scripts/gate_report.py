@@ -7,14 +7,19 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
 from pathlib import Path
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 LIGHT_SEATS = ("codex", "verifier")
 FULL_SEATS = ("claude", "codex", "breaker", "verifier")
-_TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS}
-_CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker")}
+DELTA_SEATS = ("claude", "verifier")
+_TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS, "delta": DELTA_SEATS}
+_CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker"), "delta": ()}
+DELTA_MAX_FILES = 5
+DELTA_MAX_LINES = 150
+_BLAST_RADIUS = ("bounded", "unbounded")
 _SUBSTITUTE_REASONS = ("quota", "auth", "unavailable")
 _FAILED_CODEX_STATUSES = ("error", "unparseable")
 _AXES = (
@@ -321,6 +326,84 @@ def _findings(report: dict, expected: dict, reasons: list[str]) -> bool:
     return changes
 
 
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _json_artifact(entry: object, root: Path, label: str, reasons: list[str]):
+    """(payload, path) of a digest-bound JSON object artifact, else (None, None)."""
+    path, errors = _load_preconditions()._artifact(entry, root, label)
+    if errors:
+        reasons.extend(errors)
+        return None, None
+    try:
+        payload = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        reasons.append(f"{label} artifact is not a JSON object")
+        return None, None
+    return payload, path
+
+
+def _delta_prior(block: dict, wanted: dict, expected: dict, root: Path, reasons: list[str]) -> None:
+    """The copied prior run must be this PR's full APPROVE at the cited head."""
+    prior, prior_path = _json_artifact(block.get("prior_report"), root, "delta prior report", reasons)
+    prior_expected, _ = _json_artifact(block.get("prior_expected"), root, "delta prior expected", reasons)
+    if prior is None or prior_expected is None:
+        return
+    if prior.get("class") != "full":
+        reasons.append("delta prior run is not a full round")
+        return
+    verdict = evaluate(prior, prior_expected, prior_path.parent)["verdict"]
+    if verdict != "APPROVE":
+        reasons.append(f"delta prior run verdict is {verdict}")
+    if (prior_expected.get("run_id") != wanted.get("prior_run")
+            or prior_expected.get("head") != wanted.get("prior_head")):
+        reasons.append("delta prior run does not match the expected identity")
+    for key in ("repository", "pr_number", "base_ref"):
+        if prior_expected.get(key) != expected.get(key):
+            reasons.append(f"delta prior {key} differs from this gate")
+
+
+def _delta(report: dict, expected: dict, root: Path, reasons: list[str]) -> None:
+    """Check a delta report's block (spec R19)."""
+    wanted, block = expected.get("delta"), report.get("delta")
+    if not isinstance(wanted, dict) or not isinstance(block, dict):
+        reasons.append("delta block is missing")
+        return
+    for key in ("prior_run", "prior_head", "anchor_head"):
+        if not _nonempty(wanted.get(key)) or block.get(key) != wanted.get(key):
+            reasons.append(f"identity mismatch: delta {key}")
+    _delta_prior(block, wanted, expected, root, reasons)
+    caps = (wanted.get("max_files"), wanted.get("max_lines"))
+    diff_path, errors = _load_preconditions()._artifact(block.get("diff"), root, "delta diff")
+    reasons.extend(errors)
+    if not all(_positive_int(cap) for cap in caps):
+        reasons.append("delta caps are invalid")
+    elif diff_path is not None:
+        change_class = _load_change_class()
+        stats = change_class.delta_stats(diff_path.read_bytes().decode("utf-8", "replace"))
+        verdict = change_class.delta_class(stats, *caps)
+        reasons.extend(f"delta diff is not eligible: {reason}" for reason in verdict["reasons"])
+    if wanted.get("anchor_head") == wanted.get("prior_head"):
+        if block.get("carry_forward") is not None:
+            reasons.append("delta carry_forward must be null when the anchor is the prior head")
+    else:
+        record, _ = _json_artifact(block.get("carry_forward"), root, "delta carry_forward", reasons)
+        if record is not None and not (
+            record.get("pass") is True
+            and record.get("prior_head") == wanted.get("prior_head")
+            and record.get("head") == wanted.get("anchor_head")
+        ):
+            reasons.append("delta carry_forward does not prove the anchor")
+    blast = block.get("blast_radius")
+    if blast not in _BLAST_RADIUS:
+        reasons.append("delta blast_radius is invalid")
+    elif blast == "unbounded":
+        reasons.append("delta blast radius is unbounded")
+
+
 def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     """Return APPROVE, CHANGES, or INCOMPLETE without raising on bad input."""
     reasons: list[str] = []
@@ -384,8 +467,16 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
                     runtimes.add(seat.get("runtime"))
             if runtimes != {"claude", "codex"}:
                 reasons.append("light seats must be one claude and one codex runtime")
+        if tier == "delta":
+            for name in required:
+                if isinstance(seats[name], dict) and seats[name].get("runtime") != "claude":
+                    reasons.append(f"delta seat {name} must run on claude")
     if tier == "light" and not _light_diff_ok(report.get("preconditions"), artifact_root):
         reasons.append("class light does not match the frozen diff")
+    if tier == "delta":
+        _delta(report, expected, artifact_root, reasons)
+    elif "delta" in report or "delta" in expected:
+        reasons.append("delta block on a non-delta class")
     _coverage(report, reasons, visible)
     changes = _findings(report, expected, reasons)
     source = report.get("preconditions")
@@ -399,14 +490,20 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     if not preconditions["approve_allowed"]:
         reasons.extend(preconditions["reasons"])
     if reasons:
-        return {"verdict": "INCOMPLETE", "approve_allowed": False, "reasons": reasons}
-    if changes:
-        return {
+        result = {"verdict": "INCOMPLETE", "approve_allowed": False, "reasons": reasons}
+    elif changes:
+        result = {
             "verdict": "CHANGES",
             "approve_allowed": False,
             "reasons": ["confirmed material findings or open blockers", *visible],
         }
-    return {"verdict": "APPROVE", "approve_allowed": True, "reasons": visible}
+    else:
+        result = {"verdict": "APPROVE", "approve_allowed": True, "reasons": visible}
+    # A delta never ends short of APPROVE: the next gate on this head is full
+    # (spec [D7], R21).
+    if tier == "delta" and result["verdict"] != "APPROVE":
+        result["escalate"] = "full"
+    return result
 
 
 def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None:
@@ -421,6 +518,11 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
                else f"no CI: {preconditions['no_ci']['evidence']}")
     tier = report["class"]
     seats = report["seats"]
+    prior_fields, prior_lines = "", ()
+    if tier == "delta":
+        delta = report["delta"]
+        prior_fields = f" prior_run={delta['prior_run']} prior_head={delta['prior_head']}"
+        prior_lines = (f"- Prior: {delta['prior_run']} at {delta['prior_head']}",)
     substitute_lines = tuple(
         f"- Substitute: {name} seat ran on claude after a codex "
         f"{seats[name]['codex_substitute']['reason']} failure"
@@ -428,16 +530,227 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
         if isinstance(seats.get(name), dict) and "codex_substitute" in seats[name]
     )
     lines = (
-        f"<!-- co-review-audit head={report['head']} run={report['run_id']} -->",
+        f"<!-- co-review-audit head={report['head']} run={report['run_id']} "
+        f"tier={tier}{prior_fields} -->",
         "Co-review gate: APPROVE",
         "",
         f"- Run: {report['run_id']}",
         f"- Head: {report['head']}",
         f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
+        *prior_lines,
         *substitute_lines,
         f"- CI: {ci_line}",
     )
     return "\n".join(lines) + "\n"
+
+
+def carry_forward_comment(record: dict) -> str:
+    """The PR audit comment for a passing carry-forward record (spec R7)."""
+    lines = [
+        f"<!-- co-review-audit head={record['head']} run={record['prior_run']} "
+        f"tier=carry-forward prior_head={record['prior_head']} -->",
+        "Co-review gate: APPROVE (carry-forward)",
+        "",
+        f"- Run: {record['prior_run']} (carried, no seats)",
+        f"- Head: {record['head']}",
+        f"- Prior head: {record['prior_head']}",
+        f"- Base: {record['base_ref']} at {record['base']}",
+        "",
+        "```text",
+    ]
+    for proof in record["proofs"]:
+        lines.append("$ " + " ".join(proof["argv"]))
+        lines.extend(proof["output"] or ["(empty)"])
+    lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def _read_gate(report_path: Path, expected_path: Path, report_sha256: str | None,
+               expected_sha256: str | None, reasons: list[str]):
+    """(report, expected) of a digest-pinned gate that still evaluates APPROVE, else None.
+
+    A None digest is only for a file already bound by a pinned report's own digest.
+    """
+    try:
+        report_bytes, expected_bytes = report_path.read_bytes(), expected_path.read_bytes()
+    except OSError as error:
+        reasons.append(f"cannot read the prior gate: {error}")
+        return None
+    for label, content, pinned in (("report", report_bytes, report_sha256),
+                                   ("expected", expected_bytes, expected_sha256)):
+        if pinned is not None and hashlib.sha256(content).hexdigest() != pinned:
+            reasons.append(f"prior {label} digest does not match its pin")
+            return None
+    try:
+        report = json.loads(report_bytes.decode("utf-8"))
+        expected = json.loads(expected_bytes.decode("utf-8"))
+    except ValueError as error:
+        reasons.append(f"cannot read the prior gate: {error}")
+        return None
+    verdict = evaluate(report, expected, report_path.resolve().parent)["verdict"]
+    if verdict != "APPROVE":
+        reasons.append(f"prior gate verdict is {verdict}")
+        return None
+    return report, expected
+
+
+def carry_forward_record(repo: Path, report_path: Path, expected_path: Path,
+                         report_sha256: str, expected_sha256: str, head: str) -> dict:
+    """Re-evaluate the prior APPROVE and run the carry-forward proofs (spec R1-R7)."""
+    record = {
+        "schema": 1, "tier": "carry-forward", "pass": False, "reasons": [],
+        "prior_run": None, "prior_head": None, "head": None, "upstream": None,
+        "base": None, "base_ref": None, "old_base": None, "new_base": None,
+        "proofs": [], "audit_comment": None,
+    }
+    gate = _read_gate(report_path, expected_path, report_sha256, expected_sha256,
+                      record["reasons"])
+    if gate is None:
+        return record
+    expected = gate[1]
+    upstream = f"origin/{expected['base_ref']}"
+    record.update(prior_run=expected["run_id"], base_ref=expected["base_ref"])
+    record.update(_load_sibling("branch_delta").carry_forward(repo, expected["head"], head, upstream))
+    if record["pass"]:
+        record["audit_comment"] = carry_forward_comment(record)
+    return record
+
+
+def _full_prior(report_path: Path, expected_path: Path, report_sha256: str | None,
+                expected_sha256: str | None, reasons: list[str]):
+    """(expected, report_path, expected_path, report_sha256, expected_sha256) of the
+    full APPROVE a delta builds on; the digests pin the bytes that were evaluated."""
+    gate = _read_gate(report_path, expected_path, report_sha256, expected_sha256, reasons)
+    if gate is None:
+        return None
+    report, expected = gate
+    if report.get("class") == "delta":
+        # A delta report pins its prior copy by digest; follow that pin.
+        root = report_path.resolve().parent
+        report_path = root / report["delta"]["prior_report"]["artifact"]
+        expected_path = root / report["delta"]["prior_expected"]["artifact"]
+        report_sha256 = report["delta"]["prior_report"]["sha256"]
+        expected_sha256 = report["delta"]["prior_expected"]["sha256"]
+        gate = _read_gate(report_path, expected_path, report_sha256, expected_sha256, reasons)
+        if gate is None:
+            return None
+        report, expected = gate
+    if report.get("class") != "full":
+        reasons.append("first round on a branch is always full: no prior full APPROVE")
+        return None
+    return (expected, report_path.resolve(), expected_path.resolve(),
+            report_sha256, expected_sha256)
+
+
+def delta_recommendation(repo: Path, report_path: Path, expected_path: Path,
+                         report_sha256: str, expected_sha256: str, head: str,
+                         max_files: int, max_lines: int, diff_out: Path) -> dict:
+    """Recommend the delta or full tier for head (spec R15); any doubt is full."""
+    rec = {
+        "recommend": "full", "reasons": [], "prior_run": None, "prior_head": None,
+        "prior_report": None, "prior_expected": None, "prior_report_sha256": None,
+        "prior_expected_sha256": None, "anchor_head": None, "head": None,
+        "max_files": max_files, "max_lines": max_lines, "stats": None, "carry_forward": None,
+    }
+    reasons = rec["reasons"]
+    if not (_positive_int(max_files) and _positive_int(max_lines)):
+        reasons.append("delta caps must be positive integers")
+        return rec
+    prior = _full_prior(report_path, expected_path, report_sha256, expected_sha256, reasons)
+    if prior is None:
+        return rec
+    expected, full_report, full_expected, full_report_sha256, full_expected_sha256 = prior
+    rec.update(prior_run=expected["run_id"], prior_head=expected["head"],
+               prior_report=str(full_report), prior_expected=str(full_expected),
+               prior_report_sha256=full_report_sha256,
+               prior_expected_sha256=full_expected_sha256)
+    branch_delta = _load_sibling("branch_delta")
+    try:
+        anchor_head = branch_delta.derive_anchor(repo, expected["head"], head)
+        if anchor_head != expected["head"]:
+            proof = branch_delta.carry_forward(
+                repo, expected["head"], anchor_head, f"origin/{expected['base_ref']}")
+            rec["carry_forward"] = proof
+            if not proof["pass"]:
+                reasons.append("anchor is not a carry-forward of the full head: "
+                               + "; ".join(proof["reasons"]))
+                return rec
+        span = branch_delta.delta_range(repo, anchor_head, head)
+    except branch_delta.ProofError as error:
+        reasons.append(f"git check failed: {error}")
+        return rec
+    rec.update(anchor_head=span["anchor"], head=span["head"])
+    if not span["ancestor"]:
+        reasons.append("anchor is not an ancestor of head")
+    if span["anchor"] == span["head"]:
+        reasons.append("head equals the anchor: nothing to review")
+    if span["merges"]:
+        reasons.append("merge commits in the delta range: " + " ".join(span["merges"]))
+    if reasons:
+        return rec
+    diff_out.write_bytes(span["diff"])
+    change_class = _load_change_class()
+    rec["stats"] = change_class.delta_stats(span["diff"].decode("utf-8", "replace"))
+    verdict = change_class.delta_class(rec["stats"], max_files, max_lines)
+    reasons.extend(verdict["reasons"])
+    if verdict["eligible"]:
+        rec["recommend"] = "delta"
+    return rec
+
+
+def _report_artifacts(report: dict) -> list[str]:
+    """Every report-relative artifact name a gate report cites."""
+    names = []
+    for seat in (report.get("seats") or {}).values():
+        if not isinstance(seat, dict):
+            continue
+        names.append(seat.get("artifact"))
+        attempt = (seat.get("codex_substitute") or {}).get("attempt")
+        if isinstance(attempt, dict):
+            names.append(attempt.get("artifact"))
+    for key in ("diff", "ci"):
+        entry = (report.get("preconditions") or {}).get(key)
+        if isinstance(entry, dict):
+            names.append(entry.get("artifact"))
+    return [name for name in names if isinstance(name, str)]
+
+
+def copy_prior(report_path: Path, expected_path: Path, report_sha256: str,
+               expected_sha256: str, out: Path) -> dict:
+    """Copy one digest-pinned full APPROVE run into a fresh out/ a delta report cites
+    (spec R18). The pins are the ones `delta-class` verified, so the copy is the
+    prior the pinned ship.json named."""
+    source = report_path.resolve().parent
+    report_bytes, expected_bytes = report_path.read_bytes(), expected_path.read_bytes()
+    for label, content, pinned in (("report", report_bytes, report_sha256),
+                                   ("expected", expected_bytes, expected_sha256)):
+        if hashlib.sha256(content).hexdigest() != pinned:
+            raise ValueError(f"prior {label} digest does not match its pin")
+    report = json.loads(report_bytes.decode("utf-8"))
+    names = _report_artifacts(report)
+    if {"report.json", "expected.json"} & set(names):
+        raise ValueError("a prior artifact collides with report.json or expected.json")
+    out.mkdir()
+    for name in names:
+        origin = source / name
+        if origin.is_symlink() or not origin.is_file():
+            raise ValueError(f"prior artifact {name} is not a regular file")
+        origin.resolve().relative_to(source.resolve())
+        target = out / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.resolve().relative_to(out.resolve())
+        shutil.copyfile(origin, target)
+    (out / "report.json").write_bytes(report_bytes)
+    (out / "expected.json").write_bytes(expected_bytes)
+    reasons: list[str] = []
+    if _full_prior(out / "report.json", out / "expected.json", report_sha256,
+                   expected_sha256, reasons) is None:
+        raise ValueError("copied prior does not evaluate as a full APPROVE: " + "; ".join(reasons))
+    return {
+        key: {"artifact": f"{out.name}/{key.split('_')[-1]}.json",
+              "sha256": hashlib.sha256((out / f"{key.split('_')[-1]}.json").read_bytes()).hexdigest()}
+        for key in ("prior_report", "prior_expected")
+    }
 
 
 def schema() -> dict:
@@ -452,6 +765,32 @@ def schema() -> dict:
         "schema_version": 1,
         "light_seats": list(LIGHT_SEATS),
         "full_seats": list(FULL_SEATS),
+        "delta_seats": list(DELTA_SEATS),
+        "delta": {
+            "expected_fields": {
+                "prior_run": "run_id of the full APPROVE this delta builds on",
+                "prior_head": "that run's head",
+                "anchor_head": "the full head, or the main merge carrying it forward",
+                "max_files": "positive int cap (default 5)",
+                "max_lines": "positive int cap on added plus removed lines (default 150)",
+            },
+            "report_fields": {
+                "prior_run": "equals expected.delta.prior_run",
+                "prior_head": "equals expected.delta.prior_head",
+                "anchor_head": "equals expected.delta.anchor_head",
+                "prior_report": {"artifact": "prior/report.json", "sha256": "SHA-256"},
+                "prior_expected": {"artifact": "prior/expected.json", "sha256": "SHA-256"},
+                "diff": {"artifact": "delta.diff", "sha256": "SHA-256"},
+                "carry_forward": "null, or {artifact, sha256} of carry-forward.json",
+                "blast_radius": "bounded or unbounded",
+            },
+        },
+        "result_fields": {
+            "verdict": "APPROVE, CHANGES, or INCOMPLETE",
+            "approve_allowed": "true only for APPROVE",
+            "reasons": "list of strings",
+            "escalate": "present as full only on a non-APPROVE delta result",
+        },
         "class": "light or full; the evaluator recomputes light from the frozen diff",
         "finding_fields": {
             "id": "nonempty unique identifier",
@@ -559,7 +898,41 @@ def main(argv: list[str] | None = None) -> int:
     audit_parser = sub.add_parser("audit-comment")
     audit_parser.add_argument("--report", required=True)
     audit_parser.add_argument("--expected", required=True)
+    for name in ("carry-forward", "delta-class"):
+        tier_parser = sub.add_parser(name)
+        for flag in ("--repo", "--report", "--expected", "--report-sha256", "--expected-sha256"):
+            tier_parser.add_argument(flag, required=True)
+        tier_parser.add_argument("--head", default="HEAD")
+        if name == "delta-class":
+            tier_parser.add_argument("--max-files", type=int, default=DELTA_MAX_FILES)
+            tier_parser.add_argument("--max-lines", type=int, default=DELTA_MAX_LINES)
+            tier_parser.add_argument("--diff-out", required=True)
+    copy_parser = sub.add_parser("copy-prior")
+    for flag in ("--report", "--expected", "--report-sha256", "--expected-sha256", "--out"):
+        copy_parser.add_argument(flag, required=True)
     args = parser.parse_args(argv)
+    if args.command == "carry-forward":
+        record = carry_forward_record(
+            Path(args.repo), Path(args.report), Path(args.expected),
+            args.report_sha256, args.expected_sha256, args.head)
+        print(json.dumps(record, sort_keys=True))
+        return 0 if record["pass"] else 1
+    if args.command == "delta-class":
+        rec = delta_recommendation(
+            Path(args.repo), Path(args.report), Path(args.expected),
+            args.report_sha256, args.expected_sha256, args.head,
+            args.max_files, args.max_lines, Path(args.diff_out))
+        print(json.dumps(rec, sort_keys=True))
+        return 0 if rec["recommend"] == "delta" else 1
+    if args.command == "copy-prior":
+        try:
+            entries = copy_prior(Path(args.report), Path(args.expected), args.report_sha256,
+                                 args.expected_sha256, Path(args.out))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(json.dumps({"error": str(error)}))
+            return 1
+        print(json.dumps(entries, sort_keys=True))
+        return 0
     if args.command == "schema":
         print(json.dumps(schema(), sort_keys=True))
         return 0

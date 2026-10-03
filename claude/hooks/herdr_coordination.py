@@ -750,6 +750,7 @@ class OwnerTransaction:
         pid_start=None,
         adopt_start=None,
         handover_from=None,
+        holder_gone=False,
     ):
         if (
             not isinstance(session, str)
@@ -781,6 +782,7 @@ class OwnerTransaction:
         old = self.current
         if (
             old
+            and not holder_gone
             and time.time() - old["heartbeat_ts"] <= stale_secs
             and (
                 old["session_id"] != session

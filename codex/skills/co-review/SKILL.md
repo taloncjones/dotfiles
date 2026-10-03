@@ -108,6 +108,89 @@ uv run --no-project python "$RUNNER" route --runtime codex --role skeptic --risk
 uv run --no-project python "$RUNNER" route --runtime claude --role skeptic --risk normal --provisional >"$RUN_DIR/verifier.route.json"
 ```
 
+## Delta tier
+
+`co-review --delta` asks for the delta round: the `claude` reviewer seat
+and the `verifier`, both on Claude routes, scoped to a small follow-up
+after a full APPROVE on this branch. The first round on a branch is always
+full. The prior report and expected identity come with their SHA-256
+digests from exactly one source: the pinned `ship.json` a herdr ship brief
+names in `herdr-ship-prior-handoff:`, or this same uninterrupted workflow's
+own retained full gate. Caps default to `MAX_FILES=5` and `MAX_LINES=150`;
+a herdr brief's `herdr-ship-delta-caps: <files>/<lines>` replaces them.
+
+After the snapshot verifies and before the expected identity exists, ask
+for the recommendation. `HEAD` is the manifest's `source.head`:
+
+```bash
+DELTA=0
+uv run --no-project python "$GATE_REPORT" delta-class --repo "$REPO" \
+  --report "$PRIOR_REPORT" --expected "$PRIOR_EXPECTED" \
+  --report-sha256 "$PRIOR_REPORT_SHA256" --expected-sha256 "$PRIOR_EXPECTED_SHA256" \
+  --head "$HEAD" --max-files "$MAX_FILES" --max-lines "$MAX_LINES" \
+  --diff-out "$RUN_DIR/delta.diff" >"$RUN_DIR/delta-class.json" && DELTA=1
+```
+
+`DELTA=0` recommends `full`: keep the classifier's `CLASS` and report the
+recommendation's `reasons`. A herdr brief whose `herdr-ship-delta-head:`
+differs from `$HEAD` also keeps it. Otherwise approve the delta once. A
+personal repository (`claude/skills/lib/workflow_context.py account-scope
+--cwd "$REPO" --runtime claude` reports `personal_repository` true)
+proceeds. A work repository, or an unavailable `account-scope`, asks the
+owner with `AskUserQuestion`, options "Delta round (Recommended)" and
+"Full round", naming the PR, head, caps and the recommendation's `stats`.
+A herdr brief line `herdr-ship-brief: tier=delta` is that approval. The
+approval covers this head in this workflow only; "Full round" keeps
+`CLASS`.
+
+On approval set `CLASS=delta`, then write the prior full run and the anchor
+proof into `RUN_DIR`, in this order after `delta.diff`:
+
+```bash
+PRIOR_FULL_REPORT=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_report"])' "$RUN_DIR/delta-class.json") || exit 2
+PRIOR_FULL_EXPECTED=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_expected"])' "$RUN_DIR/delta-class.json") || exit 2
+PRIOR_FULL_REPORT_SHA256=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_report_sha256"])' "$RUN_DIR/delta-class.json") || exit 2
+PRIOR_FULL_EXPECTED_SHA256=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_expected_sha256"])' "$RUN_DIR/delta-class.json") || exit 2
+uv run --no-project python "$GATE_REPORT" copy-prior --report "$PRIOR_FULL_REPORT" \
+  --expected "$PRIOR_FULL_EXPECTED" --report-sha256 "$PRIOR_FULL_REPORT_SHA256" \
+  --expected-sha256 "$PRIOR_FULL_EXPECTED_SHA256" --out "$RUN_DIR/prior" >"$RUN_DIR/prior.json" || exit 2
+uv run --no-project python - "$RUN_DIR" <<'PY' || exit 2
+import json
+import sys
+from pathlib import Path
+
+run = Path(sys.argv[1])
+record = json.loads((run / "delta-class.json").read_text())["carry_forward"]
+if record is not None:
+    (run / "carry-forward.json").write_text(json.dumps(record, sort_keys=True))
+PY
+```
+
+Then write `class: "delta"` and `delta: {prior_run, prior_head,
+anchor_head, max_files, max_lines}`, copied from `delta-class.json`,
+into the expected identity before any seat runs. An interruption anywhere
+in this sequence invalidates the run.
+
+The report's `delta` block takes `prior_run`, `prior_head` and
+`anchor_head` from `delta-class.json`; `prior_report` and `prior_expected`
+from `prior.json`; `diff` = `delta.diff` and `carry_forward` =
+`carry-forward.json` (null when absent), each with its SHA-256; and
+`blast_radius` from the verifier's reconciliation. The `schema`
+subcommand lists every field.
+
+Each delta seat prompt adds `delta.diff` as the review scope with the
+frozen diff as context, the prior report path and digest (its advisories
+are carried by reference, not re-listed), and this instruction: report
+`blast_radius: unbounded` when the change's effect cannot be bounded to
+this delta, such as a constant, default, tolerance, or fixture value read
+elsewhere. Coverage follows the policy's Follow-up evidence rules.
+
+An evaluation carrying `escalate: "full"` ends the delta gate. In an
+interactive workflow, start one fresh full gate (new `run_id`,
+`CLASS=full`) on the same head; its verdict is final and never escalates.
+A herdr ship launch runs exactly one gate: write `ship.json` with the delta
+verdict and stop, and the director dispatches the full gate.
+
 Run `gate_report.py schema` before report assembly. Resolve each fresh seat
 with the shared runner and `--provisional`; this records unknown availability
 honestly and stops if the route is actually unavailable or unsupported.
@@ -119,6 +202,10 @@ skeptic after every finder artifact is complete.
 The light tier runs `codex` and `verifier`: first the native `codex` reviewer
 seat, then, after its artifact is complete, the verifier through the Claude
 runner, so the light gate keeps one seat per model:
+
+Delta tier: the `claude` reviewer seat and the verifier both run through the
+Claude runner blocks below (the probe block already probes both roles for a
+non-light class); no native Codex child runs.
 
 Probe the Claude runner route before spending a seat on it; the Codex runtime
 needs no probe, because the controller running this skill is that runtime.
@@ -191,7 +278,7 @@ paths/digests and known blockers. Save each runner JSON response as that seat's
 nonempty artifact and preserve requested and observed route metadata. The
 controller never stands in for a seat.
 
-Full tier only: the Claude seat uses the resolved original-account route
+Full and delta tiers: the Claude seat uses the resolved original-account route
 through the bounded runner and preserves its raw response as the `claude`
 artifact:
 
@@ -319,6 +406,39 @@ blockers to development. `INCOMPLETE` reports missing evidence. Human approval
 and explicit merge permission remain separate; cleanup refusal preserves the
 snapshot.
 
+## Carry-forward
+
+When the only commits since an APPROVE gate merge the target branch, the
+verdict carries to the new head without seats. The prior report and
+expected identity come with their SHA-256 digests from exactly one source:
+the pinned herdr `ship.json`, or this same uninterrupted workflow's own
+retained gate. Fetch the target, then run the proof:
+
+```bash
+git -C "$REPO" fetch origin "$BASE_REF" || exit 2
+uv run --no-project python "$GATE_REPORT" carry-forward --repo "$REPO" \
+  --report "$PRIOR_REPORT" --expected "$PRIOR_EXPECTED" \
+  --report-sha256 "$PRIOR_REPORT_SHA256" --expected-sha256 "$PRIOR_EXPECTED_SHA256" \
+  >"$RUN_DIR/carry-forward.json"
+```
+
+Exit 0 means every proof holds: no branch-authored commit since the gated
+head, no merge-tree conflict anywhere in git's merge of the gated head with
+the new base, and the head's whole tree byte-equal to that merge result. Exit 1 means the head needs a gate;
+the record's `reasons` say why. The record grants nothing beyond naming the
+prior run it extends.
+
+On exit 0, post the record's `audit_comment` as ship step 5 does (dedupe on
+`co-review-audit head=<head>`), then the carry-forward marker under the
+Publish rules below. Its first line is
+`<!-- co-review: sha=<head> base=<base> base_ref=<base_ref> verdict=APPROVE round=<n> tier=carry-forward prior_run=<prior_run> prior_sha=<prior_head> -->`,
+its verdict line is
+`Co-review verdict: APPROVE (carry-forward of <prior_run> at <prior_head>)`,
+and the proof block from `audit_comment` follows. Before asking for the go,
+skip the marker when any PR comment already has a line containing both
+`<!-- co-review: sha=<head> ` and ` tier=carry-forward prior_run=<prior_run> `;
+that read is for dedupe only, never authority.
+
 ## Publish
 
 The only publishable item is one marker comment on the reviewed PR, for a PR
@@ -343,7 +463,10 @@ Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
 expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
-own valid markers already on the PR (1 when none). No `target_tip`.
+own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected
+`delta.prior_run` and `prior_sha` = expected `delta.prior_head`, in that order.
+No `target_tip`. A carry-forward marker also carries its proof block after
+the verdict line (see Carry-forward).
 
 Before posting, read the PR's comments once (the `gh api --paginate --slurp`
 call below, run before `gh pr comment`) and compute `round` from it.
@@ -371,22 +494,20 @@ not author), register it with the exact argv it names:
 python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-file "$RUN_DIR/marker.md"
 ```
 
-Show the printed `draft <hash>` line and the body in chat and end the turn.
-The go is a typed message with a sentence saying `post it` (the last draft
-shown), `post all` (every draft in that message) or `post <hash>`, with no
-`not`, `n't`, `never` or `no` before the phrase and no closing `?`. Posting is never an `AskUserQuestion` option, recommended or not;
-an `AskUserQuestion` answer is never a go. An approved draft stays approved
-across later messages until it is posted. If an approved post fails, let
-the Bash call return, read the PR, and post again only when the text is
-absent; re-register it and tell the owner the earlier attempt failed and a
-duplicate is possible.
+Show the printed `draft <hash>` line and the body. Only a Claude session
+mints the go: its `AskUserQuestion` answer `Post draft <hash>` approves that
+one draft through a PostToolUse hook, and `Skip draft <hash>` dismisses it.
+A typed message never approves a post. A Codex session cannot mint one.
+Leave the draft in `RUN_DIR` and report it as ready, so the Claude director
+can ask the owner. Never ask the owner to type a phrase.
 
-In a herdr pane (`HERDR_ENV=1`) only a Claude hook turns a typed go into an
-approved draft, so a gated post never reaches Codex. Leave the draft in
-`RUN_DIR` and tell the owner it is ready to post.
+An approved draft stays approved across later messages until it is posted.
+If an approved post fails, let the Bash call return, read the PR, and post
+again only when the text is absent. Re-register it and tell the owner the
+earlier attempt failed and a duplicate is possible.
 
 Never reply to, resolve, or react to a reviewer thread on your own. Draft
-any reply as above and wait for the go.
+any reply as above and leave it for the director to ask.
 
 Edit the title or body of a PR this account authored without asking, and
 print `[INFO] edited PR #<PR> body: <why>` in the same turn.

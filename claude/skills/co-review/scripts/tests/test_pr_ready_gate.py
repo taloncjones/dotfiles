@@ -161,6 +161,31 @@ class SelectMarkerTests(unittest.TestCase):
             gate.select_marker({"not": "a list"}, ME)
 
 
+class TierMarkerTests(unittest.TestCase):
+    def test_tier_fields_parse(self):
+        prior = f" prior_run=run-1.a:b prior_sha={SHA_B}"
+        for suffix, tier, prior_run in (
+            ("", None, None),
+            (" tier=full", "full", None),
+            (" tier=light", "light", None),
+            (" tier=delta" + prior, "delta", "run-1.a:b"),
+            (" tier=carry-forward" + prior, "carry-forward", "run-1.a:b"),
+            (f" tier=full target_tip={SHA_B}", "full", None),
+        ):
+            line = marker()[: -len(" -->")] + suffix + " -->"
+            found = gate.select_marker([comment("| x |\n" + line)], ME)
+            self.assertEqual((found["tier"], found["prior_run"]), (tier, prior_run), suffix)
+
+    def test_inconsistent_tier_fields_are_malformed(self):
+        prior = f" prior_run=r prior_sha={SHA_B}"
+        for suffix in (" tier=full" + prior, " tier=light" + prior, " tier=delta",
+                       " tier=carry-forward", " tier=bogus", " tier=delta prior_run=r",
+                       " tier=delta prior_run=r prior_sha=xyz"):
+            line = marker()[: -len(" -->")] + suffix + " -->"
+            with self.assertRaises(gate.GateInputError, msg=suffix):
+                gate.select_marker([comment("| x |\n" + line)], ME)
+
+
 class DecideTests(unittest.TestCase):
     def test_comment_history_never_grants_ready(self):
         verdict, _ = gate.decide(

@@ -40,6 +40,7 @@ SKILL_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.ar
 CORE="$(cd "$SKILL_DIR/../../hooks" && pwd)/herdr_orch_core.py"
 RUNTIME="$(dirname "$CORE")/agent_runtime.py"
 DISPATCH="$(dirname "$CORE")/herdr_dispatch.py"
+GATE_REPORT="$SKILL_DIR/../co-review/scripts/gate_report.py"
 TODOS="$SKILL_DIR/../todos/scripts/todos.sh"
 ORCH_RUNTIME=claude
 ```
@@ -105,6 +106,7 @@ for the provider's `launch_env` mapping.
    `STATE_ROOT/<repo_slug>/` exists.
 4. Claim/refresh ownership:
    - `python3 "$CORE" claim-owner --repo-path <repo_root> --runtime <claude|codex> --repo-slug <slug> --session <id> --host <host> --pid <pid> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
+     (`<host>` is `socket.gethostname()` output, the value internal callers use)
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
      and offer the user an explicit takeover; do not mutate state.
@@ -116,7 +118,9 @@ for the provider's `launch_env` mapping.
      adopted under the new session id with a fence bump, instead of `BUSY`.
      This is the `/clear` case: the session id changes, the Claude process
      does not. The record's `pid_start` must also match the claimant's
-     process start identity, so a recycled pid gets `BUSY`. Launcher-tier
+     process start identity, so a recycled pid is never adopted: the claim
+     sees the holder gone and takes over with a fence bump (see the
+     liveness rule in references/state-layout.md). Launcher-tier
      Claude leases only; a pid claimed from another process tree still gets
      `BUSY`. Never run `claim-owner` in the
      background: a background process started before `/clear` would pass the
@@ -833,9 +837,35 @@ user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
 
 A gated post (a review, a thread reply, a comment on another author's PR, a
-body that mentions someone, a Jira comment) is never an `AskUserQuestion`
-option, recommended or not: register the draft, show it in prose with its
-hash, and end the turn.
+body that mentions someone, a Jira comment) is asked the same way.
+
+1. Register it first with `python3 ~/.claude/hooks/pr_post_guard.py draft --
+   gh <args>`. A Jira comment has no draft.
+2. Ask one single-select question per draft, at most four per prompt. Put the
+   full draft text in the question; an option preview is clipped by the
+   terminal, so it never counts.
+3. The options are `Post draft <hash>` and `Skip draft <hash>`. The
+   recommended one comes first, with ` (Recommended)`.
+
+The answer is the go. A PostToolUse hook approves exactly the draft the
+chosen option names, and only when its text was in that question
+and the draft text and that question are each at most 2000 characters, the
+most a prompt displays.
+It prints a `post gate:` line for each decision. A typed message never
+approves a post, so never ask the owner to type one. Without the tool, a
+gated post cannot be approved; leave the draft in the report.
+
+Answers are not stored. An answer authorizes the action it names in the same
+turn. After any interruption (a crash, `/clear`, compaction, a resume),
+re-derive the state from live sources and ask again: the PR's state and head,
+the worktree and branch, the Jira issue, and a draft's state file. Only an
+approved draft outlives the turn. It stays approved until it is posted,
+withdrawn with `Skip draft <hash>`, or pruned 24 hours later.
+
+When a `Post draft <hash>` answer prints no `post gate:` line, the answer hook
+is not active in this session. Do not ask again. Try the post once. If the
+shim refuses it, tell the owner to run `update --ai` and restart Claude, and
+leave the draft in the report.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -1349,18 +1379,50 @@ When the gh shim, a hook, or the permission classifier refuses one, it says
 which one refused and what it tried, once, and continues with everything
 else.
 
-**Merge-main-only commits keep the verdict.** A head whose only new commits
-since the gated head merge main, where both checks are empty, keeps the
-prior co-review verdict; do not dispatch a new gate round:
+**Merge-main-only commits keep the verdict.** On every check-in whose task
+is `reviewed` with a `stale` handoff of verdict `APPROVE`, before any ship
+dispatch decision, prove the carry-forward against the pinned handoff;
+`ship.json` supplies the paths and digests:
 
 ```bash
-git -C <worktree> rev-list --no-merges <reviewed_head>..HEAD
-git -C <worktree> diff --name-only <reviewed_head> HEAD -- $(git -C <worktree> diff --name-only "$(git -C <worktree> merge-base origin/<default> <reviewed_head>)" <reviewed_head>)
+git -C <worktree> fetch origin <default>
+python3 "$GATE_REPORT" carry-forward --repo <worktree> \
+  --report <report_path> --expected <expected_path> \
+  --report-sha256 <report_sha256> --expected-sha256 <expected_sha256> \
+  ><scratchpad>/carry-forward.json
 ```
 
-`merge-ready` still pins the gated head and reports `head-moved` for it, so
-the director merges that head only after one prose ask, as in a work
-repository.
+Exit 0 keeps the verdict for the new head: post the record's
+`audit_comment` exactly as ship step 5 (dedupe on
+`co-review-audit head=<head>`, standing authorization), then the
+carry-forward marker under the co-review skill's Carry-forward and Publish
+rules (its dedupe; a personal repository needs no go, a work repository
+asks the owner with `AskUserQuestion`), and never dispatch a gate for that head.
+Exit 1 continues to the ship dispatch rules below. `merge-ready` still pins
+the gated head and reports `head-moved` for it, so the director merges that
+head only after one `AskUserQuestion` merge prompt, as in a work repository.
+
+**Delta tier.** When a dispatch is due under rule (b), the stale handoff's
+verdict is `APPROVE`, and the carry-forward proof above exited 1, run:
+
+```bash
+python3 "$GATE_REPORT" delta-class --repo <worktree> \
+  --report <report_path> --expected <expected_path> \
+  --report-sha256 <report_sha256> --expected-sha256 <expected_sha256> \
+  --max-files <files> --max-lines <lines> --diff-out <scratchpad>/delta.diff
+```
+
+`<files>` and `<lines>` come from `config.json` `ship.delta`
+(`references/state-layout.md`), defaulting to 5 and 150. Exit 1 dispatches
+as usual. On exit 0, a personal repository (`account-scope` reports
+`personal_repository` true) proceeds; a work repository asks the owner once
+with `AskUserQuestion`, options "Delta round (Recommended)" and "Full
+round", naming the PR, head, caps and the recommendation's `stats`; "Full
+round" dispatches as usual. The delta brief carries these lines:
+`herdr-ship-brief: tier=delta`,
+`herdr-ship-prior-handoff: <pinned ship.json path>`,
+`herdr-ship-delta-head: <head>`, and
+`herdr-ship-delta-caps: <files>/<lines>`.
 
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
@@ -1379,11 +1441,15 @@ remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
 `handoff_state` is `current` with verdict `APPROVE` and `merge-ready`
-failed with `base-moved` as its only non-`ci` reason. Never on a `current`
-non-APPROVE handoff (section 6a step 0 owns it). Rule (a) with a
+failed with `base-moved` as its only non-`ci` reason, or (d)
+`handoff_state` is `current`, the handoff report has `class` `delta`, and
+its verdict is not `APPROVE`; that brief carries
+`herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
+(section 6a step 0 owns it), except rule (d). Rule (a) with a
 `ship_launch_id` already set means that run stopped before writing
-`ship.json`: relaunch at most once per reviewed head. Relaunch only when
-`ship_relaunch_head` differs from `review_head_sha`,
+`ship.json`: relaunch at most once per reviewed head, and
+every such relaunch brief carries `herdr-ship-brief: tier=full`. Relaunch
+only when `ship_relaunch_head` differs from `review_head_sha`,
 and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
 (every other field carried), so the budget is spent before any worker
 can start and an interrupted relaunch parks the task. Otherwise report
@@ -1422,8 +1488,9 @@ A personal repository is a checkout whose path or canonical owner is under
 `~/Git/personal`. Where `merge-authority` prints `director`, the user's
 standing authorization (2026-09-22, reaffirmed 2026-09-29) is the merge go
 and the steps below run without asking. In a work repository the director
-asks once in prose ("merge #<n> at <head>?") and runs the same steps on a
-yes; the yes covers that head only, and a moved head asks again.
+asks once with `AskUserQuestion`, with the options `Merge #<n> at <head>
+(Recommended)` and `Hold`. It runs the same steps when the answer is merge.
+That answer covers that head only, and a moved head asks again.
 
 **Recovery first, before the stale-verdict rule, in every repository.** List
 tasks with the section 4 check-in call plus `--all`:
@@ -1445,9 +1512,10 @@ director-only; surfacing runs everywhere.
 `handoff_state: "current"`.** "Surface" means: report it in every
 check-in report while it holds, with no mutating retry.
 
-0. Current handoff verdict `CHANGES`: `write-task` `changes-requested`
-   (carrying every field; name the gate report in the note) and follow the
-   changes-requested repair path; the repair moves HEAD and the handoff
+0. A handoff whose report `class` is `delta` is not handled here:
+   section 6 rule (d) dispatches a full gate. Current handoff verdict
+   `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
+   report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff
    turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
    moves it on: then `write-task` the record with `ship_launch_id: null`
    (every other field carried), and section 6 dispatches afresh.
@@ -1922,7 +1990,7 @@ too.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                 | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: one `AskUserQuestion` merge prompt, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
 | reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
 | reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
@@ -1987,8 +2055,8 @@ Rules (these are outward-facing writes, so treat them carefully):
 - The director pushes the task branch and opens its PR in the section 6
   ship step, runs every `gh` read and non-post write itself, and never
   hands a `gh` command to the owner. It merges through section 6a: without
-  asking where `merge-authority` prints `director`, after one prose ask
-  elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
+  asking where `merge-authority` prints `director`, after one
+  `AskUserQuestion` merge prompt elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
   actions. Workers never carry merge authority.
 - The director posts by audience. In a personal repository it posts without
   asking. In a work repository, maintenance of a PR this account authored
@@ -2000,9 +2068,9 @@ Rules (these are outward-facing writes, so treat them carefully):
   bench, blocked notes) is not posted; it stays in the ship report. Text
   aimed at a person (any `gh pr review`, a thread reply, a comment on a PR
   this account did not author, a body with an `@login`) needs the owner's
-  go: register it with `python3 ~/.claude/hooks/pr_post_guard.py draft --
-  gh <args>`, show the draft and hash, and wait for `post it`, `post all`
-  or `post <hash>`; after posting, print `[INFO] posted reply on #n`. If an
+  go, asked as section 4 says: register it with
+  `python3 ~/.claude/hooks/pr_post_guard.py draft -- gh <args>`, then ask
+  `Post draft <hash>` / `Skip draft <hash>` with the text in the question; after posting, print `[INFO] posted reply on #n`. If an
   approved post fails, let the Bash call return, read the PR, and
   re-register only when the text is absent, telling the owner that a
   duplicate is possible. It never replies to a human reviewer's thread on
