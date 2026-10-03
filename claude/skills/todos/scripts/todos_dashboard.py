@@ -1039,6 +1039,23 @@ form.filters .meta {
   margin: 0;
 }
 
+.copy-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+button.copy {
+  font: 12px/1.5 "SF Mono", Menlo, Consolas, monospace;
+  color: var(--muted);
+  background: var(--chip);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
 @media (hover: hover) {
   a:hover {
     color: var(--ink);
@@ -1140,13 +1157,24 @@ def render_prd_row(t, ncols, edit=None):
             f'<div class="prd-body">{body}</div></details></td></tr>')
 
 
-def render_todo_cell(t):
+def copy_chips(basename):
+    """Served pending rows: buttons that copy the id and ready-made commands."""
+    items = ((basename, basename), ("done", f"todos.sh done {basename}"),
+             ("kick off", f"kick off {basename}"))
+    buttons = "".join(
+        f'<button type="button" class="copy" data-copy="{esc(cmd)}" title="Copy: {esc(cmd)}">{esc(label)}</button>'
+        for label, cmd in items)
+    return f'<div class="copy-chips">{buttons}</div>'
+
+
+def render_todo_cell(t, served=False):
     prio_cls = f"prio-{t['priority']}" if t["priority"] in PRIORITY_WEIGHT else ""
     chips = [chip(t["area"]), chip(t["priority"], prio_cls),
              chip(t["maturity"]), chip(t["tier"])]
     chips = "".join(c for c in chips if c)
-    out = [f'<div class="name">{esc(t["title"])}</div>',
-           f'<div class="sub mono">{esc(t["basename"])}</div>']
+    id_line = (copy_chips(t["basename"]) if served
+               else f'<div class="sub mono">{esc(t["basename"])}</div>')
+    out = [f'<div class="name">{esc(t["title"])}</div>', id_line]
     if t["summary"]:
         out.append(f'<div class="sub">{esc(t["summary"])}</div>')
     if chips:
@@ -1184,7 +1212,7 @@ def render_open_table(todos, edit=None):
         rows.append(
             f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
             f'data-state="{state}" data-task-status="{esc(status)}">'
-            f'<td>{render_todo_cell(t)}</td><td class="dates">{dates}</td>'
+            f'<td>{render_todo_cell(t, edit is not None)}</td><td class="dates">{dates}</td>'
             f'<td>{deps}</td><td>{render_herdr(t["herdr"])}</td>'
             f'<td>{render_links(t["links"])}</td></tr>'
             + render_prd_row(t, 5, edit))

@@ -472,6 +472,15 @@ test_serve_filter_form() {
   assert_missing "form: query never becomes markup" "$r" '<script>x</script>'
 }
 test_serve_filter_form
+test_serve_copy_chips() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "chips: copy the id" "$r" "<button type=\"button\" class=\"copy\" data-copy=\"$ID\" title=\"Copy: $ID\">$ID</button>"
+  assert_contains "chips: copy the done command" "$r" "data-copy=\"todos.sh done $ID\""
+  assert_contains "chips: copy the kick off command" "$r" "data-copy=\"kick off $ID\""
+  assert_missing "chips: none on completed rows" "$r" 'data-copy="2026-05-30-finished"'
+}
+test_serve_copy_chips
 
 test_serve_filter_before_cap() {
   local r n

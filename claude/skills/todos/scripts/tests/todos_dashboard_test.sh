@@ -286,6 +286,7 @@ test_render_fixture() {
   assert_file_lacks "render: no raw script tag" "$f" '<script'
   assert_file_lacks "render: no filter form" "$f" 'class="filters"'
   assert_file_lacks "render: no match count" "$f" 'data-match'
+  assert_file_lacks "render: no copy chips" "$f" 'data-copy'
   assert_file_has "render: stamp" "$f" 'generated 2026-05-07 09:00'
   if grep -qiE '<link|<iframe|@import|url\(|<script| on[a-z]+="' "$f"; then bad "render: inert page" "script, link, iframe, import, url(), or on*= handler"; else ok "render: inert page"; fi
   ok "render: fixture board"
