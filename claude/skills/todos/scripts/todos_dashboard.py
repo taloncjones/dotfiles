@@ -1189,8 +1189,14 @@ def render_prd_row(t, ncols, edit=None):
             f'<div class="prd-body">{body}</div></details></td></tr>')
 
 
+# Same rule as TODO_ID_RE in todos.sh; \Z so a trailing newline cannot pass.
+TODO_ID_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]*[a-z0-9]\Z")
+
+
 def copy_chips(basename):
     """Served pending rows: buttons that copy the id and ready-made commands."""
+    if not TODO_ID_RE.match(basename):
+        return ""
     items = ((basename, basename), ("done", f"todos.sh done {basename}"),
              ("kick off", f"kick off {basename}"))
     buttons = "".join(

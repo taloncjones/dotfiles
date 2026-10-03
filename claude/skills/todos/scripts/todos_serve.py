@@ -37,7 +37,7 @@ NOTE_STATUS = {0: 303, 2: 400, 3: 409}
 # The board script is the only script a served page may run.
 CSP = ("frame-ancestors 'none'; script-src 'sha256-"
        + base64.b64encode(hashlib.sha256(board.BOARD_JS.encode("utf-8")).digest()).decode("ascii")
-       + "'")
+       + "'; base-uri 'none'; form-action 'self'")
 TITLES = {400: "Note refused", 403: "Forbidden", 409: "The todo changed on disk",
           500: "Note failed", 504: "Note still running"}
 USAGE = ("usage: todos.sh serve [--runtime claude|codex] [--personal] [--online] "

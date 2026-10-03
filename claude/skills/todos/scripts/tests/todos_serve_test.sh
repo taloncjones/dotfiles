@@ -227,8 +227,8 @@ for path in (f"/?t={sys.argv[2]}", "/"):
     print(csp, resp.getheader("Referrer-Policy"))
 PY
 )
-  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none'; script-src 'sha256-H' no-referrer
-frame-ancestors 'none'; script-src 'sha256-H' no-referrer"
+  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none'; script-src 'sha256-H'; base-uri 'none'; form-action 'self' no-referrer
+frame-ancestors 'none'; script-src 'sha256-H'; base-uri 'none'; form-action 'self' no-referrer"
 }
 test_serve_frame_header
 
@@ -481,6 +481,24 @@ test_serve_copy_chips() {
   assert_missing "chips: none on completed rows" "$r" 'data-copy="2026-05-30-finished"'
 }
 test_serve_copy_chips
+test_serve_copy_chips_hostile_id() {
+  local r
+  python3 - "$REPO/.todos/pending" <<'PY'
+import sys
+d = sys.argv[1]
+for name in ("2026-01-01-a;touch HACKED", "2026-01-01-b$(touch HACKED2)", "2026-01-01-c\ntouch HACKED3"):
+    open(f"{d}/{name}.md", "w").write(f"---\ncreated: 2026-01-01\ntitle: Hostile {name[11]}\n---\n")
+PY
+  r=$(http "$URL" GET "/?t=$TOKEN&q=Hostile")
+  assert_contains "hostile: the rows still render" "$r" 'Hostile a'
+  assert_missing "hostile: no done command for those ids" "$r" 'todos.sh done 2026-01-01'
+  assert_missing "hostile: no kick off command for those ids" "$r" 'kick off 2026-01-01'
+  assert_missing "hostile: no data-copy on those rows" "$r" 'data-copy="2026-01-01'
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "hostile: a canonical id keeps its chips" "$r" "data-copy=\"todos.sh done $ID\""
+  rm -f "$REPO/.todos/pending/"2026-01-01-*
+}
+test_serve_copy_chips_hostile_id
 
 test_serve_board_script() {
   local r
@@ -497,7 +515,7 @@ scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
 print(page.count("<script"))
 print(len(scripts) == 1 and "hashchange" in scripts[0] and "clipboard" in scripts[0])
 digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode() if scripts else ""
-print(resp.getheader("Content-Security-Policy") == f"frame-ancestors 'none'; script-src 'sha256-{digest}'")
+print(resp.getheader("Content-Security-Policy") == f"frame-ancestors 'none'; script-src 'sha256-{digest}'; base-uri 'none'; form-action 'self'")
 PY
 )
   assert_eq "script: one board script, allowed by its hash in the CSP" "$r" "1
