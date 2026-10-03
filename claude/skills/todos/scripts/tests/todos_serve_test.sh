@@ -107,7 +107,6 @@ test_serve_page() {
   assert_contains "serve: form carries the file's hash" "$r" "name=\"sha\" value=\"$sha\""
   assert_contains "serve: completed row is rendered" "$r" 'data-prd="2026-05-30-finished"'
   assert_missing "serve: completed row has no form" "$r" 'name="id" value="2026-05-30-finished"'
-  assert_missing "serve: page has no script" "$r" '<script'
   r=$(http "$URL" GET "/?t=$TOKEN&open=$ID")
   assert_contains "serve: ?open= opens that row" "$r" "<details class=\"prd\" id=\"prd-$ID\" open>"
   r=$(http "$URL" GET "/nope?t=$TOKEN")
@@ -216,7 +215,7 @@ test_serve_idle_socket
 test_serve_frame_header() {
   local r
   r=$(python3 - "$URL" "$TOKEN" <<'PY'
-import http.client, sys, urllib.parse
+import http.client, re, sys, urllib.parse
 port = urllib.parse.urlsplit(sys.argv[1]).port
 for path in (f"/?t={sys.argv[2]}", "/"):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
@@ -224,11 +223,12 @@ for path in (f"/?t={sys.argv[2]}", "/"):
     c.putheader("Host", f"127.0.0.1:{port}")
     c.endheaders()
     resp = c.getresponse()
-    print(resp.getheader("Content-Security-Policy"), resp.getheader("Referrer-Policy"))
+    csp = re.sub(r"'sha256-[A-Za-z0-9+/]{43}='", "'sha256-H'", resp.getheader("Content-Security-Policy"))
+    print(csp, resp.getheader("Referrer-Policy"))
 PY
 )
-  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none' no-referrer
-frame-ancestors 'none' no-referrer"
+  assert_eq "serve: pages refuse framing and referrers" "$r" "frame-ancestors 'none'; script-src 'sha256-H'; base-uri 'none'; form-action 'self' no-referrer
+frame-ancestors 'none'; script-src 'sha256-H'; base-uri 'none'; form-action 'self' no-referrer"
 }
 test_serve_frame_header
 
@@ -351,6 +351,193 @@ test_serve_open_keeps_token_out_of_argv() {
   rm -f "$rec" "$argv_file" "$out3" "$err3"
 }
 test_serve_open_keeps_token_out_of_argv
+
+# Board-search fixtures. Written after the note tests so those cases keep
+# their one-pending-todo board; every GET below re-reads .todos/.
+cat >"$REPO/.todos/pending/2026-07-01-alpha.md" <<'EOF'
+---
+created: 2026-07-01
+title: Alpha
+area: board
+priority: low
+due: 2026-09-01
+---
+
+## Problem
+
+Needle zebra.
+EOF
+cat >"$REPO/.todos/pending/2026-07-02-beta.md" <<'EOF'
+---
+created: 2026-07-02
+title: Beta
+area: board
+priority: high
+---
+
+## Problem
+
+Needle only.
+EOF
+cat >"$REPO/.todos/pending/2026-07-03-gamma.md" <<'EOF'
+---
+created: 2026-07-03
+title: Gamma
+area: store
+priority: med
+due: 2026-08-01
+---
+
+## Problem
+
+Other words.
+EOF
+cat >"$REPO/.todos/completed/2026-07-04-delta.md" <<'EOF'
+---
+created: 2026-07-04
+title: Delta
+---
+
+## Problem
+
+Needle in a finished todo.
+EOF
+
+# open_order <page> -> pending row ids in page order (completed rows carry no data-state)
+open_order() { printf '%s' "$1" | python3 -c 'import re, sys; print(" ".join(re.findall(r"data-todo=\"([^\"]+)\" data-state", sys.stdin.read())))'; }
+
+test_serve_search() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN&q=zebra")
+  assert_eq "search: one term keeps only the matching row" "$(open_order "$r")" "2026-07-01-alpha"
+  r=$(http "$URL" GET "/?t=$TOKEN&q=needle")
+  assert_eq "search: matches body text" "$(open_order "$r")" "2026-07-01-alpha 2026-07-02-beta"
+  assert_contains "search: matching completed row shown" "$r" 'data-todo="2026-07-04-delta"'
+  assert_missing "search: other completed row hidden" "$r" 'data-todo="2026-05-30-finished"'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=NEEDLE+zebra")
+  assert_eq "search: terms are ANDed, case-insensitive" "$(open_order "$r")" "2026-07-01-alpha"
+  r=$(http "$URL" GET "/?t=wrong&q=needle")
+  assert_eq "search: stale token is 403" "${r%%|*}" "403"
+  assert_missing "search: stale token shows no todo" "$r" "Needle"
+}
+test_serve_search
+
+test_serve_filter_area() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN&area=board")
+  assert_eq "area: only that area" "$(open_order "$r")" "2026-07-01-alpha 2026-07-02-beta"
+}
+test_serve_filter_area
+
+test_serve_filter_priority() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN&priority=high")
+  assert_eq "priority: only that priority" "$(open_order "$r")" "2026-07-02-beta"
+  r=$(http "$URL" GET "/?t=$TOKEN&priority=urgent")
+  assert_eq "priority: unknown value matches nothing" "$(open_order "$r")" ""
+}
+test_serve_filter_priority
+
+test_serve_sort() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_eq "sort: default is due date, then priority" "$(open_order "$r")" "2026-07-03-gamma 2026-07-01-alpha 2026-07-02-beta $ID"
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=priority")
+  assert_eq "sort: priority" "$(open_order "$r")" "2026-07-02-beta 2026-07-03-gamma 2026-07-01-alpha $ID"
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=created")
+  assert_eq "sort: newest first" "$(open_order "$r")" "2026-07-03-gamma 2026-07-02-beta 2026-07-01-alpha $ID"
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=bogus")
+  assert_eq "sort: unknown value keeps the default" "$(open_order "$r")" "2026-07-03-gamma 2026-07-01-alpha 2026-07-02-beta $ID"
+}
+test_serve_sort
+test_serve_filter_form() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "form: no filter counts every open todo" "$r" 'data-match="4/4"'
+  assert_contains "form: clear link keeps only the token" "$r" "<a href=\"/?t=$TOKEN\">Clear</a>"
+  r=$(http "$URL" GET "/?t=$TOKEN&q=needle")
+  assert_contains "form: search box keeps the query" "$r" 'name="q" value="needle"'
+  assert_contains "form: count shows matches of total" "$r" 'data-match="2/4"'
+  r=$(http "$URL" GET "/?t=$TOKEN&area=board")
+  assert_contains "form: area option selected" "$r" '<option value="board" selected>board</option>'
+  assert_contains "form: other areas listed" "$r" '<option value="store">store</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&priority=urgent")
+  assert_contains "form: unknown priority stays selected" "$r" '<option value="urgent" selected>urgent</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=priority")
+  assert_contains "form: sort option selected" "$r" '<option value="priority" selected>Priority</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&sort=bogus")
+  assert_contains "form: unknown sort selects the default" "$r" '<option value="" selected>Due date, then priority</option>'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=%22%3E%3Cscript%3Ex%3C%2Fscript%3E")
+  assert_contains "form: query is escaped" "$r" 'name="q" value="&quot;&gt;&lt;script&gt;x&lt;/script&gt;"'
+  assert_missing "form: query never becomes markup" "$r" '<script>x</script>'
+}
+test_serve_filter_form
+test_serve_copy_chips() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "chips: copy the id" "$r" "<button type=\"button\" class=\"copy\" data-copy=\"$ID\" title=\"Copy: $ID\">$ID</button>"
+  assert_contains "chips: copy the done command" "$r" "data-copy=\"todos.sh done $ID\""
+  assert_contains "chips: copy the kick off command" "$r" "data-copy=\"kick off $ID\""
+  assert_missing "chips: none on completed rows" "$r" 'data-copy="2026-05-30-finished"'
+}
+test_serve_copy_chips
+test_serve_copy_chips_hostile_id() {
+  local r
+  python3 - "$REPO/.todos/pending" <<'PY'
+import sys
+d = sys.argv[1]
+for name in ("2026-01-01-a;touch HACKED", "2026-01-01-b$(touch HACKED2)", "2026-01-01-c\ntouch HACKED3"):
+    open(f"{d}/{name}.md", "w").write(f"---\ncreated: 2026-01-01\ntitle: Hostile {name[11]}\n---\n")
+PY
+  r=$(http "$URL" GET "/?t=$TOKEN&q=Hostile")
+  assert_contains "hostile: the rows still render" "$r" 'Hostile a'
+  assert_missing "hostile: no done command for those ids" "$r" 'todos.sh done 2026-01-01'
+  assert_missing "hostile: no kick off command for those ids" "$r" 'kick off 2026-01-01'
+  assert_missing "hostile: no data-copy on those rows" "$r" 'data-copy="2026-01-01'
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "hostile: a canonical id keeps its chips" "$r" "data-copy=\"todos.sh done $ID\""
+  rm -f "$REPO/.todos/pending/"2026-01-01-*
+}
+test_serve_copy_chips_hostile_id
+
+test_serve_board_script() {
+  local r
+  r=$(python3 - "$URL" "$TOKEN" <<'PY'
+import base64, hashlib, http.client, re, sys, urllib.parse
+port = urllib.parse.urlsplit(sys.argv[1]).port
+c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+c.putrequest("GET", f"/?t={sys.argv[2]}", skip_host=True)
+c.putheader("Host", f"127.0.0.1:{port}")
+c.endheaders()
+resp = c.getresponse()
+page = resp.read().decode()
+scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+print(page.count("<script"))
+print(len(scripts) == 1 and "hashchange" in scripts[0] and "clipboard" in scripts[0])
+digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode() if scripts else ""
+print(resp.getheader("Content-Security-Policy") == f"frame-ancestors 'none'; script-src 'sha256-{digest}'; base-uri 'none'; form-action 'self'")
+PY
+)
+  assert_eq "script: one board script, allowed by its hash in the CSP" "$r" "1
+True
+True"
+}
+test_serve_board_script
+
+test_serve_filter_before_cap() {
+  local r n
+  # Ten newer completed todos push 2026-05-30-finished past the default
+  # --completed 10 cap, so only filtering before the cap can show it.
+  for n in 01 02 03 04 05 06 07 08 09 10; do
+    printf -- '---\ncreated: 2026-08-%s\ntitle: Filler %s\n---\n' "$n" "$n" \
+      >"$REPO/.todos/completed/2026-08-$n-filler.md"
+  done
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_missing "cap: unfiltered board hides the oldest completed row" "$r" 'data-todo="2026-05-30-finished"'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=finished")
+  assert_contains "cap: a search reaches completed rows past the cap" "$r" 'data-todo="2026-05-30-finished"'
+}
+test_serve_filter_before_cap
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
