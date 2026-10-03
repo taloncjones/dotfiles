@@ -106,6 +106,10 @@ STATE_ROOT/
                                                # is delayed, never dropped.
       <HERDR_WORKSPACE_ID>.wake.jsonl         # one {"v":1,"ts","event","reason"} line per
                                                # delivery attempt; diagnostic only, nothing reads it
+    archive/
+      <YYYY-MM>/                      # finished tasks moved by archive-task (see Archive);
+        tasks/ artifacts/ workspaces/ # same relative paths as above; checkin, status and
+                                      # present-task never read them
 ```
 
 ## Identity
@@ -967,6 +971,55 @@ writes, no machine-state mutation, no network, no secret echo. Full
 requirements: the task's private spec under `docs/superpowers/specs/` and the
 authoring rules echoed in `brief-template.md`.
 
+## Archive
+
+`archive-task` moves one finished task out of the paths the director reads,
+into `archive/<YYYY-MM>/`, under the owner fence:
+
+    python3 "$CORE" archive-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task>
+
+It never deletes, copies or rewrites a file. Each entry is renamed to the
+same relative path below the month directory. Move order: `tasks/<task>.json`
+first; `artifacts/<task>/`; every other `tasks/<task>.<suffix>` sidecar;
+then, per claimed workspace, its `.events.jsonl`, `.wake.json`,
+`.wake.jsonl` and last its `.json` index. A workspace is claimed only when
+its live index names the task; an archived index never claims, and a
+workspace id another task reused stays.
+
+It moves nothing and prints `refused <task> reason=<code>` (exit 1) on the
+first failing check: `already-archived` (a live and an archived record, or
+archived records in two months), `not-found`, `unreadable`, `not-terminal`
+(status not `merged`, `abandoned` or `failed`), `teardown-blocked`,
+`worktree-present` (the task's or any worker's worktree path exists),
+`poll-unavailable`, `workspace-listed` (herdr lists any of the task's
+workspaces), `destination-exists`, `unexpected-type`. Success prints
+`archived <task> archive/<YYYY-MM> files=<n>`.
+
+The month is the one holding the archived record, else the current UTC
+month; the record moves first, so an interrupted run finishes in the same
+month. Every call replans from disk, so a call after an interruption of
+the process moves whatever is left (`files=0` when nothing is). Host power
+loss is outside that guarantee: no fsync, no ordering claim. `checkin`,
+`status` and `present-task` list only `tasks/` and `workspaces/`, so they
+skip the archive. `status --archived` lists it, read-only:
+`{"<task>": {"status": "<status>", "archive": "<YYYY-MM>"}}`. `/post-merge`
+reads an archived ledger, findings file or ship report at the same relative
+path under `archive/*/`.
+
+`/post-merge` director mode archives the task at the end of teardown and
+reports a refusal as deferred. One-time backfill, run by the director by
+hand, safe to rerun; the archived ids finish any interrupted run:
+
+```sh
+{ python3 "$CORE" status --repo-slug <slug> \
+    | python3 -c 'import json,sys; [print(k) for k, v in json.load(sys.stdin).items() if not k.startswith("_") and v.get("status") in ("merged", "abandoned", "failed")]'
+  python3 "$CORE" status --repo-slug <slug> --archived \
+    | python3 -c 'import json,sys; [print(k) for k in json.load(sys.stdin)]'
+} | sort -u | while read -r t; do
+  python3 "$CORE" archive-task --repo-slug <slug> --session <id> --fence <fence> --task-id "$t" || true
+done
+```
+
 ## Lesson ledger
 
 `tasks/<task_id>.lessons.md` holds the rule lessons and harvest notes for one
@@ -981,7 +1034,9 @@ three kinds of line: the batch header, a lesson line that starts with the
 `LESSON:` prefix and a `[<task_id> <phase>]` tag, and a note
 `no LESSON line found (<source>)`; they ignore any other line. A lesson line
 already present is not appended again. `/post-merge` step 1 reads the ledger
-before teardown, as unverified candidates; teardown does not remove it. It is
+before teardown, as unverified candidates; teardown does not remove it, and
+`archive-task` later moves it under `archive/<YYYY-MM>/tasks/` (see
+Archive). It is
 machine-local, never committed, and invisible to the core's record and orphan
 scans, which key on `.json` and `.jsonl` suffixes.
 
