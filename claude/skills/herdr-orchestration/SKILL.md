@@ -795,18 +795,28 @@ after every other action.
 
 Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
-means report it. `settle` never closes a workspace or a pane any plan,
-implement or repair row used; a pane that only review and ship rows used
-closes once each of those rows is settled. It also keeps a pane open
+means report it. `settle` never closes a workspace, its root pane (the first
+row's pane) or its last pane. It closes any other pane once every row that
+used it is settled and releases it: a review or ship row on any settled
+reason, a plan, implement or repair row only when it is superseded, failed at
+launch, ship-reported, or its task is terminal. It also keeps a pane open
 (`pane: kept-occupied`) while a non-shell process still has the foreground
 or process-info fails or comes back empty, even once its own agent is gone.
 After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
 or `timeout`) and the agent is still live, settle reads the pane and sends
 agent-bound keys only when Claude Code's background-work exit menu is
-actually showing.
+actually showing. When `/exit` returns `agent_not_running` (the agent left
+the pane during the wait) or `agent_not_found`, settle re-reads the agent
+list once: the agent counts as exited if herdr no longer lists it and stays
+live otherwise; settle never reads the pane or sends keys after these
+codes.
 The director never runs `launch` while a `settle` or `sweep` for the same
 workspace is in flight, and starts neither during a launch: both read the
-pane and row set the other changes.
+pane and row set the other changes. After a `sweep` fails or is killed,
+rerun it before any launch in that workspace; a rerun is idempotent.
+After `write-task` records `failed`, run one `sweep` for the task workspace
+while its worktree exists; an `abandoned` task has no workspace left to
+sweep, and `merged` sweeps in section 6a.
 
 `stale-review-reset` also fires for a `completed` task pinned at HEAD: a
 review dispatch interrupted between its `review_head_sha` write and its
@@ -1100,9 +1110,10 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 **Reviewer-dispatch preflight (one review agent at a time).** Run the
 adapter's `sweep` verb
 (`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
-for the task workspace first; it exits stale reviewers whose verdict is
-recorded or retired and ship workers whose handoff is recorded, and closes
-their panes and dead reviewer shells,
+for the task workspace first; it settles every row of the task in that workspace: it exits stale
+reviewers whose verdict is recorded or retired, ship workers whose handoff
+is recorded, and superseded implement and repair workers, and closes their
+panes and dead shells,
 subject to the same kept-occupied and confirmed-exit-menu limits as
 `settle` above. Then confirm zero live review agents as before: reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
@@ -1489,16 +1500,18 @@ That answer covers that head only, and a moved head asks again.
 **Recovery first, before the stale-verdict rule, in every repository.** List
 tasks with the section 4 check-in call plus `--all`:
 `python3 "$CORE" checkin --repo-slug <slug> --session <id> --fence <fence> --all`
-(without `--all` it skips `merged`). Only the writes and teardown below are
+(without `--all` it skips `merged`). Only the writes, the sweeps and teardown below are
 director-only; surfacing runs everywhere.
 
 1. A task `reviewed` whose PR is `MERGED` with `headRefOid` equal to
    `review_head_sha`: here, `write-task` `merged` with `merge_check`
-   `"merged_by": "observed"` and run teardown (step 7). In a `human`
+   `"merged_by": "observed"`, run the adapter's `sweep` for the task
+   workspace, and run teardown (step 7). In a `human`
    repository only surface it. A PR merged at another head is surfaced,
    not recorded.
 2. A task `merged` whose worktree still appears in `git worktree list` and
-   whose record has no `teardown_blocked`: rerun teardown.
+   whose record has no `teardown_blocked`: run the adapter's `sweep` for the task
+   workspace, then rerun teardown.
 
 **Merge, for a task `reviewed` whose `merge-ready` run reports
 `handoff_state: "current"`.** "Surface" means: report it in every
@@ -1534,7 +1547,9 @@ check-in report while it holds, with no mutating retry.
 5. `write-task` the full record (carry `contract_path`, `contract_sha256`,
    `ship_launch_id`) with `status: merged` and
    `merge_check: {"base_main_sha": <merge-ready base_sha>, "branch_head_sha": <head_sha>, "result": "pass", "ts": "...", "gate_report": <report_path>, "merge_commit_sha": <mergeCommit oid>, "merged_by": "director"}`.
-6. Close the task's live panes and its todo (todos skill).
+6. Run the adapter's `sweep` for the task workspace, then close the task's
+   todo (todos skill). The sweep keeps the root pane and any pane a live
+   process holds.
 7. Teardown: run `/post-merge` for the PR in its director mode. Before it
    deletes anything, `git -C <worktree> rev-parse HEAD` must equal the
    merged PR's `headRefOid` (or be an ancestor of `origin/<default>`); a
