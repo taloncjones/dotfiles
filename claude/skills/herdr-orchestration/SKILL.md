@@ -106,6 +106,7 @@ for the provider's `launch_env` mapping.
    `STATE_ROOT/<repo_slug>/` exists.
 4. Claim/refresh ownership:
    - `python3 "$CORE" claim-owner --repo-path <repo_root> --runtime <claude|codex> --repo-slug <slug> --session <id> --host <host> --pid <pid> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
+     (`<host>` is `socket.gethostname()` output, the value internal callers use)
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
      and offer the user an explicit takeover; do not mutate state.
@@ -117,7 +118,9 @@ for the provider's `launch_env` mapping.
      adopted under the new session id with a fence bump, instead of `BUSY`.
      This is the `/clear` case: the session id changes, the Claude process
      does not. The record's `pid_start` must also match the claimant's
-     process start identity, so a recycled pid gets `BUSY`. Launcher-tier
+     process start identity, so a recycled pid is never adopted: the claim
+     sees the holder gone and takes over with a fence bump (see the
+     liveness rule in references/state-layout.md). Launcher-tier
      Claude leases only; a pid claimed from another process tree still gets
      `BUSY`. Never run `claim-owner` in the
      background: a background process started before `/clear` would pass the

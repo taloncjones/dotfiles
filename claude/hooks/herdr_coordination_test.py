@@ -1190,6 +1190,21 @@ with c.owner_transaction(rd) as tx:
             {"repo": {"a" * 16: "ldb-" + "1" * 32}},
         )
 
+    def test_holder_gone_takes_over_a_fresh_foreign_lease(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.claim("A", "host", 1), 1)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertIsNone(tx.claim("B", "host", 2))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.claim("B", "host", 2, holder_gone=True), 2)
+            self.assertEqual(tx.current["session_id"], "B")
+
 
 class AttemptTests(unittest.TestCase):
     def test_latest_attempt_rejects_old_completion_and_review(self):
