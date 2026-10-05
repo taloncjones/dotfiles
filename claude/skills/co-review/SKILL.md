@@ -334,8 +334,10 @@ PY
 
 Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
-identity, expected identity, and declared threat model in each prompt. The
-finder prompts are independent. Each requests structured findings with a
+identity, expected identity, and declared threat model in each prompt. Each
+prompt also names the frozen diff path (`$RUN_DIR/frozen.diff`) and the
+seat's own snapshot root (its `--cwd`) as the frozen worktree for reading
+files outside the diff. The finder prompts are independent. Each requests structured findings with a
 stable ID, severity, disposition, scenario, evidence, concrete material impact,
 coverage evidence or gap, and a verdict. A runtime result is an artifact only when the runner
 returns a genuine successful completion; preserve requested and observed route
@@ -439,7 +441,9 @@ Run `gate_report.py schema` now and start `RUN_DIR/report.json` from its exact
 example.
 Fill it from the manifest, expected identity, raw runtime artifacts, their
 SHA-256 digests, the frozen diff/CI artifact digests, and only actual findings
-and coverage. Keep every path report-relative. Populate the `seats` entries
+and coverage. Copy each seat's Structure fit findings into `findings` with
+`category: "structure"` and their `proposed_layout`, as `schema` lists. Keep
+every path report-relative. Populate the `seats` entries
 for `CLASS` (`schema` lists `light_seats` and `full_seats`) and set
 `report.class` to `CLASS`; put their raw runtime JSON paths and observed
 metadata in the fields named by the schema. Never replace a
@@ -543,7 +547,9 @@ deletes never need a go, and the shim runs a delete only on this account's
 own co-review marker. A personal repository needs no go at all.
 
 Marker comment shape: first line is the marker, then one verdict line, then
-one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
+one line per blocker (`<id>: <title>`), then at most one
+`Structure: <id>: <proposed layout>` line for the report's most useful
+Structure fit finding, nothing else. Marker fields: `sha` =
 expected `head`, `base` = expected `base` (the live `git ls-remote` tip, not `baseRefOid`), `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
 own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected

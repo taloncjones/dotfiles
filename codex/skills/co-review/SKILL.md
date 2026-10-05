@@ -278,7 +278,9 @@ every known blocker.
 Every prompt includes the
 extracted policy, frozen diff, manifest identity, the complete `## Classes`
 section of the failure-class rubric, and
-declared threat model. The verifier also receives finder artifact
+declared threat model. Every prompt also names the frozen diff path
+(`$RUN_DIR/frozen.diff`) and the seat's own snapshot root as the frozen
+worktree for reading files outside the diff. The verifier also receives finder artifact
 paths/digests and known blockers. Save each runner JSON response as that seat's
 nonempty artifact and preserve requested and observed route metadata. The
 controller never stands in for a seat.
@@ -367,7 +369,9 @@ coverage ledger. It does not start another unrestricted search.
 Create `report.json` from the exact `gate_report.py schema` example. Fill all
 fields from the verified manifest, independent expected identity, SHA-256
 digests, frozen diff/CI artifact digests, findings, prior blocker
-dispositions, and required coverage.
+dispositions, and required coverage. Copy each seat's Structure fit findings
+into `findings` with `category: "structure"` and their `proposed_layout`, as
+`schema` lists.
 
 Fill the seat entries from the actual runtime artifacts for `CLASS`; the
 light `verifier` entry records runtime `claude` and the `codex` entry records
@@ -465,7 +469,9 @@ deletes never need a go, and the shim runs a delete only on this account's
 own co-review marker. A personal repository needs no go at all.
 
 Marker comment shape: first line is the marker, then one verdict line, then
-one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
+one line per blocker (`<id>: <title>`), then at most one
+`Structure: <id>: <proposed layout>` line for the report's most useful
+Structure fit finding, nothing else. Marker fields: `sha` =
 expected `head`, `base` = expected `base` (the live `git ls-remote` tip, not `baseRefOid`), `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
 own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected
