@@ -260,7 +260,8 @@ silent pass. All probes use disposable fixtures and never live hardware or
 production actions. Append the complete `## Classes` section from
 `references/failure-classes.md` verbatim to every seat prompt. The class IDs in
 the report record coverage; the appended class text supplies the required probe
-descriptions.
+descriptions. The Structure fit class has no checklist ID; seats report it in
+their `Architecture` section and as findings.
 
 ### Findings, blockers, and coverage
 

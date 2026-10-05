@@ -379,5 +379,16 @@ class PrBasePinText(unittest.TestCase):
         self.assertIn("baseRefOid", BRIEF)
 
 
+class StructureLensText(unittest.TestCase):
+    def test_policy_names_structure_fit_without_checklist_id(self):
+        flat = " ".join(POLICY_FILE.split())
+        self.assertIn(
+            "The Structure fit class has no checklist ID; seats report it in "
+            "their `Architecture` section and as findings.",
+            flat,
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
