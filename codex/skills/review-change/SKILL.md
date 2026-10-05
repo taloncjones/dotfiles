@@ -24,7 +24,7 @@ if source and (not Path(source).is_absolute() or Path(source).name != "SKILL.md"
 root = Path(source).resolve(strict=True).parents[3] if source else (
     Path(fallback).expanduser().resolve(strict=True) if fallback else None
 )
-required = ("claude/hooks/agent_runtime.py", "claude/skills/lib/workflow_context.py")
+required = ("claude/hooks/agent_runtime.py", "claude/skills/lib/workflow_context.py", "claude/skills/co-review/references/failure-classes.md")
 if root is None or not all((root / name).is_file() for name in required):
     raise SystemExit("Installed review helpers are unavailable")
 print(root)
@@ -32,6 +32,7 @@ PYROOT
 ) || exit 2
 RUNNER="$REVIEW_ROOT/claude/hooks/agent_runtime.py"
 CONTEXT="$REVIEW_ROOT/claude/skills/lib/workflow_context.py"
+RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 ```
 
 Use the exact target worktree and a pinned base from the caller. Derive the full
@@ -80,7 +81,11 @@ affected callers, and full relevant diff. For a repair batch it also supplies
 the `REVIEW_REPAIR_PACKET` path and rendered content, asking the child to verify
 self-review, behavioral-regression, and affected failure-path evidence; it
 classifies each new blocker as repair-introduced, previously missed, or changed
-requirements with a concrete consequence. Require blocking findings, useful
+requirements with a concrete consequence. It also appends the complete
+`## Classes` section of `$RUBRIC` (from that heading to the end of the file),
+the same rubric co-review seats receive, and asks the child to probe its
+classes, apply the lenses its path table selects, and report an
+`Architecture` section as it describes. Require blocking findings, useful
 advisory findings, safe reproduction evidence, and coverage gaps. Its prompt
 permits relevant reference skills for language, security, framework and
 architecture guidance. This review scope,
