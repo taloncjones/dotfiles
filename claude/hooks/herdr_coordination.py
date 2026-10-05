@@ -82,6 +82,35 @@ def iter_lead_leases(slug):
     return leases
 
 
+def _registry_snapshot():
+    """The parsed registry from one lockless read, or None when unreadable."""
+    try:
+        parent = os.open(
+            str(coordination_root()),
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except Exception:  # noqa: BLE001 -- broader than OSError on purpose
+        # coordination_root() itself can raise: Path.home() raises
+        # RuntimeError with HOME unset, and a NUL byte in
+        # HERDR_COORDINATION_ROOT makes os.open raise ValueError. Neither is
+        # an OSError, and either would break the "never raises" contract.
+        return None
+    try:
+        return _read_at(parent, "bindings.json")
+    except Exception:  # noqa: BLE001 -- an unreadable registry reads as absent
+        return None
+    finally:
+        os.close(parent)
+
+
+def bound_repo_id(slug):
+    """The registry's canonical repo_id for slug, or None when unbound or unreadable."""
+    registry = _registry_snapshot()
+    item = registry.get(slug) if isinstance(registry, dict) and isinstance(slug, str) else None
+    repo_id = item.get("repo_id") if isinstance(item, dict) else None
+    return repo_id if isinstance(repo_id, str) and repo_id else None
+
+
 def occupied_lead_bindings():
     """{slug: {workspace_key: binding_id}} for live lead occupancies.
 
@@ -106,23 +135,7 @@ def occupied_lead_bindings():
     disambiguating stat OwnerTransaction performs would be dead code,
     because nothing downstream branches on the difference.
     """
-    try:
-        parent = os.open(
-            str(coordination_root()),
-            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-        )
-    except Exception:  # noqa: BLE001 -- broader than OSError on purpose
-        # coordination_root() itself can raise: Path.home() raises
-        # RuntimeError with HOME unset, and a NUL byte in
-        # HERDR_COORDINATION_ROOT makes os.open raise ValueError. Neither is
-        # an OSError, and either would break the "never raises" contract.
-        return {}
-    try:
-        registry = _read_at(parent, "bindings.json")
-    except Exception:  # noqa: BLE001 -- an unreadable registry reports no occupancy
-        return {}
-    finally:
-        os.close(parent)
+    registry = _registry_snapshot()
     if not isinstance(registry, dict):
         return {}
     occupied = {}
