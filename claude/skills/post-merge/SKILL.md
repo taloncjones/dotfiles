@@ -65,7 +65,10 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
   `tasks/<task_id>.lessons.md`, every
   `artifacts/<task_id>/review-*/findings.md` from any review round and any
   head (a lesson does not go stale with the head the way a verdict does), and
-  the ship report `tasks/<task_id>.ship.md`; (c) for a todo-kind task, the
+  the ship report `tasks/<task_id>.ship.md` -- each at that path or, when
+  absent there, at the same relative path under `archive/*/` (for example
+  `archive/*/tasks/<task_id>.lessons.md`), because director-mode teardown
+  archives the task; (c) for a todo-kind task, the
   task's todo file in the main checkout's `.todos/pending/` or `.todos/completed/`;
   (d) the merged PR's comments:
   `gh pr view <n> --json comments --jq '.comments[].body' | grep -E '^(- )?LESSON:'`,
@@ -115,6 +118,14 @@ git worktree remove --force /tmp/coreview-pr-<n>* 2>/dev/null || rm -rf /tmp/cor
 
 Do not touch worktrees for _other_ PRs. Verify after: the branch and worktree
 no longer appear in `git branch --list` / `git worktree list`.
+
+Director mode only, last: archive the task's orchestration state with
+`python3 "$CORE" archive-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id>`,
+using the director's preflight values. Exit 0 is done. Report any other
+exit as `archive deferred: <refusal line or error>`; it does not fail
+teardown, and the backfill in
+`claude/skills/herdr-orchestration/references/state-layout.md` (Archive)
+retries it. Outside director mode, do not archive.
 
 ## Step 4 — Jira sync (work repositories with a key only)
 
