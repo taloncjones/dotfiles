@@ -366,6 +366,31 @@ def open_sort_key(t):
     return ("1" + pw + (t["created"] or "9999-99-99"), t["basename"])
 
 
+def view_matches(t, view):
+    """Served pages: does todo t pass the filter form's q, area and priority?"""
+    haystack = (t["basename"] + "\n" + t["text"]).lower()
+    if not all(term in haystack for term in view["q"].lower().split()):
+        return False
+    if view["area"] and t["area"] != view["area"]:
+        return False
+    return not view["priority"] or t["priority"] == view["priority"]
+
+
+def sort_open(todos, sort):
+    """Order open todos in place. Any sort other than priority or created
+    keeps open_sort_key, which already puts due dates first."""
+    if sort == "priority":
+        todos.sort(key=lambda t: (PRIORITY_WEIGHT.get(t["priority"], "3"),
+                                  t["created"] or "9999-99-99", t["basename"]))
+    elif sort == "created":
+        # Two stable passes: newest first, equal dates by basename, and a
+        # missing date ("") last.
+        todos.sort(key=lambda t: t["basename"])
+        todos.sort(key=lambda t: t["created"], reverse=True)
+    else:
+        todos.sort(key=open_sort_key)
+
+
 def load_research(research_dir, known_basenames):
     entries = []
     if not research_dir.is_dir():
@@ -987,6 +1012,50 @@ form.note button {
   width: fit-content;
 }
 
+form.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+form.filters input,
+form.filters select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+form.filters input[type="search"] {
+  flex: 1 1 16em;
+}
+
+form.filters .meta {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.copy-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+button.copy {
+  font: 12px/1.5 "SF Mono", Menlo, Consolas, monospace;
+  color: var(--muted);
+  background: var(--chip);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
 @media (hover: hover) {
   a:hover {
     color: var(--ink);
@@ -1020,6 +1089,38 @@ form.note button {
     padding: 16px;
   }
 }
+"""
+
+
+# Served pages only. todos_serve.py allows exactly this text by its hash in
+# the CSP header, so the header follows any edit here.
+BOARD_JS = r"""
+document.addEventListener("click", function (event) {
+  var button = event.target.closest("button.copy");
+  if (!button) return;
+  if (!button.dataset.label) button.dataset.label = button.textContent;
+  function show(text) {
+    button.textContent = text;
+    setTimeout(function () { button.textContent = button.dataset.label; }, 1500);
+  }
+  if (!navigator.clipboard) return show("copy failed");
+  navigator.clipboard.writeText(button.dataset.copy).then(
+    function () { show("copied"); },
+    function () { show("copy failed"); });
+});
+
+function openFromHash() {
+  var match = /^#(?:todo|prd)-(.+)$/.exec(location.hash);
+  if (!match) return;
+  var id;
+  try { id = decodeURIComponent(match[1]); } catch (e) { return; }
+  var details = document.getElementById("prd-" + id);
+  if (!details || details.tagName !== "DETAILS") return;
+  details.open = true;
+  (document.getElementById("todo-" + id) || details).scrollIntoView();
+}
+window.addEventListener("hashchange", openFromHash);
+openFromHash();
 """
 
 
@@ -1088,13 +1189,30 @@ def render_prd_row(t, ncols, edit=None):
             f'<div class="prd-body">{body}</div></details></td></tr>')
 
 
-def render_todo_cell(t):
+# Same rule as TODO_ID_RE in todos.sh; \Z so a trailing newline cannot pass.
+TODO_ID_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]*[a-z0-9]\Z")
+
+
+def copy_chips(basename):
+    """Served pending rows: buttons that copy the id and ready-made commands."""
+    if not TODO_ID_RE.match(basename):
+        return ""
+    items = ((basename, basename), ("done", f"todos.sh done {basename}"),
+             ("kick off", f"kick off {basename}"))
+    buttons = "".join(
+        f'<button type="button" class="copy" data-copy="{esc(cmd)}" title="Copy: {esc(cmd)}">{esc(label)}</button>'
+        for label, cmd in items)
+    return f'<div class="copy-chips">{buttons}</div>'
+
+
+def render_todo_cell(t, served=False):
     prio_cls = f"prio-{t['priority']}" if t["priority"] in PRIORITY_WEIGHT else ""
     chips = [chip(t["area"]), chip(t["priority"], prio_cls),
              chip(t["maturity"]), chip(t["tier"])]
     chips = "".join(c for c in chips if c)
-    out = [f'<div class="name">{esc(t["title"])}</div>',
-           f'<div class="sub mono">{esc(t["basename"])}</div>']
+    id_line = (copy_chips(t["basename"]) if served
+               else f'<div class="sub mono">{esc(t["basename"])}</div>')
+    out = [f'<div class="name">{esc(t["title"])}</div>', id_line]
     if t["summary"]:
         out.append(f'<div class="sub">{esc(t["summary"])}</div>')
     if chips:
@@ -1132,7 +1250,7 @@ def render_open_table(todos, edit=None):
         rows.append(
             f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
             f'data-state="{state}" data-task-status="{esc(status)}">'
-            f'<td>{render_todo_cell(t)}</td><td class="dates">{dates}</td>'
+            f'<td>{render_todo_cell(t, edit is not None)}</td><td class="dates">{dates}</td>'
             f'<td>{deps}</td><td>{render_herdr(t["herdr"])}</td>'
             f'<td>{render_links(t["links"])}</td></tr>'
             + render_prd_row(t, 5, edit))
@@ -1210,8 +1328,41 @@ def render_research(entries):
     return '<ul class="research">' + "".join(items) + "</ul>"
 
 
+SORT_CHOICES = (("", "Due date, then priority"), ("priority", "Priority"), ("created", "Newest"))
+
+
+def render_select(name, label, choices, current):
+    opts = "".join(
+        f'<option value="{esc(value)}"{" selected" if value == current else ""}>{esc(text)}</option>'
+        for value, text in choices)
+    return f'<select name="{name}" aria-label="{label}">{opts}</select>'
+
+
+def render_filters(view, todos, token, shown, total):
+    """Served pages: the GET form behind view_matches and sort_open.
+
+    The URL's area or priority is listed even when no todo has it, so the
+    form always shows the state the page was built from.
+    """
+    def choices(key, all_label):
+        values = {t[key] for t in todos if t[key]} | ({view[key]} if view[key] else set())
+        return [("", all_label)] + [(v, v) for v in sorted(values)]
+
+    sort = view["sort"] if view["sort"] in dict(SORT_CHOICES) else ""
+    return ('<form class="filters" method="get" action="/">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'<input type="search" name="q" value="{esc(view["q"])}" placeholder="Search" aria-label="Search">'
+            + render_select("area", "Area", choices("area", "All areas"), view["area"])
+            + render_select("priority", "Priority", choices("priority", "All priorities"), view["priority"])
+            + render_select("sort", "Sort", SORT_CHOICES, sort)
+            + '<button type="submit">Apply</button>'
+            f'<a href="/?t={esc(token)}">Clear</a>'
+            f'<p class="meta" data-match="{shown}/{total}">Showing {shown} of {total} open todos.</p>'
+            "</form>")
+
+
 def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed,
-                edit=None):
+                edit=None, filters=""):
     # Every tile derives from open_bucket, which is mutually exclusive per
     # todo (blocked wins over in-flight): a todo that is both dependency-
     # blocked and herdr-in-flight must count once, in Blocked, not in both
@@ -1226,6 +1377,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
     else:
         how = ("Served by <span class=\"mono\">todos.sh serve</span>: reload to refresh; "
                "notes are appended to the todo file.")
+    script = f"<script>{BOARD_JS}</script>" if edit is not None else ""
     completed_html = ""
     if show_completed:
         completed_html = "<h2>Completed</h2>" + render_completed(completed)
@@ -1250,10 +1402,12 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 <div><b data-count="someday">{n_someday}</b><span>someday</span></div>
 </div>
 <h2>Open</h2>
+{filters}
 {render_open(open_todos, edit)}
 {completed_html}
 <h2>Research</h2>
 {render_research(research)}
+{script}
 </main>
 </body>
 </html>
@@ -1422,19 +1576,28 @@ def board_context(args):
 
 
 def build_page(ctx, args, edit=None):
-    """Read the board fresh and render it; edit as in render_prd_row."""
+    """Read the board fresh and render it; edit as in render_prd_row, plus,
+    on a served page, edit["view"]: the filter form's q, area, priority, sort."""
     root, todos_dir = ctx["root"], ctx["todos_dir"]
     _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
     resolver = Resolver(root, args.online)
     pending = load_dir(todos_dir / "pending", resolver, ctx["tasks_dir"], True, ctx["confined_state"])
     completed = load_dir(todos_dir / "completed", resolver, ctx["tasks_dir"], False, ctx["confined_state"])
-    pending.sort(key=open_sort_key)
+    view = edit["view"] if edit else None
+    filters = ""
+    if view:
+        shown = [t for t in pending if view_matches(t, view)]
+        filters = render_filters(view, pending + completed, edit["token"], len(shown), len(pending))
+        pending = shown
+        completed = [t for t in completed if view_matches(t, view)]
+    sort_open(pending, view["sort"] if view else "")
     completed.sort(key=lambda t: (t["created"], t["basename"]), reverse=True)
     completed = completed[:args.completed]
     known = {t["basename"] for t in pending} | {t["basename"] for t in completed}
     research = load_research(todos_dir / "research", known)
     stamp = os.environ.get("TODOS_DASHBOARD_NOW") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    return render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0, edit)
+    return render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0, edit,
+                       filters)
 
 
 def main(argv=None):
