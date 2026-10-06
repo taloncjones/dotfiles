@@ -201,5 +201,15 @@ else
     fail "project.env of op:// references commits"
 fi
 
+# 22. A service-account token pasted into any file blocks the commit.
+new_repo
+printf 'note = %s\n' "ops_$(printf 'k%.0s' $(seq 1 30))" >"$TMP/repo/notes.txt"
+git -C "$TMP/repo" add notes.txt
+if run_hook; then
+    fail "staged service-account token blocks commit"
+else
+    pass "staged service-account token blocks commit"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
