@@ -51,11 +51,15 @@ if [ ! -e "$project_env" ]; then
 # GH_TOKEN=op://<vault>/<item>/<field>
 # CLOUDFLARE_API_TOKEN=op://<vault>/<item>/<field>
 EOF
-    mkdir -p "$common/info"
-    grep -qxF project.env "$common/info/exclude" 2>/dev/null ||
-        printf 'project.env\n' >>"$common/info/exclude"
     echo "[OK] wrote $project_env (untracked: listed in .git/info/exclude)"
 fi
+
+# Keep the token files out of `git add -A` even without a global ignore file.
+mkdir -p "$common/info"
+for pattern in project.env op.env '.op.env.*'; do
+    grep -qxF "$pattern" "$common/info/exclude" 2>/dev/null ||
+        printf '%s\n' "$pattern" >>"$common/info/exclude"
+done
 
 if [ -e "$op_env" ] && [ "$rotate" = 0 ] && [ -z "$signing_ref" ]; then
     echo "[INFO] $op_env exists; pass --rotate to replace the token"

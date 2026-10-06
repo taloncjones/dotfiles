@@ -266,6 +266,8 @@ check "setup-op never prints the token" '! printf "%s" "$out" | grep -qF "$FIXTU
 check "setup-op template has no active assignment" '[ "$(grep -v "^#" "$REPO2/project.env" | grep -c "=")" = 0 ]'
 check "setup-op excludes project.env" 'grep -qx project.env "$REPO2/.git/info/exclude"'
 check "setup-op leaves no temp file" '[ -z "$(find "$REPO2" -maxdepth 1 -name ".op.env.*")" ]'
+check "setup-op excludes op.env and its temp files" 'grep -qx "op.env" "$REPO2/.git/info/exclude" && grep -qxF ".op.env.*" "$REPO2/.git/info/exclude"'
+check "setup-op leaves op.env untracked with no global ignore" '[ -z "$(git -C "$REPO2" status --short | grep "op.env")" ]'
 before="$(cksum <"$REPO2/op.env")"
 out="$(cd "$REPO2" && "$SETUP" </dev/null 2>&1)"
 check "setup-op rerun leaves op.env untouched" '[ "$(cksum <"$REPO2/op.env")" = "$before" ] && printf "%s" "$out" | grep -q "pass --rotate"'
@@ -282,5 +284,7 @@ check "setup-op --rotate replaces the token" 'grep -qx "OP_SERVICE_ACCOUNT_TOKEN
 check "setup-op --rotate keeps the signing lines byte-identical" '[ "$(grep "^OP_SIGNING_" "$REPO2/op.env")" = "$signing_before" ]'
 check "setup-op --rotate output never prints either token" '! printf "%s" "$out" | grep -qF "$NEWTOKEN" && ! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
 
+out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
+check "setup-op excludes are not duplicated on rerun" '[ "$(grep -cx "op.env" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cxF ".op.env.*" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cx "project.env" "$REPO2/.git/info/exclude")" = 1 ]'
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
