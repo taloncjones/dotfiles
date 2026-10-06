@@ -538,6 +538,18 @@ True"
 }
 test_serve_board_script
 
+test_serve_theme_toggle() {
+  local r script
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "theme: served page has the toggle" "$r" '<button type="button" class="theme">Theme: System</button>'
+  script=$(printf '%s' "$r" | python3 -c 'import re, sys; print(re.search(r"<script>(.*?)</script>", sys.stdin.read(), re.S).group(1))')
+  assert_contains "theme: script cycles system, light, dark" "$script" 'var THEMES = ["system", "light", "dark"];'
+  assert_contains "theme: reads the saved choice inside try" "$script" 'try {
+    var name = localStorage.getItem(THEME_KEY);'
+  assert_contains "theme: saves the choice inside try" "$script" 'try { localStorage.setItem(THEME_KEY, next); }'
+}
+test_serve_theme_toggle
+
 test_serve_filter_before_cap() {
   local r n
   # Ten newer completed todos push 2026-05-30-finished past the default

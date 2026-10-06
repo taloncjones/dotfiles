@@ -226,8 +226,10 @@ A card shows the title, a one-sentence summary (the first sentence of
 the first `## Problem` paragraph, at most 220 characters) and badges: in
 flight with the herdr phase, `blocked by <n>` or `<n> deps met`, the
 priority, the area, and `due <date>` (red once overdue) or `surfaces
-<date>` while the surface date is still ahead. The card's left edge is
-coloured by priority.
+<date>` while the surface date is still ahead. Lane headers and each
+card's thin left stripe carry the lane's status colour (blue in flight, red
+blocked, amber waiting, green done, grey otherwise). Both pages follow the OS
+light or dark setting.
 
 Click a card, or open a URL ending in `#todo-<id>`, to show that todo's
 modal: its rendered body (the text before the first `## ` heading and
@@ -289,7 +291,9 @@ Each pending todo's modal has chips that copy its id, `todos.sh done <id>`
 and `kick off <id>` (the director's phrase). On the served page, Esc, the
 close button and the backdrop close the modal by replacing its history
 entry, so the first back press does not reopen it; focus moves into an
-open modal and back to its card on close; `/` focuses the search box.
+open modal and back to its card on close; `/` focuses the search box. The
+header's Theme button cycles System, Light and Dark and remembers the choice
+in the browser's `localStorage` (the static page follows the OS only).
 Chips and these keys need the page's one script; the server's
 `Content-Security-Policy` allows only that script, by hash
 (`script-src 'sha256-...'`). The static `dashboard` page has none of these

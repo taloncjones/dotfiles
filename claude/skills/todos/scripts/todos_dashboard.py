@@ -458,80 +458,72 @@ def load_research(research_dir, known_basenames):
 
 # --- rendering -------------------------------------------------------------
 
+DARK_VARS = """\
+  color-scheme: dark;
+  --ground: #1d2125;
+  --surface: #22272b;
+  --surface-soft: #282e33;
+  --ink: #b6c2cf;
+  --muted: #8c9bab;
+  --accent: #579dff;
+  --rule: #38414a;
+  --chip: #2c333a;
+  --idle: #738496;
+  --blocked: #f87168;
+  --blocked-soft: #3a2022;
+  --blocked-rule: #6e3a38;
+  --waiting: #f0a64b;
+  --waiting-soft: #36291a;
+  --waiting-rule: #70522a;
+  --inflight: #579dff;
+  --inflight-soft: #1c2b41;
+  --inflight-rule: #2b4a7a;
+  --done: #4bce97;
+  --done-soft: #1b3028;
+  --done-rule: #2d6b52;
+  --scrim: rgb(0 0 0 / 0.6);
+  --shadow: 0 1px 1px rgb(0 0 0 / 0.3);
+  --lift: 0 18px 48px rgb(0 0 0 / 0.5);
+"""
+
+# The dark tokens apply twice, to the OS preference and to an explicit
+# choice; DARK_VARS is the one copy, substituted for @@DARK@@ below.
 CSS = r"""
 :root {
   color-scheme: light;
-  --ground: #f4f6f3;
+  --ground: #f4f5f7;
   --surface: #ffffff;
-  --surface-soft: #eef2ee;
-  --ink: #243128;
-  --muted: #5f6d63;
-  --accent: #285f4b;
-  --rule: #d5ddd5;
-  --chip: #edf1ec;
-  --blocked: #913e1c;
-  --blocked-soft: #fff3eb;
-  --blocked-rule: #e9b99e;
-  --merged: #285e8a;
-  --merged-soft: #eaf2fa;
-  --merged-rule: #b9cfdf;
-  --inflight: #745813;
-  --inflight-soft: #faf3db;
-  --inflight-rule: #ddca8d;
-  --scrim: rgb(20 28 23 / 0.45);
-  --shadow: 0 1px 2px rgb(22 38 28 / 0.06);
-  --lift: 0 18px 48px rgb(22 38 28 / 0.22);
+  --surface-soft: #f1f2f4;
+  --ink: #172b4d;
+  --muted: #626f86;
+  --accent: #0c66e4;
+  --rule: #dcdfe4;
+  --chip: #f1f2f4;
+  --idle: #8590a2;
+  --blocked: #c9372c;
+  --blocked-soft: #ffedeb;
+  --blocked-rule: #f5a9a2;
+  --waiting: #b65c02;
+  --waiting-soft: #fff4e5;
+  --waiting-rule: #f2c98a;
+  --inflight: #0c66e4;
+  --inflight-soft: #e9f2ff;
+  --inflight-rule: #b3d4ff;
+  --done: #1f845a;
+  --done-soft: #dffcf0;
+  --done-rule: #9ddcc0;
+  --scrim: rgb(9 30 66 / 0.5);
+  --shadow: 0 1px 1px rgb(9 30 66 / 0.12);
+  --lift: 0 18px 48px rgb(9 30 66 / 0.3);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --ground: #171d19;
-    --surface: #202823;
-    --surface-soft: #26302a;
-    --ink: #e8eee9;
-    --muted: #aab6ad;
-    --accent: #92ceb0;
-    --rule: #3b493f;
-    --chip: #2c362f;
-    --blocked: #f2b38e;
-    --blocked-soft: #332820;
-    --blocked-rule: #74503c;
-    --merged: #a6c9eb;
-    --merged-soft: #223140;
-    --merged-rule: #45617c;
-    --inflight: #e4cb84;
-    --inflight-soft: #332f20;
-    --inflight-rule: #6d5d34;
-    --scrim: rgb(0 0 0 / 0.6);
-    --shadow: 0 1px 2px rgb(0 0 0 / 0.2);
-    --lift: 0 18px 48px rgb(0 0 0 / 0.5);
-  }
+@@DARK@@  }
 }
 
 :root[data-theme="dark"] {
-  color-scheme: dark;
-  --ground: #171d19;
-  --surface: #202823;
-  --surface-soft: #26302a;
-  --ink: #e8eee9;
-  --muted: #aab6ad;
-  --accent: #92ceb0;
-  --rule: #3b493f;
-  --chip: #2c362f;
-  --blocked: #f2b38e;
-  --blocked-soft: #332820;
-  --blocked-rule: #74503c;
-  --merged: #a6c9eb;
-  --merged-soft: #223140;
-  --merged-rule: #45617c;
-  --inflight: #e4cb84;
-  --inflight-soft: #332f20;
-  --inflight-rule: #6d5d34;
-  --scrim: rgb(0 0 0 / 0.6);
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.2);
-  --lift: 0 18px 48px rgb(0 0 0 / 0.5);
-}
+@@DARK@@}
 
 * { box-sizing: border-box; }
 
@@ -606,6 +598,7 @@ h1 {
 .counts b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .counts b[data-count="in-flight"] { color: var(--inflight); }
 .counts b[data-count="blocked"] { color: var(--blocked); }
+.counts b[data-count="waiting"] { color: var(--waiting); }
 
 form.filters {
   display: flex;
@@ -624,6 +617,7 @@ form.filters input, form.filters select, form.filters button, form.note button, 
   padding: 4px 8px;
 }
 
+button.theme { font: inherit; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--rule); border-radius: 999px; padding: 2px 10px; cursor: pointer; }
 form.filters input[type="search"] { flex: 1 1 18em; }
 form.filters .meta { margin: 0 0 0 auto; }
 
@@ -634,17 +628,25 @@ main {
 }
 
 .lane { margin: 0 0 22px; scroll-margin-top: 120px; }
+#lane-in-flight { --lane: var(--inflight); }
+#lane-ready { --lane: var(--idle); }
+#lane-blocked { --lane: var(--blocked); }
+#lane-waiting { --lane: var(--waiting); }
+#lane-someday { --lane: var(--idle); }
+#lane-done { --lane: var(--done); }
 
 .lane h2 {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--lane, var(--rule));
   font-size: 13px;
   font-weight: 650;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--lane, var(--muted));
 }
 
 details.lane > summary { cursor: pointer; list-style: none; width: fit-content; }
@@ -684,21 +686,17 @@ a.card {
   padding: 10px 12px 10px 13px;
   background: var(--surface);
   border: 1px solid var(--rule);
-  border-left: 3px solid var(--rule);
+  border-left: 3px solid var(--lane, var(--idle));
   border-radius: 8px;
   box-shadow: var(--shadow);
   color: var(--ink);
   text-decoration: none;
 }
 
-a.card[data-priority="high"] { border-left-color: var(--blocked); }
-a.card[data-priority="med"] { border-left-color: var(--inflight); }
-a.card[data-priority="low"] { border-left-color: var(--merged-rule); }
 a.card[data-state="blocked"] { background: var(--blocked-soft); }
 
 @media (hover: hover) {
-  a.card:hover { border-color: var(--accent); }
-  a.card[data-priority]:hover { border-left-color: var(--accent); }
+  a.card:hover { border-color: var(--lane, var(--accent)); }
 }
 
 .card-title {
@@ -750,7 +748,13 @@ a.card[data-state="blocked"] { background: var(--blocked-soft); }
   font-weight: 600;
 }
 
-.badge.prio-med, .badge.in-flight {
+.badge.prio-med {
+  background: var(--waiting-soft);
+  border-color: var(--waiting-rule);
+  color: var(--waiting);
+}
+
+.badge.in-flight {
   background: var(--inflight-soft);
   border-color: var(--inflight-rule);
   color: var(--inflight);
@@ -759,9 +763,9 @@ a.card[data-state="blocked"] { background: var(--blocked-soft); }
 .badge.in-flight { font-weight: 600; }
 
 .badge.merged {
-  background: var(--merged-soft);
-  border-color: var(--merged-rule);
-  color: var(--merged);
+  background: var(--done-soft);
+  border-color: var(--done-rule);
+  color: var(--done);
 }
 
 .empty {
@@ -802,9 +806,9 @@ ul.research .name { font-weight: 600; }
 .pill { font-weight: 600; }
 
 .pill.merged {
-  background: var(--merged-soft);
-  border-color: var(--merged-rule);
-  color: var(--merged);
+  background: var(--done-soft);
+  border-color: var(--done-rule);
+  color: var(--done);
 }
 
 .pill.in-flight {
@@ -962,6 +966,8 @@ button.copy {
 }
 """
 
+CSS = CSS.replace("@@DARK@@", DARK_VARS)
+
 
 # Served pages only. todos_serve.py allows exactly this text by its hash in
 # the CSP header, so the header follows any edit here.
@@ -979,6 +985,34 @@ document.addEventListener("click", function (event) {
     function () { show("copied"); },
     function () { show("copy failed"); });
 });
+
+// Theme: System follows the OS; Light and Dark set data-theme on <html>.
+var THEMES = ["system", "light", "dark"];
+var THEME_KEY = "todos-board-theme";
+
+function applyTheme(name) {
+  var root = document.documentElement;
+  if (name === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", name);
+  var toggle = document.querySelector("button.theme");
+  if (toggle) toggle.textContent = "Theme: " + name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function savedTheme() {
+  try {
+    var name = localStorage.getItem(THEME_KEY);
+    return THEMES.indexOf(name) >= 0 ? name : "system";
+  } catch (e) { return "system"; }
+}
+
+document.addEventListener("click", function (event) {
+  if (!event.target.closest("button.theme")) return;
+  var next = THEMES[(THEMES.indexOf(savedTheme()) + 1) % THEMES.length];
+  applyTheme(next);
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* not remembered */ }
+});
+
+applyTheme(savedTheme());
 
 // The todo id whose modal is open, so closing can return focus to its card
 // even when the modal was opened by a link or a reload, not a card click.
@@ -1341,6 +1375,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
     modals = ("".join(render_modal(t, True, edit, on_page) for t in open_todos)
               + "".join(render_modal(t, False, edit, on_page) for t in shown_completed))
     script = f"<script>{BOARD_JS}</script>" if edit is not None else ""
+    theme_toggle = '<button type="button" class="theme">Theme: System</button>' if edit is not None else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1353,7 +1388,7 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 <header class="top"><div class="top-inner">
 <div class="top-row"><h1>{esc(repo_name)} board</h1>
 <span class="meta">generated {esc(stamp)} on <span class="mono">{esc(branch)}</span>. {how}</span>
-{render_counts(open_todos)}</div>
+{render_counts(open_todos)}{theme_toggle}</div>
 {filters}
 </div></header>
 <main>

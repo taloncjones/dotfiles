@@ -1175,6 +1175,13 @@ PY
   assert_file_has "cards: modal shown by :target" "$f" '.modal:target { display: block; }'
   assert_file_has "cards: page stops scrolling under a modal" "$f" 'body:has(.modal:target) { overflow: hidden; }'
   assert_file_has "cards: modal text wraps long tokens" "$f" '.prd, .facts { overflow-wrap: anywhere; }'
+  assert_file_has "theme: light tokens" "$f" '--ground: #f4f5f7;'
+  assert_file_has "theme: dark tokens" "$f" '--ground: #1d2125;'
+  assert_file_has "theme: dark tokens apply to an explicit choice" "$f" ':root[data-theme="dark"] {'
+  assert_file_has "theme: dark tokens follow the OS unless light is chosen" "$f" ':root:not([data-theme="light"]) {'
+  assert_file_has "theme: lane colours the cards" "$f" '#lane-blocked { --lane: var(--blocked); }'
+  assert_file_lacks "theme: static page has no toggle" "$f" 'class="theme"'
+  assert_file_lacks "theme: placeholder fully substituted" "$f" '@@DARK@@'
   rm_fixture "$repo" "$sr"
 }
 test_cards
