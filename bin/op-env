@@ -43,11 +43,12 @@ main_root() {
 
 locate_op_env() {
     local root
-    if [ -n "${OP_ENV_FILE:-}" ]; then
+    root="$(main_root "$1")" || return 0
+    # An inherited OP_ENV_FILE counts only inside this cwd's own checkout root.
+    if [ -n "${OP_ENV_FILE:-}" ] && [ "$(dirname "$OP_ENV_FILE")" = "$root" ]; then
         [ -f "$OP_ENV_FILE" ] && printf '%s\n' "$OP_ENV_FILE"
         return 0
     fi
-    root="$(main_root "$1")" || return 0
     [ -f "$root/op.env" ] && printf '%s\n' "$root/op.env"
     return 0
 }

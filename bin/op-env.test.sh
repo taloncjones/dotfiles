@@ -174,6 +174,25 @@ check "a failed op run clears the active marker" '! printf "%s" "$out" | grep -q
 got="$( (export OP_ENV_ACTIVE=1 OP_ENV_FILE=/elsewhere/op.env; eval "$out"; "$OP_ENV" status --cwd "$REPO") )"
 check "status after a failed op run says not active" 'printf "%s\n" "$got" | grep -q "^\[INFO\] *credentials: configured (1 references), not active in this shell"'
 
+# --- 5b. OP_ENV_FILE does not carry one project's credentials into another ---
+cp -p "$REPO/op.env" "$TMP/op.env.saved"
+cp -p "$REPO/project.env" "$TMP/project.env.saved"
+OTHER="$HOME/Git/personal/other"
+git init -q "$OTHER"
+git -C "$OTHER" commit -q --allow-empty -m seed
+: >"$OP_LOG"
+check "locate ignores an inherited OP_ENV_FILE from another checkout" '[ -z "$(OP_ENV_FILE="$REPO/op.env" "$OP_ENV" locate --cwd "$OTHER")" ]'
+out="$(OP_ENV_FILE="$REPO/op.env" "$OP_ENV" shell-exports --cwd "$OTHER" 2>&1)"
+check "shell-exports ignores an inherited OP_ENV_FILE from another checkout" '[ -z "$out" ] && [ ! -s "$OP_LOG" ]'
+mkdir -p "$REPO/sub"
+check "locate honours OP_ENV_FILE in the same checkout root" '[ "$(OP_ENV_FILE="$REPO/op.env" "$OP_ENV" locate --cwd "$REPO/sub")" = "$REPO/op.env" ]'
+git -C "$REPO" worktree add -q "$TMP/wt-proj" -b wt-proj
+check "locate honours OP_ENV_FILE from a linked worktree of the same root" '[ "$(OP_ENV_FILE="$REPO/op.env" "$OP_ENV" locate --cwd "$TMP/wt-proj")" = "$REPO/op.env" ]'
+check "locate resolves a worktree cwd without OP_ENV_FILE" '[ "$("$OP_ENV" locate --cwd "$TMP/wt-proj")" = "$REPO/op.env" ]'
+git -C "$REPO" worktree remove --force "$TMP/wt-proj"
+cp -p "$TMP/op.env.saved" "$REPO/op.env"
+cp -p "$TMP/project.env.saved" "$REPO/project.env"
+
 # --- 6. HTTPS push for every remote form ---
 cat >"$TMP/identity.gitconfig" <<'EOF'
 [url "git@Git-Personal:"]
