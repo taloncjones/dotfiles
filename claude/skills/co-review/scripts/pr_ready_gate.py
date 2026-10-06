@@ -11,7 +11,7 @@ MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
     r"round=(?P<round>\d+)"
-    r"(?: tier=(?P<tier>full|light|delta|carry-forward)"
+    r"(?: tier=(?P<tier>full|light|delta|lessons|carry-forward)"
     r"(?: prior_run=(?P<prior_run>[A-Za-z0-9._:-]+) prior_sha=(?P<prior_sha>[0-9a-f]{40}))?)?"
     r"(?: target_tip=(?P<target_tip>[0-9a-f]{40}))? -->$"
 )
