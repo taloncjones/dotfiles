@@ -36,5 +36,16 @@ else
     pass "a leak under a CLAUDE_CONFIG_DIR with a space fails the run"
 fi
 
+# An op-env agent session's git overrides and pointers never reach a suite.
+printf '#!/bin/sh\n[ -z "${GIT_CONFIG_SYSTEM:-}${GIT_CONFIG_COUNT:-}${GIT_CONFIG_KEY_0:-}${OP_ENV_FILE:-}" ]\n' >"$SKEL/$LEAKER"
+if HOME="$HOMEDIR" CLAUDE_CONFIG_DIR= OP_ENV_ACTIVE=1 OP_ENV_FILE=/nonexistent/op.env \
+    GIT_CONFIG_SYSTEM=/nonexistent/gitconfig GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat \
+    "$SKEL/bin/dotfiles-tests" >"$TMP/out" 2>&1; then
+    pass "an op-env session's git overrides never reach a suite"
+else
+    fail "an op-env session's git overrides never reach a suite"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
