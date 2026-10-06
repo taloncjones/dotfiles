@@ -504,13 +504,13 @@ CSS = r"""
   --blocked-soft: #ffedeb;
   --blocked-rule: #f5a9a2;
   --waiting: #b65c02;
-  --waiting-soft: #fff4e5;
+  --waiting-soft: #fffcf7;
   --waiting-rule: #f2c98a;
   --inflight: #0c66e4;
   --inflight-soft: #e9f2ff;
   --inflight-rule: #b3d4ff;
   --done: #1f845a;
-  --done-soft: #dffcf0;
+  --done-soft: #f7fefb;
   --done-rule: #9ddcc0;
   --scrim: rgb(9 30 66 / 0.5);
   --shadow: 0 1px 1px rgb(9 30 66 / 0.12);
