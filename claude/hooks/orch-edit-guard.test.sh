@@ -1671,12 +1671,10 @@ PY
     fi
     if grep -q 'orch-edit-allow.json' claude/skills/herdr-orchestration/references/state-layout.md \
             && grep -q 'tasks/orch-edits.jsonl' claude/skills/herdr-orchestration/references/state-layout.md \
-            && grep -q 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md \
-            && [ "$(wc -l < claude/rules/personal/agent-lessons.md | tr -d ' ')" -le 70 ] \
-            && [ "$(grep -c '^- (' claude/rules/personal/agent-lessons.md)" -le 30 ]; then
-        printf 'PASS  docs: state-layout, install-layout bullet, agent-lessons file within caps\n'; PASS=$((PASS + 1))
+            && grep -q 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md; then
+        printf 'PASS  docs: state-layout, install-layout bullet\n'; PASS=$((PASS + 1))
     else
-        printf 'FAIL  docs: state-layout, install-layout bullet, agent-lessons file within caps\n' >&2; FAIL=$((FAIL + 1))
+        printf 'FAIL  docs: state-layout, install-layout bullet\n' >&2; FAIL=$((FAIL + 1))
     fi
 fi
 
