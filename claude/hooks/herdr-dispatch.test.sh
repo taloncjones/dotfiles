@@ -2283,6 +2283,74 @@ def test_runtime_binding_bypasses_aliases_functions_and_stale_hashes():
                 fixture.close()
 
 
+def test_op_env_prep_only_for_configured_claude_pane():
+    fake_op = (
+        "#!/bin/sh\n"
+        '[ "$1" = run ] || exit 1\n'
+        'while [ "$1" != -- ]; do shift; done\n'
+        "shift\n"
+        'GH_TOKEN=resolved-gh exec "$@"\n'
+    )
+    for shell in ("bash", "zsh"):
+        shell_binary = shutil.which(shell)
+        if shell_binary is None:
+            print(f"SKIP  {shell} op-env prep probe: shell unavailable")
+            continue
+        for configured, runtime in ((True, "claude"), (False, "claude"), (True, "codex")):
+            fixture = Fixture()
+            original_run = herdr_dispatch._run_herdr
+            original_validate = herdr_dispatch._validate_pane
+            try:
+                op = fixture.runtime_dir / "op"
+                op.write_text(fake_op)
+                op.chmod(0o700)
+                selected = fixture.runtime_dir / runtime
+                selected.write_text('#!/bin/sh\nprintf "AGENT_GH=%s\\n" "${GH_TOKEN-unset}"\n')
+                selected.chmod(0o700)
+                if configured:
+                    (fixture.repo / "op.env").write_text("OP_SERVICE_ACCOUNT_TOKEN=sa-fixture-value\n")
+                    (fixture.repo / "op.env").chmod(0o600)
+                    (fixture.repo / "project.env").write_text("GH_TOKEN=op://V/gh/token\n")
+                output = ""
+                waits = []
+
+                def run(_cli, argv, **kwargs):
+                    nonlocal output
+                    if argv[:2] == ["pane", "run"]:
+                        if not argv[3].startswith(". "):
+                            return ""  # the shell-readiness line
+                        body = Path(shlex.split(argv[3])[1]).read_text()
+                        process = subprocess.run(
+                            [shell_binary, "-f", "-c", body + f"\n{runtime}\n"],
+                            env=fixture.env, text=True, capture_output=True, check=True,
+                        )
+                        output = process.stdout
+                        return ""
+                    marker = argv[argv.index("--match") + 1]
+                    waits.append(argv[argv.index("--timeout") + 1])
+                    return {"type": "output_matched", "pane_id": "w1:p1", "matched_line": marker,
+                            "read": {"text": output}}
+
+                herdr_dispatch._run_herdr = run
+                herdr_dispatch._validate_pane = lambda *args: None
+                herdr_dispatch._bind_pane_environment(
+                    "fake", "w1:p1", "w1", fixture.repo,
+                    {"launch_env": {"CLAUDE_CONFIG_DIR": None}, "account_id": "personal"},
+                    fixture.env, prep_dir=fixture.rd / "prep",
+                    runtime_binary=str(selected), runtime=runtime,
+                )
+                wanted = configured and runtime == "claude"
+                case = (shell, configured, runtime)
+                assert ("AGENT_GH=resolved-gh" in output) is wanted, (case, output)
+                assert ("AGENT_GH=unset" in output) is not wanted, (case, output)
+                assert waits[-1] == ("50000" if wanted else "10000"), (case, waits)
+                assert "sa-fixture-value" not in output, (case, output)
+            finally:
+                herdr_dispatch._run_herdr = original_run
+                herdr_dispatch._validate_pane = original_validate
+                fixture.close()
+
+
 def test_prompt_is_literal_argv_and_wait_is_only_a_hint():
     fixture = Fixture()
     try:
@@ -4590,6 +4658,7 @@ for name, test in (
     ("launch requires a managed Herdr environment", test_launch_requires_managed_herdr_environment),
     ("native start timeout range fails before mutation", test_native_start_timeout_range_fails_before_mutation),
     ("target shell account environment is applied and verified", test_target_shell_account_environment_is_applied_and_verified),
+    ("op-env prep runs only for a configured claude pane", test_op_env_prep_only_for_configured_claude_pane),
     ("target shell environment wait ignores command echo", test_target_shell_environment_wait_ignores_command_echo),
     ("launch pins explicit account selection metadata", test_launch_persists_explicit_account_selection_metadata),
     ("delayed metadata updates carry sequence and launch token", test_metadata_update_carries_sequence_and_launch_token),
