@@ -107,6 +107,7 @@ test_serve_page() {
   assert_contains "serve: form carries the file's hash" "$r" "name=\"sha\" value=\"$sha\""
   assert_contains "serve: completed todo has a modal" "$r" 'data-modal="2026-05-30-finished"'
   assert_missing "serve: completed row has no form" "$r" 'name="id" value="2026-05-30-finished"'
+  assert_eq "serve: the open parameter is ignored" "$(http "$URL" GET "/?t=$TOKEN&open=$ID")" "$(http "$URL" GET "/?t=$TOKEN")"
   assert_eq "serve: note forms sit in the pending modal" "$(printf '%s' "$r" | python3 -c '
 import sys
 t = sys.stdin.read()
@@ -154,7 +155,7 @@ test_serve_post_note() {
   token=$(printf '%s' "$page" | sed -n 's/.*name="token" value="\([^"]*\)".*/\1/p' | head -1)
   sha=$(sha_of "$F"); cp "$F" "$REPO/old.md"
   r=$(http "$URL" POST /note "" "$(form id=$ID section=Solution sha="$sha" token="$token" note=$'Served idea.\r\nSecond line.')")
-  assert_eq "serve: good post redirects back to the row" "${r%|*}" "303|/?t=$TOKEN&open=$ID#prd-$ID"
+  assert_eq "serve: good post redirects back to the modal" "${r%|*}" "303|/?t=$TOKEN#todo-$ID"
   assert_eq "serve: note appended as LF note LF, CRLF folded to LF" \
     "$(python3 - "$REPO/old.md" "$F" <<'PY'
 import sys
@@ -526,7 +527,7 @@ resp = c.getresponse()
 page = resp.read().decode()
 scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
 print(page.count("<script"))
-print(len(scripts) == 1 and "hashchange" in scripts[0] and "clipboard" in scripts[0])
+print(len(scripts) == 1 and all(k in scripts[0] for k in ("hashchange", "clipboard", "location.replace", "a.close", "Escape")))
 digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode() if scripts else ""
 print(resp.getheader("Content-Security-Policy") == f"frame-ancestors 'none'; script-src 'sha256-{digest}'; base-uri 'none'; form-action 'self'")
 PY

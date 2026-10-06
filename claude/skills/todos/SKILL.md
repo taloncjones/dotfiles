@@ -205,35 +205,49 @@ elsewhere); `--out PATH` writes elsewhere; `--completed N` sets how many
 completed todos to show (default 10, 0 hides the section).
 
 The page is inert: no script, no remote assets, no server. Regenerate
-and reload the tab to refresh. Every row expands in place (a native
-`<details>`, still no script) to show the todo's rendered body: the text
-before the first `## ` heading and every section, with paragraphs, lists,
-`###` headings, inline code, bold and `http(s)` links; fenced blocks and
-tables show as preformatted text, and everything else as escaped text.
-To add notes from the browser, use `todos.sh serve` instead. For repeated refresh, resolve `scripts/todos.sh` from this loaded skill
+and reload the tab to refresh. To add notes from the browser, use
+`todos.sh serve` instead. For repeated refresh, resolve `scripts/todos.sh` from this loaded skill
 and rerun `dashboard` with the same runtime/account options. Do not resolve
 it from another runtime's personal installation.
 
-The Open section is grouped into sub-sections instead of one flat table,
-so the question "what can I pick up right now" doesn't get buried in a
-column: **Ready**, **In flight** (herdr is already working it),
-**Blocked** (an unsatisfied `depends_on`), **Waiting** (`status:
-waiting`), and **Someday** (`status: someday`, collapsed by default via
-a native `<details>` -- no JS). Computed state always wins: a todo that
+The board is lanes of compact cards, in this order: **In flight** (herdr
+is already working it), **Ready**, **Blocked** (an unsatisfied
+`depends_on`), **Waiting** (`status: waiting`), **Someday** (`status:
+someday`, collapsed), and **Recently done** (the newest `--completed N`
+completed todos, collapsed). Computed state always wins: a todo that
 is blocked or in flight sorts there regardless of its `status:` field,
 since that field can go stale against the dependency graph or the live
 herdr record. Add `status: waiting` or `status: someday` by hand-editing
 a todo's frontmatter (the same pattern already used for `depends_on`);
-any other value, or none, defaults to Ready. The counts row mirrors the
-five buckets.
+any other value, or none, defaults to Ready. The count pills at the top
+mirror the five open lanes and jump to each one.
 
-What each row shows:
+A card shows the title, a one-sentence summary (the first sentence of
+the first `## Problem` paragraph, at most 220 characters) and badges: in
+flight with the herdr phase, `blocked by <n>` or `<n> deps met`, the
+priority, the area, and `due <date>` (red once overdue) or `surfaces
+<date>` while the surface date is still ahead. The card's left edge is
+coloured by priority.
 
+Click a card, or open a URL ending in `#todo-<id>`, to show that todo's
+modal: its rendered body (the text before the first `## ` heading and
+every section, with paragraphs, lists, `###` headings, inline code, bold
+and `http(s)` links; fenced blocks and tables show as preformatted text,
+and everything else as escaped text) beside a facts panel. The close
+button or a click outside the sheet closes it; the back button returns
+to the previous entry (the board, or the modal a dependency link came
+from). The modal is plain CSS (`:target`), so it needs no script.
+
+The facts panel shows:
+
+- **Id** and **Dates** (created, due, surfaces), then maturity and tier.
 - **Depends on**: every `depends_on` ref with its state, resolved by the
   same resolver as `list`. Offline by default (like `index`); `--online`
-  lets it call `gh` and overrides an exported `TODOS_OFFLINE`.
+  lets it call `gh` and overrides an exported `TODOS_OFFLINE`. A
+  `todo:<id>` ref with a card on the board links to its modal.
 - **Herdr**: the task record under
-  `<selected-account-root>/herdr-orch/<repo_slug>/tasks/td-<basename>.json`
+  `<selected-account-root>/herdr-orch/<repo_slug>/tasks/<id>.json`, or the
+  older `td-<id>.json` when no bare-id record exists
   (resolved by the shared workflow context; `TODOS_STATE_ROOT` is an explicit
   test/development override)
   when one exists: status pill, `phase role model`, the review verdict
@@ -241,6 +255,7 @@ What each row shows:
   and the done record (tagged `(stale)` unless its phase and agent match
   the live worker). Records are read only, never written. An unreadable
   record shows `unreadable`.
+- **Files**: the `files:` list.
 - **Links**: `http(s)` URLs from the body, GitHub PRs as `PR #n`,
   `claude.ai` artifacts as `artifact`.
 
@@ -254,26 +269,31 @@ atomically so a half-written file is never seen.
 (`--port 0`, the default, lets the OS pick). It prints the bare address on
 stdout and the URL with the per-run token (`/?t=<token>`) on stderr;
 `--open` opens a private redirect file so the token stays out of the process list. Every request re-reads `.todos/`, so a reload always shows the
-files as they are now. In each pending todo's expanded row there is a form
+files as they are now. In each pending todo's modal there is a form
 under its Problem, Solution and Verification sections; completed todos
-are read-only. Stop the server with Ctrl-C.
+are read-only, and a saved note reloads the board with that modal open.
+Stop the server with Ctrl-C.
 
-A filter form above the Open tables narrows the board. The search box
+A filter form in the top bar narrows the board. The search box
 (`q`) keeps a todo when every word appears in its id or file text, in any
 case. The area and priority selects (`area`, `priority`) list the exact
 values on the board. The sort (`sort=priority`, or `sort=created` for
 newest first) defaults to due date, then priority. The filter applies to
-open and completed rows, and the line under the form counts the matching
+open and completed cards (Recently done opens while a search or filter is
+set), and the line under the form counts the matching
 open todos. The choice lives in the URL, so a reload or a bookmark keeps it
 for the life of the server run. After a restart the old token gets a 403:
 open the newly printed URL and filter again.
 
-Each pending row has chips that copy its id, `todos.sh done <id>` and
-`kick off <id>` (the director's phrase). A URL ending in `#todo-<id>`
-opens and scrolls to that todo's PRD. Chips and the fragment need the
-page's one script; the server's `Content-Security-Policy` allows only that
-script, by hash (`script-src 'sha256-...'`). The static `dashboard` page
-has none of these controls.
+Each pending todo's modal has chips that copy its id, `todos.sh done <id>`
+and `kick off <id>` (the director's phrase). On the served page, Esc, the
+close button and the backdrop close the modal by replacing its history
+entry, so the first back press does not reopen it; focus moves into an
+open modal and back to its card on close; `/` focuses the search box.
+Chips and these keys need the page's one script; the server's
+`Content-Security-Policy` allows only that script, by hash
+(`script-src 'sha256-...'`). The static `dashboard` page has none of these
+controls; its modals open and close through links alone.
 
 The form goes through `todos.sh note`, the only writer, which agents can
 call directly:

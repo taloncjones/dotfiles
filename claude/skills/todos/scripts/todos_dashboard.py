@@ -980,18 +980,64 @@ document.addEventListener("click", function (event) {
     function () { show("copy failed"); });
 });
 
-function openFromHash() {
-  var match = /^#(?:todo|prd)-(.+)$/.exec(location.hash);
-  if (!match) return;
+// The todo id whose modal is open, so closing can return focus to its card
+// even when the modal was opened by a link or a reload, not a card click.
+var openId = null;
+
+function openModal() {
+  var match = /^#todo-(.+)$/.exec(location.hash);
+  if (!match) return null;
   var id;
-  try { id = decodeURIComponent(match[1]); } catch (e) { return; }
-  var details = document.getElementById("prd-" + id);
-  if (!details || details.tagName !== "DETAILS") return;
-  details.open = true;
-  (document.getElementById("todo-" + id) || details).scrollIntoView();
+  try { id = decodeURIComponent(match[1]); } catch (e) { return null; }
+  var modal = document.getElementById("todo-" + id);
+  return modal && modal.classList.contains("modal") ? modal : null;
 }
-window.addEventListener("hashchange", openFromHash);
-openFromHash();
+
+function syncFocus() {
+  var modal = openModal();
+  if (modal) {
+    openId = modal.dataset.modal;
+    modal.querySelector(".sheet").focus({ preventScroll: true });
+    return;
+  }
+  if (openId === null) return;
+  var cards = document.querySelectorAll("a.card");
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].dataset.todo === openId) {
+      var lane = cards[i].closest("details");
+      if (lane) lane.open = true;
+      cards[i].focus();
+      break;
+    }
+  }
+  openId = null;
+}
+
+document.addEventListener("click", function (event) {
+  if (event.target.closest("a.close, a.backdrop")) {
+    event.preventDefault();
+    location.replace("#board");
+  }
+});
+
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape" && openModal()) {
+    event.preventDefault();
+    location.replace("#board");
+  } else if (event.key === "/" && !openModal() &&
+             !event.target.closest("input, textarea, select")) {
+    var search = document.querySelector("form.filters input[name=q]");
+    if (search) {
+      event.preventDefault();
+      search.focus();
+    }
+  }
+});
+
+// On load, not at parse time: a fragment target is only styled once the
+// document has loaded, and focusing a hidden sheet does nothing.
+window.addEventListener("hashchange", syncFocus);
+window.addEventListener("load", syncFocus);
 """
 
 
