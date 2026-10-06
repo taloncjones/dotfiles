@@ -20,6 +20,11 @@ def header(path: str) -> str:
 
 
 class ClassifyTests(unittest.TestCase):
+    def test_lessons_file_alone_is_lessons(self):
+        self.assertEqual(cc.classify(["claude/rules/personal/agent-lessons.md"]), "lessons")
+        self.assertEqual(cc.classify(["claude/rules/personal/agent-lessons.md", "README.md"]), "light")
+        self.assertEqual(cc.classify(["claude/rules/personal/agent-lessons.md", "x.py"]), "full")
+
     def test_prose_paths_are_light(self):
         for path in ("README.md", "docs/x.md", "claude/skills/todos/SKILL.md", ".todos/pending/a.md"):
             self.assertEqual(cc.classify([path]), "light", path)
@@ -54,6 +59,10 @@ class PathsFromDiffTests(unittest.TestCase):
 
 
 class ClassifyCliTests(unittest.TestCase):
+    def test_cli_prints_lessons(self):
+        self.assertEqual(self.run_cli(header("claude/rules/personal/agent-lessons.md")).stdout,
+                         "lessons\n")
+
     def run_cli(self, text: str) -> subprocess.CompletedProcess:
         with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as handle:
             handle.write(text)
