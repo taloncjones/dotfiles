@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# setup-op - opt the current project into op-env (see bin/op-env).
+#
+# Writes project.env from a template (untracked by default) and op.env with
+# the project's 1Password service-account token, both at the main checkout
+# root. Never prints the token.
+#
+# Usage: setup-op                          first run: template + token
+#        setup-op --rotate                 replace the token, keep signing
+#        setup-op --signing-key op://VAULT/ITEM   add or replace the signing key
+
+set -euo pipefail
+
+usage() {
+    echo "usage: setup-op [--rotate] [--signing-key op://VAULT/ITEM]" >&2
+    exit 2
+}
+
+rotate=0
+signing_ref=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rotate) rotate=1 ;;
+        --signing-key) [ $# -ge 2 ] || usage; signing_ref="$2"; shift ;;
+        *) usage ;;
+    esac
+    shift
+done
+case "$signing_ref" in
+    ''|op://*) ;;
+    *) echo "[X] setup-op: --signing-key must be an op:// reference" >&2; exit 2 ;;
+esac
+
+common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
+    echo "[X] setup-op: run inside a git checkout" >&2
+    exit 1
+}
+case "$common" in
+    */.git) root="${common%/.git}" ;;
+    *) echo "[X] setup-op: unsupported repository layout ($common)" >&2; exit 1 ;;
+esac
+op_env="$root/op.env"
+project_env="$root/project.env"
+
+if [ ! -e "$project_env" ]; then
+    cat >"$project_env" <<'EOF'
+# project.env -- 1Password references for agent sessions (bin/op-env).
+# One NAME=op://<vault>/<item>/<field> per line; never a literal value.
+# GH_TOKEN also switches agent pushes to HTTPS.
+#
+# GH_TOKEN=op://<vault>/<item>/<field>
+# CLOUDFLARE_API_TOKEN=op://<vault>/<item>/<field>
+EOF
+    mkdir -p "$common/info"
+    grep -qxF project.env "$common/info/exclude" 2>/dev/null ||
+        printf 'project.env\n' >>"$common/info/exclude"
+    echo "[OK] wrote $project_env (untracked: listed in .git/info/exclude)"
+fi
+
+if [ -e "$op_env" ] && [ "$rotate" = 0 ] && [ -z "$signing_ref" ]; then
+    echo "[INFO] $op_env exists; pass --rotate to replace the token"
+    exit 0
+fi
+
+token=""
+keep=()
+if [ -e "$op_env" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            OP_SERVICE_ACCOUNT_TOKEN=*) token="${line#*=}" ;;
+            OP_SIGNING_TTL=*) keep+=("$line") ;;
+            OP_SIGNING_KEY=*|OP_SIGNING_PUBKEY=*) [ -n "$signing_ref" ] || keep+=("$line") ;;
+        esac
+    done <"$op_env"
+fi
+if [ ! -e "$op_env" ] || [ "$rotate" = 1 ]; then
+    if [ -t 0 ]; then
+        printf 'Service-account token for this project (input hidden): ' >&2
+        IFS= read -rs token
+        printf '\n' >&2
+    else
+        IFS= read -r token || true
+    fi
+    [ -n "$token" ] || { echo "[X] setup-op: empty token" >&2; exit 1; }
+fi
+if [ -n "$signing_ref" ]; then
+    pub="$(OP_SERVICE_ACCOUNT_TOKEN="$token" op read "$signing_ref/public key")" || pub=""
+    case "$pub" in
+        ssh-*|sk-*) ;;
+        *) echo "[X] setup-op: could not read the public key of $signing_ref" >&2; exit 1 ;;
+    esac
+    keep+=("OP_SIGNING_KEY=$signing_ref" "OP_SIGNING_PUBKEY=$pub")
+fi
+
+rm -f "$root"/.op.env.*
+tmp="$root/.op.env.$$"
+(
+    umask 077
+    {
+        printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$token"
+        for line in ${keep[@]+"${keep[@]}"}; do printf '%s\n' "$line"; done
+    } >"$tmp"
+)
+chmod 600 "$tmp"
+mv -f "$tmp" "$op_env"
+echo "[OK] wrote $op_env (mode 600)"

@@ -81,5 +81,10 @@ assert "link.sh runs the private store step without aborting the install" \
 assert "cloud bootstrap never runs the private store step" \
     sh -c "! rg -q -i exocortex bootstrap-cloud.sh"
 
+assert "link.sh links op-env into ~/bin" \
+    rg -q -F 'ln -sf "$DOTFILEDIR"/bin/op-env "$HOME"/bin/op-env' install/common/link.sh
+assert "link.sh links setup-op into ~/bin" \
+    rg -q -F 'ln -sf "$DOTFILEDIR"/bin/setup-op "$HOME"/bin/setup-op' install/common/link.sh
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

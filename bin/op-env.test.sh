@@ -255,5 +255,32 @@ chmod 644 "$REPO/op.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
 check "status reports a bad mode as [X] and exits 1" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*mode is 644"'
 
+# --- 10. setup-op ---
+SETUP="$ROOT/bin/setup-op"
+REPO2="$HOME/Git/personal/proj2"
+git init -q "$REPO2"
+out="$(cd "$REPO2" && printf '%s\n' "$FIXTURE_TOKEN" | "$SETUP" 2>&1)"; rc=$?
+check "setup-op first run exits 0" '[ "$rc" = 0 ]'
+check "setup-op writes op.env mode 600 with the token" '[ "$(stat -c %a "$REPO2/op.env" 2>/dev/null || stat -f %Lp "$REPO2/op.env")" = 600 ] && grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$FIXTURE_TOKEN" "$REPO2/op.env"'
+check "setup-op never prints the token" '! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
+check "setup-op template has no active assignment" '[ "$(grep -v "^#" "$REPO2/project.env" | grep -c "=")" = 0 ]'
+check "setup-op excludes project.env" 'grep -qx project.env "$REPO2/.git/info/exclude"'
+check "setup-op leaves no temp file" '[ -z "$(find "$REPO2" -maxdepth 1 -name ".op.env.*")" ]'
+before="$(cksum <"$REPO2/op.env")"
+out="$(cd "$REPO2" && "$SETUP" </dev/null 2>&1)"
+check "setup-op rerun leaves op.env untouched" '[ "$(cksum <"$REPO2/op.env")" = "$before" ] && printf "%s" "$out" | grep -q "pass --rotate"'
+: >"$OP_LOG"
+out="$(cd "$REPO2" && "$SETUP" --signing-key op://V/sign </dev/null 2>&1)"
+check "setup-op --signing-key adds the reference and public key" 'grep -qx "OP_SIGNING_KEY=op://V/sign" "$REPO2/op.env" && grep -qxF "OP_SIGNING_PUBKEY=$PUB" "$REPO2/op.env"'
+check "setup-op --signing-key keeps the token" 'grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$FIXTURE_TOKEN" "$REPO2/op.env"'
+check "setup-op read the public key with the token" 'grep -q "^read op://V/sign/public key token=set$" "$OP_LOG"'
+printf 'OP_SIGNING_TTL=2h\n' >>"$REPO2/op.env"
+signing_before="$(grep "^OP_SIGNING_" "$REPO2/op.env")"
+NEWTOKEN="ops_$(printf 'r%.0s' $(seq 1 32))"
+out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
+check "setup-op --rotate replaces the token" 'grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$NEWTOKEN" "$REPO2/op.env" && ! grep -qF "$FIXTURE_TOKEN" "$REPO2/op.env"'
+check "setup-op --rotate keeps the signing lines byte-identical" '[ "$(grep "^OP_SIGNING_" "$REPO2/op.env")" = "$signing_before" ]'
+check "setup-op --rotate output never prints either token" '! printf "%s" "$out" | grep -qF "$NEWTOKEN" && ! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
