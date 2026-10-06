@@ -490,38 +490,25 @@ import re, sys
 t = " ".join(open("claude/skills/herdr-orchestration/SKILL.md").read().split())
 s = t[t.index("## 2. Kickoff"):t.index("## 2a. Phase advancement")]
 need = ["**Fast-path item**", "never a Jira key", "--role implementation",
-        "Fast-path maturity check", "fast_path.max_files", "default 3",
-        "claude/hooks/herdr_orch_core.py", "kick off <item> as raw",
+        "kick off <item> direct", "kick off <item> as raw",
         "Fast-path contract source", "## Verification",
         "config.mech.contract_commands", "schema check",
-        "reject an absolute path, a leading `./`, or any `.` or `..` path component",
-        "git ls-tree <base_sha> -- <normalized-path>",
-        "mode is `100644` or `100755`",
-        "path column equals the normalized entry verbatim",
-        "symlink (mode `120000`)",
-        "after the same normalization",
-        "a directory prefix of it",
         "Every `verify-*` command must also be falsifiable",
         "Falsifiability is observed, not judged",
         "at least one `verify-*` command expected to fail",
         "run every `verify-*` command once in the fresh worktree",
         "at least one must exit non-zero",
-        "Fast-path implement brief variant",
-        "is a fast-path item; anything else is raw",
-        "the fallback: any other todo or handoff",
-        "./claude/hooks/herdr_orch_core.py",
-        "claude/hooks/../hooks/herdr_orch_core.py",
-        ".agents/skills",
-        "all three fall to raw"]
-rows = ["files", "cap", "core", "solution", "contract"]
+        "Fast-path implement brief variant", "PRD",
+        "independent mechanisms",
+        "the fallback: any other todo or handoff"]
 order = s.index("**Plan-ready item**") < s.index("**Fast-path item**") < s.index("**Raw item**")
-ok = order and all(n in s for n in need) and all(re.search(r"\|\s*" + r + r"\s*\|", s) for r in rows)
+ok = (order and all(n in s for n in need)
+      and "Fast-path maturity check" not in s and "fast_path.max_files" not in s)
 sys.exit(0 if ok else 1)
 PY
 }
-ok "kickoff section documents the fast-path branch, table, and contract source" fastpath_kickoff_ok
-ok "state layout documents fast_path.max_files" \
-  "sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'fast_path.max_files' && sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'default 3'"
+ok "kickoff section documents the fast-path designation, PRD raw path, and contract source" fastpath_kickoff_ok
+ok "state layout documents no fast_path config" "! grep -q 'fast_path' claude/skills/herdr-orchestration/references/state-layout.md"
 
 fastpath_brief_ok() {
 python3 - <<'PY'
@@ -530,10 +517,10 @@ t = " ".join(open("claude/skills/herdr-orchestration/references/brief-template.m
 fp = t[t.index("## Fast-path implement brief variant"):t.index("## Mech brief variant")]
 plan = t[t.index("## Plan-phase brief variant"):t.index("## Fast-path implement brief variant")]
 rev = t[t.index("## Reviewer brief variant"):t.index("## Deep-think brief variant")]
-ok = (all(n in fp for n in ["no spec or plan exists", "Solution is the plan",
-                           "--reason needs_design", "--phase implement",
+ok = (all(n in fp for n in ["no PRD exists", "Solution is the plan",
+                           "kick off <item> direct", "--reason needs_design", "--phase implement",
                            "--launch-id <launch_id>", "verify-contract"])
-      and all(n in plan for n in ["ARTIFACT_CLASS", "2 spec rounds", "2 plan rounds"])
+      and all(n in plan for n in ["ARTIFACT_CLASS", "<prd-cap>", "PRD"])
       and "<fast-path-line>" in rev and "took the fast path" in rev)
 sys.exit(0 if ok else 1)
 PY

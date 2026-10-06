@@ -44,7 +44,7 @@ marker never widens a lead's workspace scope. Every edit target is canonicalized
 from its raw token with symlinks and `..` resolved together, so a symlink- or
 `..`-through-`.todos` path cannot escape the fence.
 
-All state remains machine-local and untracked. Private spec/plan copies live
+All state remains machine-local and untracked. Private PRD (and legacy spec/plan) copies live
 in the selected payload tree's `artifacts/<task>/<launch>/` and are referenced
 by immutable path/hash pairs.
 
@@ -367,14 +367,6 @@ session's fresh context record (at most 600 s old) reaches it. This file
 holds the only employer/user identifiers; the shipped skill and fixtures
 never contain them.
 
-`fast_path` is optional and read only by the director's kickoff maturity
-check (SKILL.md section 2), never by core or `agent_runtime.py`.
-`fast_path.max_files` is a positive int, default 3: the most files a todo
-may name and still skip the plan phase. An absent block means the default. A
-malformed block (non-object, unknown key, or a `max_files` that is not a
-positive int) makes the director treat every todo as raw and report the
-config error.
-
 `ship` is optional and read only by the director's ship step (SKILL.md
 section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
 "merge": "auto"}}`. An optional
@@ -629,7 +621,7 @@ live, registry-corroborated lead lease, so no other actor can settle on a dead
 lead's behalf.
 
 Planning has a separate `plan_artifacts` list in both task and completion:
-exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.
+exactly one `spec` (the PRD) and at most one `plan` (a legacy spec+plan pair), each with absolute `path` and `sha256`.
 `confirm-plan` verifies hashes, selected payload containment, and current
 attempt identity. It does not require HEAD ahead of base. Implementation
 completion requires its own current HEAD/base/contract gates.
@@ -952,7 +944,7 @@ committed (ignored machine-wide by `git/.gitignore_global` and refused by
 implement dispatch, executed by the `verify-contract` verb (worker gate,
 pre-review gate, post-rebase merge gate -- SKILL.md sections 2, 4, and 6),
 and frozen by the plan worker as `contract-<hex>.json` beside the frozen
-spec and plan under `artifacts/<task_id>/<launch_id>/` (the director's
+PRD under `artifacts/<task_id>/<launch_id>/` (the director's
 recovery source when the worktree copy is missing; a mech contract has none).
 
 ```json
@@ -974,7 +966,7 @@ commands, each `{name, run[, timeout_secs 1-3600]}` with unique non-blank
 names and no unknown keys. Commands run via `sh -c` from the worktree root
 and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
 writes, no machine-state mutation, no network, no secret echo. Full
-requirements: the task's private spec under `docs/superpowers/specs/` and the
+requirements: the task's private PRD under `docs/superpowers/specs/` and the
 authoring rules echoed in `brief-template.md`.
 
 ## Archive
