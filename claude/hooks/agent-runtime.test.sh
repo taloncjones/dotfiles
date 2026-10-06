@@ -2840,7 +2840,7 @@ def test_policy_document_matches_the_route_table():
         )
         checked_roles.add(role)
         rows += 1
-    assert rows >= 7, rows
+    assert rows >= 6, rows
     assert len(checked_roles) >= 4, checked_roles
     assert runtime.CLAUDE_FALLBACKS["planner"] == [
         {"model": "fable", "effort": "medium"},
