@@ -108,6 +108,15 @@ write_op_env "OP_MYSTERY=1"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
 check "op.env unknown key is refused" '[ -z "$out" ] && grep -q "unknown key OP_MYSTERY" "$TMP/err"'
 
+# A raw token pasted without a key must never be echoed back in the error.
+FRAGMENT="ops_$(printf 'm%.0s' $(seq 1 24))"
+printf '%s==tail\n' "$FRAGMENT" >"$REPO/op.env"
+chmod 600 "$REPO/op.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+check "op.env line with a non-identifier key is refused without its content" '[ -z "$out" ] && grep -q "op.env line 1 is not KEY=VALUE" "$TMP/err" && ! grep -qF "$FRAGMENT" "$TMP/err"'
+out="$("$OP_ENV" status --cwd "$REPO" 2>&1)"
+check "status never prints the malformed line content" '! printf "%s" "$out" | grep -qF "$FRAGMENT"'
+
 write_op_env "OP_SIGNING_KEY=op://V/sign"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
 check "OP_SIGNING_KEY without OP_SIGNING_PUBKEY is refused" '[ -z "$out" ] && grep -q "OP_SIGNING_PUBKEY is missing" "$TMP/err"'

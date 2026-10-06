@@ -88,7 +88,11 @@ read_op_env() {
         n=$((n + 1))
         case "$line" in ''|'#'*) continue ;; esac
         key="${line%%=*}"
-        if [ "$key" = "$line" ]; then fail_rule "op.env line $n is not KEY=VALUE"; return 1; fi
+        # Only OP_* names are printable: any other text before = may be a pasted token.
+        if [ "$key" = "$line" ] || [[ ! "$key" =~ ^OP_[A-Z0-9_]*$ ]]; then
+            fail_rule "op.env line $n is not KEY=VALUE"
+            return 1
+        fi
         value="$(unquote "${line#*=}")"
         case "$key" in
             OP_SERVICE_ACCOUNT_TOKEN) OPE_TOKEN="$value" ;;
