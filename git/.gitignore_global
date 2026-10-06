@@ -222,3 +222,9 @@ docs/specs/
 docs/plans/
 .planning/
 claude/contracts/
+
+# =============================================================================
+# op-env (dotfiles bin/op-env): service-account token files, never committed
+# =============================================================================
+op.env
+.op.env.*

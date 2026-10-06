@@ -170,3 +170,8 @@ settings.local.json
 *.tfstate
 # Todo backlog: machine-local or linked into a private store; never public.
 /.todos
+# op-env files (bin/op-env): the token never, and vault/item names stay out
+# of this public repo.
+/op.env
+/.op.env.*
+/project.env

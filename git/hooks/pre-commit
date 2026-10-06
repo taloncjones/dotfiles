@@ -40,13 +40,49 @@ scan_added_lines() {
   # check (found by pre-commit.test.sh; divergence from upstream ECC).
   if hits="$(printf '%s\n' "$added_lines" | rg -n --pcre2 -- "$regex" 2>/dev/null)"; then
     printf '\n[ECC pre-commit] Potential secret detected (%s) in %s\n' "$name" "$file" >&2
-    printf '%s\n' "$hits" | head -n 3 >&2
+    # project.env lines can only be secrets or references: never echo them.
+    if [[ "${file##*/}" == project.env ]]; then
+      printf '(matching lines withheld)\n' >&2
+    else
+      printf '%s\n' "$hits" | head -n 3 >&2
+    fi
+    has_findings=1
+  fi
+}
+
+# project.env holds op:// references only (bin/op-env); print line numbers,
+# never the offending value.
+check_project_env() {
+  local file="$1" bad
+  bad="$(git show ":$file" 2>/dev/null | awk '
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    line == "" || line ~ /^#/ { next }
+    {
+      eq = index(line, "=")
+      if (eq == 0) { print NR; next }
+      value = substr(line, eq + 1)
+      gsub(/^["\047]|["\047]$/, "", value)
+      if (value !~ /^op:\/\//) print NR
+    }' | paste -sd, -)"
+  if [[ -n "$bad" ]]; then
+    printf '\n[ECC pre-commit] %s line %s is not an op:// reference; project.env holds references only\n' "$file" "$bad" >&2
     has_findings=1
   fi
 }
 
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
+
+  case "${file##*/}" in
+    op.env|.op.env.*)
+      printf '\n[ECC pre-commit] %s is an op-env token file and must never be committed\n' "$file" >&2
+      has_findings=1
+      continue
+      ;;
+    project.env)
+      check_project_env "$file"
+      ;;
+  esac
 
   case "$file" in
     *.png|*.jpg|*.jpeg|*.gif|*.svg|*.pdf|*.zip|*.gz|*.lock|pnpm-lock.yaml|package-lock.json|yarn.lock|bun.lockb)
