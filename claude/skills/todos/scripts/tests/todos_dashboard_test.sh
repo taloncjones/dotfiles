@@ -1366,6 +1366,47 @@ PY
 }
 test_theme_toggle_without_storage
 
+test_text_contrast() {
+  local out
+  out=$(SCRIPTS="$HERE/.." python3 - <<'PY'
+import os, re, sys
+sys.path.insert(0, os.environ["SCRIPTS"])
+import todos_dashboard as board
+
+def tokens(block):
+    return dict(re.findall(r"--([a-z-]+):\s*(#[0-9a-fA-F]{6})", block))
+
+def lum(h):
+    c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    c = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in c]
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+def ratio(a, b):
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+css = board.CSS.split("@media")[0]
+themes = {"light": tokens(css), "dark": tokens(board.DARK_VARS)}
+heading = re.search(r"\.lane h2 \{[^}]*?color: var\(--([a-z-]+)", board.CSS).group(1)
+headings = ["inflight", "idle", "blocked", "waiting", "done"] if heading == "lane" else [heading]
+grounds = ["ground", "surface", "surface-soft", "chip", "blocked-soft"]
+pairs = [(t, g) for t in ("ink", "muted", "accent") for g in grounds]
+pairs += [(h, "ground") for h in headings]
+pairs += [(f, f + "-soft") for f in ("blocked", "waiting", "inflight", "done")]
+pairs += [(f, "surface") for f in ("blocked", "waiting", "inflight")]
+bad = []
+for name, t in themes.items():
+    for fg, bg in sorted(set(pairs)):
+        r = ratio(t[fg], t[bg])
+        if r < 4.5:
+            bad.append(f"{name} {fg} on {bg} {r:.2f}")
+print("; ".join(bad) or "all pairs pass")
+PY
+)
+  assert_eq "contrast: every text token passes 4.5:1 in both themes" "$out" "all pairs pass"
+}
+test_text_contrast
+
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

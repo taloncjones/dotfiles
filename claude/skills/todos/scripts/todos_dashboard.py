@@ -495,7 +495,7 @@ CSS = r"""
   --surface: #ffffff;
   --surface-soft: #f1f2f4;
   --ink: #172b4d;
-  --muted: #626f86;
+  --muted: #5e6c84;
   --accent: #0c66e4;
   --rule: #dcdfe4;
   --chip: #f1f2f4;
@@ -646,7 +646,7 @@ main {
   font-weight: 650;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: var(--lane, var(--muted));
+  color: var(--ink);
 }
 
 details.lane > summary { cursor: pointer; list-style: none; width: fit-content; }
