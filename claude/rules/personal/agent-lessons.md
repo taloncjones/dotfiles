@@ -19,8 +19,8 @@ is the staging tier, not an archive.
 
 - (2026-09) Bind headless workers, reviewers and probes to an explicit clean env
   and account: inherited settings outlive the config change they predate.
-- (2026-10) zsh: unquoted vars do not word-split, `$v:x` is a modifier (write
-  `${v}:x`), use `pipestatus`; rm/git guards reject vars -- pass literal paths.
+- (2026-10) zsh: unquoted vars do not word-split, `$v:h` is a modifier (write
+  `${v}:h`), use `pipestatus`; rm/git guards reject vars -- pass literal paths.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
 - (2026-09) Never emit an identifier from memory, or one an earlier edit moved:
@@ -38,7 +38,7 @@ is the staging tier, not an archive.
 - (2026-09) Verify external CLI syntax against its help/docs before writing it
   into a skill: unverified gh fields and flag combinations shipped broken.
 - (2026-10) Run suites one at a time, to a file, then grep it; size the wait
-  from `timeout_secs`. Concurrent suites flake and pipes hide failures.
+  from `timeout_secs`. Concurrent suites flake; pipes hide failures and stderr.
 - (2026-09) Settle a factual review dispute by executing the case, not by rank.
 - (2026-09) Bound a reviewer by its diff, not a fixed clock: a live reviewer
   past a static deadline is re-sized or waited on, never interrupted and re-run.
