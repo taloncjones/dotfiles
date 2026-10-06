@@ -3170,6 +3170,10 @@ def is_plan_completed(task, done, head_sha, workspace, payload_root) -> bool:
     if not plan_record_matches(task, done, head_sha, workspace):
         return False
     artifacts = task.get("plan_artifacts")
+    if artifacts is None:
+        # A hand-built task may omit them; the correlated done record above
+        # carries the same references, still hash-checked below.
+        artifacts = done.get("plan_artifacts")
     if not isinstance(artifacts, list) or len(artifacts) != 2 or done.get("plan_artifacts") != artifacts:
         return False
     if any(not isinstance(ref, dict) for ref in artifacts):
@@ -3187,6 +3191,8 @@ def is_plan_completed(task, done, head_sha, workspace, payload_root) -> bool:
         repo_id = context["repo_id"]
         if task.get("repo_slug", slug) != slug or task.get("repo_id", repo_id) != repo_id:
             return False
+    elif repo_id is None:
+        repo_id = coordination.bound_repo_id(slug)
     if not valid_repo_slug(slug) or not valid_task_id(task.get("task_id")):
         return False
     if root != account_root and account_root not in root.parents:
