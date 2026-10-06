@@ -33,6 +33,8 @@ assert "claude-plan-review uses the shared native runtime" \
     rg -q 'agent_runtime' codex/skills/claude-plan-review/SKILL.md
 assert "claude-spec-review selects the Claude runtime" \
     rg -q -- '--runtime claude' codex/skills/claude-spec-review/SKILL.md
+assert "claude-spec-review asks the PRD review questions" \
+    sh -c "rg -q 'acceptance criterion' codex/skills/claude-spec-review/SKILL.md && rg -q 'separable mechanisms' codex/skills/claude-spec-review/SKILL.md && rg -q 'existing tool' codex/skills/claude-spec-review/SKILL.md && rg -q 'before implementation' codex/skills/claude-spec-review/SKILL.md"
 assert "co-review extracts the canonical policy and schema" \
     sh -c 'rg -q "policy --section POLICY" claude/skills/co-review/SKILL.md && rg -q "policy --section POLICY" codex/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" claude/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" codex/skills/co-review/SKILL.md'
 assert "co-review requires four named independent seats" \

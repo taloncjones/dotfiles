@@ -279,6 +279,17 @@ class CoReviewSkillText(unittest.TestCase):
 
 
 class CodexReviewGatesSkillText(unittest.TestCase):
+    def test_spec_review_documents_probe_once(self):
+        text = " ".join(SPEC_REVIEW.split())
+        self.assertIn("later rounds of this review run the substitute directly", text)
+
+    def test_spec_review_prompt_reviews_a_prd(self):
+        self.assertIn("before implementation", SPEC_REVIEW)
+        self.assertNotIn("before planning", SPEC_REVIEW)
+        line = next(l for l in SPEC_REVIEW.splitlines() if "Round ${ROUND:-1} of $SPEC_MAX_ROUNDS" in l)
+        for needle in ("acceptance criterion", "separable mechanisms", "existing tool"):
+            self.assertIn(needle, line)
+
     def test_spec_review_documents_the_substitute_round(self):
         self.assertIn("### Substitute a failed Codex round", SPEC_REVIEW)
         for needle in ("quota, auth, or", "availability failure",
