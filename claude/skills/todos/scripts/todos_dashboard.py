@@ -29,11 +29,11 @@ sys.path.insert(0, str(HERE.parents[1] / "lib"))
 import herdr_orch_core as core
 from workflow_context import account_scope, repository_context
 from workflow_context import git as context_git
-from todos_prd import NOTE_SECTIONS, URL_RE, esc, render_body, safe_href
+from todos_prd import NOTE_SECTIONS, URL_RE, esc, is_fence, render_body, safe_href, split_sections
 
 TODOS_SH = Path(os.environ.get("TODOS_DASHBOARD_TODOS_SH") or HERE / "todos.sh")
 TODOS_DIRNAME = ".todos"
-SUMMARY_LEN = 140
+SUMMARY_MAX = 220
 RESEARCH_SUMMARY_LEN = 200
 MAX_LINKS = 5
 DEFAULT_COMPLETED = 10
@@ -116,17 +116,45 @@ def frontmatter(text):
     return scalars, lists, "\n".join(lines[body_start:])
 
 
-def problem_summary(body):
-    in_problem = False
-    for line in body.split("\n"):
-        if line.startswith("## Problem"):
-            in_problem = True
+# A sentence ends at . ! or ? before whitespace and a capital, digit,
+# backtick, ( or quote, or at the end of the paragraph.
+SENTENCE_END_RE = re.compile(r"[.!?](?=\s+[A-Z0-9`(\"']|\s*$)")
+LIST_LINE_RE = re.compile(r"^\s*([-*+]|\d+\.)\s")
+
+
+def strip_inline(text):
+    text = re.sub(r"\[([^\]\n]+)\]\([^)\s]+\)", r"\1", text)
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    return text.replace("`", "")
+
+
+def card_summary(text):
+    """The first sentence of the first paragraph of the first ## Problem."""
+    problem = next((s for s in split_sections(text)[1] if s[0] == "Problem"), None)
+    if problem is None:
+        return ""
+    para, fenced = [], False
+    for line in text[problem[2]:problem[3]].split("\n"):
+        if is_fence(line):
+            if para:
+                break
+            fenced = not fenced
+        elif fenced:
             continue
-        if in_problem and line.startswith("## "):
-            return ""
-        if in_problem and line.strip():
-            return line.strip()[:SUMMARY_LEN]
-    return ""
+        elif not line.strip():
+            if para:
+                break
+        elif para and LIST_LINE_RE.match(line):
+            break
+        else:
+            para.append(line.strip())
+    summary = strip_inline(" ".join(para))
+    end = SENTENCE_END_RE.search(summary)
+    if end:
+        summary = summary[:end.end()]
+    if len(summary) > SUMMARY_MAX:
+        summary = summary[:SUMMARY_MAX - 3].rsplit(" ", 1)[0].rstrip(",;:") + "..."
+    return summary
 
 
 def first_body_line(body):
@@ -248,7 +276,10 @@ def field(d, key):
 
 
 def herdr_status(tasks_dir, basename, *, confined=False):
-    """Read-only view of tasks/td-<basename>.{json,review.json,done.json}.
+    """Read-only view of tasks/<task>.{json,review.json,done.json}.
+
+    herdr names a todo's task by the bare todo id; older records used
+    td-<basename>, read when no bare-id record exists.
 
     The task record is authoritative for status and the live worker. The
     review record is shown as-is only when its reviewed_head_sha equals the
@@ -256,7 +287,7 @@ def herdr_status(tasks_dir, basename, *, confined=False):
     its phase and agent both equal the live worker's (herdr reuses one
     workspace across phases, so workspace_id proves nothing), else stale.
     """
-    task_id = f"td-{basename}"
+    task_id = basename if (tasks_dir / f"{basename}.json").exists() else f"td-{basename}"
     rec, bad = read_json(tasks_dir / f"{task_id}.json", confined=confined)
     if rec is None and not bad:
         return None
@@ -337,7 +368,7 @@ def load_todo(path, resolver, tasks_dir, pending, confined_state):
         "tier": scalars.get("tier", ""),
         "status": scalars.get("status", ""),
         "files": lists.get("files", []),
-        "summary": problem_summary(body),
+        "summary": card_summary(text),
         "links": body_links(body),
         "deps": resolver.resolve_all(path, basename) if pending else [],
         "herdr": herdr_status(tasks_dir, basename, confined=confined_state),
@@ -357,6 +388,10 @@ def load_dir(d, resolver, tasks_dir, pending, confined_state):
         if t is not None:
             out.append(t)
     return out
+
+
+def today():
+    return os.environ.get("TODOS_TODAY") or datetime.date.today().isoformat()
 
 
 def open_sort_key(t):

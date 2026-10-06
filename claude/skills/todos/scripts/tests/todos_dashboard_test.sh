@@ -1038,6 +1038,62 @@ EOF
 }
 test_prd_rows
 
+test_card_summary() {
+  local out
+  out=$(python3 - "$HERE/.." <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from todos_dashboard import card_summary
+cases = [
+    ("---\ntitle: t\n---\n\n## Problem\n\nThe `x` tool from [PR](https://e.com/1)\nis **hard** to use. Second sentence.\n",
+     "The x tool from PR is hard to use."),
+    ("## Problem\n\n```sh\nfenced\n```\n\nAfter the fence. More.\n", "After the fence."),
+    ("## Problem\n\nLead line:\n- item one\n", "Lead line:"),
+    ("## Problem\n\nversion 1.2 ships e.g. today. Next.\n", "version 1.2 ships e.g. today."),
+    ("## Solution\n\nNo problem section.\n", ""),
+    ("```\n## Problem\n```\n\n## Problem\n\nReal one.\n", "Real one."),
+]
+for text, want in cases:
+    got = card_summary(text)
+    print("ok" if got == want else f"FAIL want {want!r} got {got!r}")
+long = card_summary("## Problem\n\n" + " ".join(["word"] * 70) + ".\n")
+print("ok" if len(long) <= 220 and long.endswith("word...") else f"FAIL long {long!r}")
+PY
+)
+  assert_eq "summary: first sentence, fences, lists, abbreviations, missing, fenced heading, cap" "$out" "ok
+ok
+ok
+ok
+ok
+ok
+ok"
+}
+test_card_summary
+
+test_herdr_lookup() {
+  local d out
+  d=$(mk_dir) || exit 2
+  printf '{"status":"in-progress","workers":[{"phase":"plan","agent":"a"}]}' >"$d/2026-05-01-x.json"
+  printf '{"status":"merged"}' >"$d/td-2026-05-01-x.json"
+  printf '{"status":"reviewed"}' >"$d/td-2026-05-02-y.json"
+  out=$(python3 - "$HERE/.." "$d" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from todos_dashboard import herdr_status
+d = Path(sys.argv[2])
+for b in ("2026-05-01-x", "2026-05-02-y", "2026-05-03-z"):
+    h = herdr_status(d, b)
+    print(b, "none" if h is None else f'{h["task_id"]}|{h["status"]}|{h["phase"]}')
+PY
+)
+  assert_eq "herdr lookup: bare id first, td- fallback, none" "$out" "2026-05-01-x 2026-05-01-x|in-progress|plan
+2026-05-02-y td-2026-05-02-y|reviewed|
+2026-05-03-z none"
+  rm_fixture "$d"
+}
+test_herdr_lookup
+
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
