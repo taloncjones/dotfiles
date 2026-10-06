@@ -2,6 +2,7 @@
 # zed-claude-agent.test.sh - drive bin/zed-claude-agent through a fake HOME,
 # a stub npx, and a stub account resolver. No network, no real HOME reads.
 set -e
+unset GH_TOKEN
 
 PASS=0
 FAIL=0
@@ -30,6 +31,7 @@ printf 'CONFIG_SET=%s\n' "${CLAUDE_CONFIG_DIR+yes}"
 printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR-}"
 printf 'PERSONAL=%s\n' "${WORKFLOW_PERSONAL_ACCOUNT-}"
 printf 'KEY_SET=%s\n' "${ANTHROPIC_API_KEY+yes}"
+printf 'GH=%s\n' "${GH_TOKEN-}"
 printf 'ARGS=%s\n' "$*"
 EOF
 chmod +x "$WORK/bin/npx"
@@ -39,6 +41,14 @@ chmod +x "$WORK/bin/npx"
 # the real launch_env shapes (personal unsets CLAUDE_CONFIG_DIR, work pins it).
 mkdir -p "$WORK/checkout/bin" "$WORK/checkout/claude/skills/lib"
 cp "$REPO/bin/zed-claude-agent" "$WORK/checkout/bin/zed-claude-agent"
+# A stub op-env answers only for this process's cwd.
+cat > "$WORK/checkout/bin/op-env" <<'EOF'
+#!/bin/sh
+[ "$1" = shell-exports ] && [ "$2" = --cwd ] && [ "$3" = "$PWD" ] &&
+    printf "export GH_TOKEN='from-op-env'\n"
+exit 0
+EOF
+chmod +x "$WORK/checkout/bin/op-env"
 cat > "$WORK/checkout/claude/skills/lib/workflow_context.py" <<'EOF'
 import json, os, sys
 
@@ -151,6 +161,16 @@ assert "symlinked wrapper passes cwd to the resolver" \
 #     what lets a personal thread open inside a work repository
 assert "personal entry passes --personal to the resolver" \
     grep -q -- "--personal" "$ARGV_FILE"
+
+# 13. the project's op-env exports reach the adapter
+out="$(STUB_KIND=personal run_wrapper personal)"
+assert "op-env exports reach the adapter" \
+    sh -c "printf '%s\n' \"$out\" | grep -q '^GH=from-op-env\$'"
+
+# 14. a checkout without op-env launches without its exports
+out="$(run_bare personal 2>/dev/null)"
+assert "no op-env leaves GH_TOKEN unset" \
+    sh -c "printf '%s\n' \"$out\" | grep -q '^GH=\$'"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

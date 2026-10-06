@@ -82,5 +82,12 @@ else
     fi
 fi
 
+# Zed agents get the project's op-env credentials, like claude() launches.
+op_env="$(cd "$(dirname "$script_path")/.." && pwd)/bin/op-env"
+if [[ -x "$op_env" ]]; then
+    op_exports="$("$op_env" shell-exports --cwd "$PWD")" || op_exports=""
+    eval "$op_exports"
+fi
+
 unset ANTHROPIC_API_KEY
 exec npx -y "$ADAPTER" "${@:2}"
