@@ -1317,6 +1317,55 @@ PY
 }
 test_bare_id_record
 
+test_theme_toggle_without_storage() {
+  if ! command -v node >/dev/null 2>&1; then
+    ok "theme toggle without storage: skipped, node not installed"
+    return
+  fi
+  local out
+  out=$(SCRIPTS="$HERE/.." python3 - <<'PY' | node - 2>&1
+import json, os, sys
+sys.path.insert(0, os.environ["SCRIPTS"])
+import todos_dashboard as board
+print("var BOARD_JS = " + json.dumps(board.BOARD_JS) + ";")
+print(r"""
+var attrs = {};
+var toggle = { textContent: "" };
+var listeners = [];
+global.localStorage = {
+  getItem: function () { throw new Error("blocked"); },
+  setItem: function () { throw new Error("blocked"); },
+};
+global.document = {
+  documentElement: {
+    setAttribute: function (k, v) { attrs[k] = v; },
+    removeAttribute: function (k) { delete attrs[k]; },
+    getAttribute: function (k) { return k in attrs ? attrs[k] : null; },
+  },
+  querySelector: function (sel) { return sel === "button.theme" ? toggle : null; },
+  addEventListener: function (type, fn) { if (type === "click") listeners.push(fn); },
+  getElementById: function () { return null; },
+};
+global.location = { hash: "", pathname: "/", search: "", replace: function () {} };
+global.history = { replaceState: function () {} };
+global.window = global;
+global.addEventListener = function () {};
+global.navigator = {};
+eval(BOARD_JS);
+var click = { target: { closest: function (s) { return s === "button.theme" ? {} : null; } } };
+var seen = [];
+for (var i = 0; i < 3; i++) {
+  listeners.forEach(function (fn) { fn(click); });
+  seen.push(attrs["data-theme"] || "system");
+}
+console.log(seen.join(" "));
+""")
+PY
+)
+  assert_eq "theme toggle without storage: cycles light, dark, system" "$out" "light dark system"
+}
+test_theme_toggle_without_storage
+
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

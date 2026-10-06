@@ -1007,7 +1007,8 @@ function savedTheme() {
 
 document.addEventListener("click", function (event) {
   if (!event.target.closest("button.theme")) return;
-  var next = THEMES[(THEMES.indexOf(savedTheme()) + 1) % THEMES.length];
+  var current = document.documentElement.getAttribute("data-theme") || "system";
+  var next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
   applyTheme(next);
   try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* not remembered */ }
 });
