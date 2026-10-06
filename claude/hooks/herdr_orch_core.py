@@ -3174,11 +3174,13 @@ def is_plan_completed(task, done, head_sha, workspace, payload_root) -> bool:
         # A hand-built task may omit them; the correlated done record above
         # carries the same references, still hash-checked below.
         artifacts = done.get("plan_artifacts")
-    if not isinstance(artifacts, list) or len(artifacts) != 2 or done.get("plan_artifacts") != artifacts:
+    if not isinstance(artifacts, list) or not artifacts or done.get("plan_artifacts") != artifacts:
         return False
     if any(not isinstance(ref, dict) for ref in artifacts):
         return False
-    if [ref.get("kind") for ref in artifacts].count("plan") != 1 or [ref.get("kind") for ref in artifacts].count("spec") != 1:
+    # One PRD (kind spec); a legacy spec+plan pair still confirms.
+    kinds = [ref.get("kind") for ref in artifacts]
+    if kinds.count("spec") != 1 or kinds.count("plan") > 1 or len(kinds) != kinds.count("spec") + kinds.count("plan"):
         return False
     root = coordination.payload_path(payload_root)
     selected = _PAYLOAD_SELECTION.get()

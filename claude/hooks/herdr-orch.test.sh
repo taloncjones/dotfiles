@@ -11440,6 +11440,53 @@ printf '%s\n' "$out" | grep -q 'PROJ-1 .*action=confirm-plan'
 ! printf '%s\n' "$out" | grep -q 'unverifiable-evidence'
 SH
 
+check "confirm-plan: a single PRD artifact confirms the plan" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+python3 - "$HERDR_COORDINATION_ROOT/bindings.json" <<'PY'
+import json, sys
+path = sys.argv[1]; registry = json.load(open(path)); registry["slug-x"]["repo_id"] = "canon"
+open(path, "w").write(json.dumps(registry))
+PY
+WT=$(mktemp -d)
+git -C "$WT" init -q
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+HEAD=$(git -C "$WT" rev-parse HEAD)
+LAUNCH="$root/herdr-orch/slug-x/artifacts/PROJ-1/L1"; mkdir -p "$LAUNCH"
+printf 'Reviewed PRD\n' > "$LAUNCH/prd.md"
+REFS=$(python3 - "$root" "$LAUNCH" <<'PY'
+import hashlib, json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+from pathlib import Path
+root, launch = sys.argv[1:]
+account = coordination.account_id_for_root(Path(root))
+refs = []
+for kind, name in (("spec", "prd.md"),):
+    path = f"{launch}/{name}"
+    digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    refs.append({"kind": kind, "path": path, "sha256": digest,
+                 "source": {"repo_id": "canon", "sha256": digest},
+                 "task": {"task_id": "PROJ-1", "repo_id": "canon", "account_id": account}})
+print(json.dumps(refs))
+PY
+)
+ROW='{"phase":"plan","workspace_id":"w5","runtime":"claude","launch_id":"L1","pane_id":"w5:p1","source_head_sha":"'"$HEAD"'"}'
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","repo_slug":"slug-x","status":"in-progress","base_sha":"'"$HEAD"'","worktree":"'"$WT"'","workers":['"$ROW"']}'
+cat > "$RD/tasks/PROJ-1.done.json" <<JSON
+{"phase":"plan","workspace_id":"w5","runtime":"claude","launch_id":"L1","pane_id":"w5:p1","source_head_sha":"$HEAD","task_id":"PROJ-1","outcome":"completed","head_sha":"$HEAD","base_sha":"$HEAD","plan_artifacts":$REFS}
+JSON
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+$CLI confirm-plan --repo-slug slug-x --task-id PROJ-1 --workspace w5 --head-sha "$HEAD"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q 'PROJ-1 .*action=confirm-plan'
+! printf '%s\n' "$out" | grep -q 'unverifiable-evidence'
+SH
+
 check "confirm-plan: task and completion disagreeing on an artifact hash still refuse" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
