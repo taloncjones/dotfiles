@@ -226,10 +226,11 @@ A card shows the title, a one-sentence summary (the first sentence of
 the first `## Problem` paragraph, at most 220 characters) and badges: in
 flight with the herdr phase, `blocked by <n>` or `<n> deps met`, the
 priority, the area, and `due <date>` (red once overdue) or `surfaces
-<date>` while the surface date is still ahead. Lane headers and each
-card's thin left stripe carry the lane's status colour (blue in flight, red
-blocked, amber waiting, green done, grey otherwise). Both pages follow the OS
-light or dark setting.
+<date>` while the surface date is still ahead. Each lane header's
+underline and each card's thin left stripe carry the lane's status colour
+(blue in flight, red blocked, amber waiting, green done, grey otherwise).
+The static dashboard follows the OS light or dark setting and has no theme
+toggle; the served board follows it until the Theme button overrides it.
 
 Click a card, or open a URL ending in `#todo-<id>`, to show that todo's
 modal: its rendered body (the text before the first `## ` heading and
