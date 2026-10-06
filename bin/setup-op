@@ -96,8 +96,8 @@ if [ -n "$signing_ref" ]; then
     keep+=("OP_SIGNING_KEY=$signing_ref" "OP_SIGNING_PUBKEY=$pub")
 fi
 
-rm -f "$root"/.op.env.*
 tmp="$root/.op.env.$$"
+trap 'rm -f "$tmp"' EXIT
 (
     umask 077
     {

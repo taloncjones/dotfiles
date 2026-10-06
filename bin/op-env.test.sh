@@ -286,5 +286,16 @@ check "setup-op --rotate output never prints either token" '! printf "%s" "$out"
 
 out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op excludes are not duplicated on rerun" '[ "$(grep -cx "op.env" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cxF ".op.env.*" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cx "project.env" "$REPO2/.git/info/exclude")" = 1 ]'
+printf 'keep\n' >"$REPO2/.op.env.bak"
+out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
+check "setup-op --rotate leaves a foreign .op.env.* file alone" '[ "$(cat "$REPO2/.op.env.bak")" = keep ]'
+rm -f "$REPO2/.op.env.bak"
+REPO3="$HOME/Git/personal/proj3"
+git init -q "$REPO3"
+printf '%s\n' "$FIXTURE_TOKEN" | (cd "$REPO3" && "$SETUP" >/dev/null 2>&1)
+printf 'x\n' >"$REPO3/.op.env.keep"
+out="$(cd "$REPO3" && printf '%s\n' "$FIXTURE_TOKEN" | FAKE_OP_MODE=fail "$SETUP" --signing-key op://V/missing 2>&1)"; rc=$?
+check "setup-op failure leaves a foreign .op.env.* file and no own temp" '[ "$rc" != 0 ] && [ -f "$REPO3/.op.env.keep" ] && [ "$(find "$REPO3" -maxdepth 1 -name ".op.env.*" | wc -l | tr -d " ")" = 1 ]'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
