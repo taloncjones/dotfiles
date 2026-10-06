@@ -105,10 +105,13 @@ test_serve_page() {
   assert_contains "serve: GET / is 200" "${r%%|*}" "200"
   assert_contains "serve: pending row has a note form" "$r" "name=\"id\" value=\"$ID\"><input type=\"hidden\" name=\"section\" value=\"Solution\">"
   assert_contains "serve: form carries the file's hash" "$r" "name=\"sha\" value=\"$sha\""
-  assert_contains "serve: completed row is rendered" "$r" 'data-prd="2026-05-30-finished"'
+  assert_contains "serve: completed todo has a modal" "$r" 'data-modal="2026-05-30-finished"'
   assert_missing "serve: completed row has no form" "$r" 'name="id" value="2026-05-30-finished"'
-  r=$(http "$URL" GET "/?t=$TOKEN&open=$ID")
-  assert_contains "serve: ?open= opens that row" "$r" "<details class=\"prd\" id=\"prd-$ID\" open>"
+  assert_eq "serve: note forms sit in the pending modal" "$(printf '%s' "$r" | python3 -c '
+import sys
+t = sys.stdin.read()
+a = t.index("<div class=\"modal\" id=\"todo-'"$ID"'\"")
+print(t.count("<form class=\"note\"", a, t.index("</article></div>", a)))')" "2"
   r=$(http "$URL" GET "/nope?t=$TOKEN")
   assert_eq "serve: unknown path is 404" "${r%%|*}" "404"
 }
@@ -472,6 +475,16 @@ test_serve_filter_form() {
   assert_missing "form: query never becomes markup" "$r" '<script>x</script>'
 }
 test_serve_filter_form
+test_serve_done_lane() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "done lane: collapsed without a filter" "$r" '<details class="lane" id="lane-done"><summary>'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=needle")
+  assert_contains "done lane: open while searching" "$r" '<details class="lane" id="lane-done" open><summary>'
+  r=$(http "$URL" GET "/?t=$TOKEN&area=board")
+  assert_missing "done lane: omitted when the filter matches no completed todo" "$r" 'id="lane-done"'
+}
+test_serve_done_lane
 test_serve_copy_chips() {
   local r
   r=$(http "$URL" GET "/?t=$TOKEN")

@@ -446,7 +446,7 @@ test_empty_board() {
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_eq "empty: exit 0" "$(rc)" "0"
   assert_file_has "empty: open" "$f" 'No open todos.'
-  assert_file_has "empty: completed" "$f" 'Nothing completed yet.'
+  assert_file_lacks "empty: no done lane" "$f" 'data-bucket="done"'
   assert_file_has "empty: research" "$f" 'No research reports.'
   ok "empty: board without .todos"
   rm_fixture "$repo" "$sr"
@@ -463,7 +463,7 @@ title: Newer completed
 ---
 EOF
   render "$repo" "$sr" --out "$f" --completed 0 >/dev/null
-  assert_file_lacks "flags: --completed 0 hides section" "$f" '<h2>Completed</h2>'
+  assert_file_lacks "flags: --completed 0 hides the done lane" "$f" 'data-bucket="done"'
   render "$repo" "$sr" --out "$f" --completed 1 >/dev/null
   assert_eq "flags: --completed 1 shows one row" "$(grep -o 'data-todo="2026-05-0[39]-[a-z-]*"' "$f" | wc -l | tr -d ' ')" "1"
   assert_file_has "flags: --completed 1 keeps newest" "$f" 'data-todo="2026-05-09-newer"'
@@ -836,7 +836,7 @@ area: second
 EOF
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_file_lacks "frontmatter: blank first title wins" "$f" '>later<'
-  assert_file_has "frontmatter: title falls back to basename" "$f" '<div class="name">2026-05-01-dup</div>'
+  assert_file_has "frontmatter: title falls back to basename" "$f" '<span class="card-title">2026-05-01-dup</span>'
   assert_file_has "frontmatter: first area wins" "$f" '>first<'
   assert_file_lacks "frontmatter: second area ignored" "$f" '>second<'
   ok "frontmatter: first occurrence wins"
@@ -885,13 +885,13 @@ status: yolo
 EOF
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_eq "status: exit 0" "$(rc)" "0"
-  assert_file_has "status: ready heading" "$f" '<h3 data-bucket="ready">Ready'
-  assert_file_has "status: waiting heading" "$f" '<h3 data-bucket="waiting">Waiting'
-  assert_file_has "status: someday heading" "$f" '<h3 data-bucket="someday">Someday'
+  assert_file_has "status: ready heading" "$f" '<h2 data-bucket="ready">Ready'
+  assert_file_has "status: waiting heading" "$f" '<h2 data-bucket="waiting">Waiting'
+  assert_file_has "status: someday heading" "$f" '<h2 data-bucket="someday">Someday'
   assert_file_has "status: ready item in ready bucket" "$f" 'data-todo="2026-05-01-ready" data-state="open"'
   assert_file_has "status: waiting item row" "$f" 'data-todo="2026-05-02-waiting" data-state="open"'
   assert_file_has "status: someday item row" "$f" 'data-todo="2026-05-03-someday" data-state="open"'
-  assert_file_has "status: someday collapses via details" "$f" '<details class="bucket"><summary><h3 data-bucket="someday">'
+  assert_file_has "status: someday collapses via details" "$f" '<details class="lane" id="lane-someday"><summary><h2 data-bucket="someday">'
   assert_file_has "status: unrecognized status falls back to ready" "$f" 'data-todo="2026-05-05-bogus-status" data-state="open"'
   assert_file_has "status: waiting count tile" "$f" 'data-count="waiting">1<'
   assert_file_has "status: someday count tile" "$f" 'data-count="someday">1<'
@@ -915,7 +915,7 @@ depends_on:
 ---
 EOF
   render "$repo" "$sr" --out "$f" >/dev/null
-  assert_file_has "status: blocked overrides waiting status" "$f" '<h3 data-bucket="blocked">Blocked'
+  assert_file_has "status: blocked overrides waiting status" "$f" '<h2 data-bucket="blocked">Blocked'
   assert_file_has "status: precedence row is blocked" "$f" 'data-todo="2026-05-02-precedence" data-state="blocked"'
   assert_file_lacks "status: precedence row not also in waiting" "$f" 'data-bucket="waiting"'
   ok "status: computed state overrides manual status"
@@ -952,10 +952,10 @@ EOF
   assert_file_has "status: completed status sorts in-flight, not ready" "$f" \
     'data-todo="2026-05-01-completed-not-merged" data-state="open" data-task-status="completed"'
   assert_file_lacks "status: completed status is not someday despite the field" "$f" \
-    '<details class="bucket"><summary><h3 data-bucket="someday">'
+    'id="lane-someday"'
   assert_file_has "status: in-progress status sorts in-flight despite waiting field" "$f" \
     'data-todo="2026-05-02-in-progress" data-state="open" data-task-status="in-progress"'
-  assert_file_has "status: in-flight heading covers both" "$f" '<h3 data-bucket="in-flight">In flight <span class="bucket-count">2</span></h3>'
+  assert_file_has "status: in-flight heading covers both" "$f" '<h2 data-bucket="in-flight">In flight <span class="bucket-count">2</span></h2>'
   ok "status: herdr status overrides Ready and Someday/Waiting"
   rm_fixture "$repo" "$sr"
 }
@@ -1012,11 +1012,11 @@ Done and dusted.
 EOF
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_eq "prd: exit 0" "$(rc)" "0"
-  assert_file_has "prd: open row gets a full-width details row" "$f" \
-    '<tr class="prd-row" data-prd="2026-05-08-render-me"><td colspan="5"><details class="prd" id="prd-2026-05-08-render-me"><summary>PRD</summary>'
-  assert_file_has "prd: completed row gets a details row" "$f" \
-    '<tr class="prd-row" data-prd="2026-05-06-shipped"><td colspan="4"><details class="prd" id="prd-2026-05-06-shipped"><summary>PRD</summary>'
-  assert_file_has "prd: preamble and section heading" "$f" '<p>Preamble line.</p><h4>Problem</h4>'
+  assert_file_has "prd: open todo gets a modal" "$f" \
+    '<div class="modal" id="todo-2026-05-08-render-me" data-modal="2026-05-08-render-me" role="dialog" aria-labelledby="title-2026-05-08-render-me"><a class="backdrop" href="#board" tabindex="-1" aria-hidden="true"></a><article class="sheet" tabindex="-1">'
+  assert_file_has "prd: completed todo gets a modal" "$f" \
+    '<div class="modal" id="todo-2026-05-06-shipped" data-modal="2026-05-06-shipped" role="dialog"'
+  assert_file_has "prd: preamble and section heading open the modal body" "$f" '<div class="prd"><p>Preamble line.</p><h4>Problem</h4>'
   assert_file_has "prd: paragraph join, inline code, bold, link, bare URL" "$f" \
     '<p>First line continues with <code>code &lt;b&gt;</code> and <strong>bold</strong> and <a href="https://example.com/a?b=1&amp;c=2">docs</a>. See <a href="https://example.com/x">https://example.com/x</a>.</p>'
   assert_file_has "prd: flattened list with depth and literal number" "$f" \
@@ -1093,6 +1093,219 @@ PY
   rm_fixture "$d"
 }
 test_herdr_lookup
+
+# between <file> <start> <end> -> the text from start up to (not including) end
+between() {
+  python3 -c 'import sys; t = open(sys.argv[1]).read(); a = t.index(sys.argv[2]); print(t[a:t.index(sys.argv[3], a)])' "$1" "$2" "$3"
+}
+
+test_cards() {
+  local repo sr f main modal long
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-01-summary <<'EOF'
+---
+created: 2026-05-01
+title: Summary card
+---
+
+## Problem
+
+The `todos.sh serve` board from [PR #237](https://github.com/Org/Repo/pull/237)
+is **hard** to scan. Secondzebra sentence stays in the modal.
+
+## Solution
+
+Solutionyak text.
+EOF
+  long=$(python3 -c 'print(" ".join(["word"] * 70) + ".")')
+  mk_todo "$repo" pending 2026-05-02-long <<EOF
+---
+created: 2026-05-02
+title: Long summary
+---
+
+## Problem
+
+$long
+EOF
+  mk_todo "$repo" pending 2026-05-03-later <<'EOF'
+---
+created: 2026-05-03
+title: Someday card
+status: someday
+---
+EOF
+  mk_todo "$repo" completed 2026-05-04-done <<'EOF'
+---
+created: 2026-05-04
+title: Done card
+---
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "cards: exit 0" "$(rc)" "0"
+  main=$(between "$f" '<main>' '</main>')
+  assert_contains "cards: card links to its modal" "$main" \
+    '<li><a class="card" href="#todo-2026-05-01-summary" data-todo="2026-05-01-summary" data-state="open" data-task-status=""><span class="card-title">Summary card</span>'
+  assert_contains "cards: summary is the first sentence, markup stripped" "$main" \
+    '<span class="card-summary">The todos.sh serve board from PR #237 is hard to scan.</span>'
+  assert_missing "cards: no second sentence on the board" "$main" 'Secondzebra'
+  assert_missing "cards: no Solution text on the board" "$main" 'Solutionyak'
+  modal=$(between "$f" '<div class="modal" id="todo-2026-05-01-summary"' '</article></div>')
+  assert_contains "cards: modal holds the second sentence" "$modal" 'Secondzebra'
+  assert_contains "cards: modal holds the Solution" "$modal" 'Solutionyak'
+  assert_eq "cards: long summary cut to at most 220 with the suffix" "$(printf '%s' "$main" | python3 -c '
+import re, sys
+s = re.search(r"data-todo=\"2026-05-02-long\".*?card-summary\">([^<]*)<", sys.stdin.read()).group(1)
+print(len(s) <= 220, s.endswith("word..."))')" "True True"
+  assert_eq "cards: lanes in order ready, someday, done, then research" "$(python3 - "$f" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+keys = ['data-bucket="ready"', 'data-bucket="someday"', 'data-bucket="done"', 'id="research"']
+pos = [t.find(k) for k in keys]
+print(-1 not in pos and pos == sorted(pos))
+PY
+)" "True"
+  assert_file_has "cards: someday lane collapsed" "$f" '<details class="lane" id="lane-someday"><summary>'
+  assert_file_has "cards: done lane collapsed by default" "$f" \
+    '<details class="lane" id="lane-done"><summary><h2 data-bucket="done">Recently done <span class="bucket-count">1</span></h2>'
+  assert_file_has "cards: completed card has no data-state" "$f" \
+    '<a class="card" href="#todo-2026-05-04-done" data-todo="2026-05-04-done" data-task-status="">'
+  assert_file_has "cards: count pill links to its lane" "$f" '<a href="#lane-ready"><b data-count="ready">2</b> ready</a>'
+  assert_file_lacks "cards: no element is the #board target" "$f" 'id="board"'
+  rm_fixture "$repo" "$sr"
+}
+test_cards
+
+test_badges_and_facts() {
+  local repo sr f main slug tasks
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-prio <<'EOF'
+---
+created: 2026-05-01
+title: Odd priority
+priority: medium
+area: store
+due: 2026-05-01
+files:
+  - claude/x.py
+---
+EOF
+  mk_todo "$repo" pending 2026-05-02-due <<'EOF'
+---
+created: 2026-05-02
+title: Due later
+priority: high
+due: 2026-06-01
+---
+EOF
+  mk_todo "$repo" pending 2026-05-03-surface <<'EOF'
+---
+created: 2026-05-03
+title: Surfaces later
+surface: 2026-06-01
+---
+EOF
+  mk_todo "$repo" pending 2026-05-04-past <<'EOF'
+---
+created: 2026-05-04
+title: Surfaced already
+surface: 2026-05-01
+---
+EOF
+  mk_todo "$repo" pending 2026-05-05-two-deps <<'EOF'
+---
+created: 2026-05-05
+title: Two deps
+depends_on:
+  - todo:2026-05-01-prio
+  - todo:2026-05-02-due
+---
+EOF
+  mk_todo "$repo" completed 2026-04-30-shipped <<'EOF'
+---
+created: 2026-04-30
+title: Shipped
+---
+EOF
+  mk_todo "$repo" pending 2026-05-06-met <<'EOF'
+---
+created: 2026-05-06
+title: Deps met
+depends_on:
+  - todo:2026-04-30-shipped
+---
+EOF
+  mk_todo "$repo" pending 2026-05-07-flying <<'EOF'
+---
+created: 2026-05-07
+title: Flying
+---
+EOF
+  printf '{"status":"in-progress","workers":[{"phase":"implement","agent":"impl-a"}]}' >"$tasks/2026-05-07-flying.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "badges: exit 0" "$(rc)" "0"
+  main=$(between "$f" '<main>' '</main>')
+  assert_contains "badges: unknown priority is prio-other" "$main" '<span class="badge prio-other">medium</span>'
+  assert_contains "badges: area" "$main" '<span class="badge area">store</span>'
+  assert_contains "badges: due before today is overdue" "$main" '<span class="badge overdue">due 2026-05-01</span>'
+  assert_contains "badges: due after today" "$main" '<span class="badge due">due 2026-06-01</span>'
+  assert_contains "badges: high priority" "$main" '<span class="badge prio-high">high</span>'
+  assert_contains "badges: future surface date" "$main" '<span class="badge surface">surfaces 2026-06-01</span>'
+  assert_missing "badges: past surface date has no badge" "$main" 'surfaces 2026-05-01'
+  assert_contains "badges: unmet dependencies" "$main" '<span class="badge blocked">blocked by 2</span>'
+  assert_contains "badges: met dependencies" "$main" '<span class="badge deps-ok">1 deps met</span>'
+  assert_contains "badges: in flight with phase" "$main" '<span class="badge in-flight">in flight - implement</span>'
+  assert_contains "badges: high priority card edge" "$main" 'data-todo="2026-05-02-due" data-state="open" data-task-status="" data-priority="high">'
+  assert_file_has "facts: todo dependency links to its modal" "$f" '<a href="#todo-2026-05-01-prio">todo:2026-05-01-prio (open)</a>'
+  assert_file_has "facts: files listed" "$f" '<h3>Files</h3><ul><li class="mono">claude/x.py</li></ul>'
+  assert_file_has "facts: static page shows the id" "$f" '<h3>Id</h3><div class="mono">2026-05-01-prio</div>'
+  assert_file_has "facts: dates" "$f" '<h3>Dates</h3><ul><li>created 2026-05-01</li><li>due 2026-05-01</li></ul>'
+  rm_fixture "$repo" "$sr"
+}
+test_badges_and_facts
+
+test_bare_id_record() {
+  local repo sr f slug tasks
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-bare <<'EOF'
+---
+created: 2026-05-01
+title: Bare record
+---
+EOF
+  mk_todo "$repo" pending 2026-05-02-both <<'EOF'
+---
+created: 2026-05-02
+title: Both records
+---
+EOF
+  mk_todo "$repo" pending 2026-05-03-ready <<'EOF'
+---
+created: 2026-05-03
+title: Ready
+---
+EOF
+  printf '{"status":"in-progress","workers":[{"phase":"plan","agent":"plan-a"}]}' >"$tasks/2026-05-01-bare.json"
+  printf '{"status":"review-dispatched","workers":[{"phase":"review","agent":"rev-a"}]}' >"$tasks/2026-05-02-both.json"
+  printf '{"status":"merged","workers":[{"phase":"review","agent":"rev-a"}]}' >"$tasks/td-2026-05-02-both.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "bare id: exit 0" "$(rc)" "0"
+  assert_file_has "bare id: record read without the td- prefix" "$f" \
+    'data-todo="2026-05-01-bare" data-state="open" data-task-status="in-progress"'
+  assert_file_has "bare id: wins over a td- record" "$f" \
+    'data-todo="2026-05-02-both" data-state="open" data-task-status="review-dispatched"'
+  assert_file_has "bare id: both sort in flight" "$f" '<h2 data-bucket="in-flight">In flight <span class="bucket-count">2</span></h2>'
+  assert_eq "bare id: in flight lane comes before ready" "$(python3 - "$f" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+print(0 <= t.find('data-bucket="in-flight"') < t.find('data-bucket="ready"'))
+PY
+)" "True"
+  rm_fixture "$repo" "$sr"
+}
+test_bare_id_record
 
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

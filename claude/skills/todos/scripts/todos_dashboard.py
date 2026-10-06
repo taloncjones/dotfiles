@@ -47,9 +47,9 @@ PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
 # herdr) always wins over the manual `status:` field, since it reflects
 # ground truth the field can go stale against. `status: waiting` / `someday`
 # only sort a todo that is neither blocked nor in-flight.
-BUCKET_ORDER = ("ready", "in-flight", "blocked", "waiting", "someday")
-BUCKET_LABELS = {"ready": "Ready", "in-flight": "In flight", "blocked": "Blocked",
-                  "waiting": "Waiting", "someday": "Someday"}
+BUCKET_ORDER = ("in-flight", "ready", "blocked", "waiting", "someday")
+BUCKET_LABELS = {"in-flight": "In flight", "ready": "Ready", "blocked": "Blocked",
+                 "waiting": "Waiting", "someday": "Someday", "done": "Recently done"}
 
 
 def die(msg):
@@ -1163,7 +1163,6 @@ def chip(text, cls=""):
     # cls is always a literal from this file, never user data; escaped anyway.
     return f'<span class="chip {esc(cls)}">{esc(text)}</span>' if text else ""
 
-
 def render_herdr(h):
     if h is None:
         return ""
@@ -1191,11 +1190,6 @@ def render_herdr(h):
         parts.append(f'<div class="sub">done {esc(h["done_outcome"])} {esc(h["done_phase"])}{stale}</div>')
     return "".join(parts)
 
-
-def render_links(links):
-    return " ".join(f'<a href="{esc(u)}">{esc(label)}</a>' for label, u in links)
-
-
 def note_form(t, section, token):
     """Served pages only: append a note to one section (todos.sh note)."""
     return ('<form class="note" method="post" action="/note">'
@@ -1206,22 +1200,6 @@ def note_form(t, section, token):
             f'<label for="note-{esc(t["basename"])}-{esc(section)}">Add a note to {esc(section)}</label>'
             f'<textarea id="note-{esc(t["basename"])}-{esc(section)}" name="note" rows="3" required></textarea>'
             '<button type="submit">Add note</button></form>')
-
-
-def render_prd_row(t, ncols, edit=None):
-    """The full-width row under a todo: its rendered body in a <details>.
-
-    edit is None for the static page and for completed todos; on a served
-    page it is {"token", "open"} and each note section gets a form.
-    """
-    def forms(name):
-        return note_form(t, name, edit["token"]) if name in NOTE_SECTIONS else ""
-
-    is_open = " open" if edit and edit["open"] == t["basename"] else ""
-    body = render_body(t["text"], forms if edit else None)
-    return (f'<tr class="prd-row" data-prd="{esc(t["basename"])}"><td colspan="{ncols}">'
-            f'<details class="prd" id="prd-{esc(t["basename"])}"{is_open}><summary>PRD</summary>'
-            f'<div class="prd-body">{body}</div></details></td></tr>')
 
 
 # Same rule as TODO_ID_RE in todos.sh; \Z so a trailing newline cannot pass.
@@ -1238,21 +1216,6 @@ def copy_chips(basename):
         f'<button type="button" class="copy" data-copy="{esc(cmd)}" title="Copy: {esc(cmd)}">{esc(label)}</button>'
         for label, cmd in items)
     return f'<div class="copy-chips">{buttons}</div>'
-
-
-def render_todo_cell(t, served=False):
-    prio_cls = f"prio-{t['priority']}" if t["priority"] in PRIORITY_WEIGHT else ""
-    chips = [chip(t["area"]), chip(t["priority"], prio_cls),
-             chip(t["maturity"]), chip(t["tier"])]
-    chips = "".join(c for c in chips if c)
-    id_line = (copy_chips(t["basename"]) if served
-               else f'<div class="sub mono">{esc(t["basename"])}</div>')
-    out = [f'<div class="name">{esc(t["title"])}</div>', id_line]
-    if t["summary"]:
-        out.append(f'<div class="sub">{esc(t["summary"])}</div>')
-    if chips:
-        out.append(f'<div class="chips">{chips}</div>')
-    return "".join(out)
 
 
 def open_bucket(t):
@@ -1273,65 +1236,153 @@ def open_bucket(t):
     return "ready"
 
 
-def render_open_table(todos, edit=None):
-    rows = []
-    for t in todos:
-        state = "blocked" if t["blocked"] else "open"
-        status = t["herdr"]["status"] if t["herdr"] else ""
-        deps = "".join(
-            f'<span class="dep {"ok" if s in SATISFIED else "bad"} mono">{esc(r)} ({esc(s)})</span>'
-            for r, s in t["deps"])
-        dates = esc(t["created"]) + (f'<br>due {esc(t["due"])}' if t["due"] else "")
-        rows.append(
-            f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
-            f'data-state="{state}" data-task-status="{esc(status)}">'
-            f'<td>{render_todo_cell(t, edit is not None)}</td><td class="dates">{dates}</td>'
-            f'<td>{deps}</td><td>{render_herdr(t["herdr"])}</td>'
-            f'<td>{render_links(t["links"])}</td></tr>'
-            + render_prd_row(t, 5, edit))
-    return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created / due</th>'
-            '<th>Depends on</th><th>Herdr</th><th>Links</th></tr></thead><tbody>'
-            + "".join(rows) + "</tbody></table></div>")
+def badge(text, cls):
+    # cls is always a literal from this file, never user data; escaped anyway.
+    return f'<span class="badge {esc(cls)}">{esc(text)}</span>'
 
 
-def render_open(todos, edit=None):
-    if not todos:
-        return '<p class="empty">No open todos.</p>'
-    grouped = {b: [] for b in BUCKET_ORDER}
-    for t in todos:
+def herdr_badge(t, pending):
+    h = t["herdr"]
+    if h is None:
+        return ""
+    if pending and h["status"] in IN_FLIGHT_STATUSES:
+        return badge("in flight" + (f" - {h['phase']}" if h["phase"] else ""), "in-flight")
+    if h["status"] == "merged":
+        return badge("merged", "merged")
+    if h["status"] == "unreadable":
+        return badge("herdr unreadable", "unreadable")
+    return ""
+
+
+def deps_badge(t, pending):
+    if not pending or not t["deps"]:
+        return ""
+    unmet = sum(1 for _, state in t["deps"] if state not in SATISFIED)
+    if unmet:
+        return badge(f"blocked by {unmet}", "blocked")
+    return badge(f"{len(t['deps'])} deps met", "deps-ok")
+
+
+def date_badge(t):
+    if t["due"]:
+        return badge(f"due {t['due']}", "overdue" if t["due"] < today() else "due")
+    if t["surface"] and t["surface"] > today():
+        return badge(f"surfaces {t['surface']}", "surface")
+    return ""
+
+
+def card_badges(t, pending):
+    prio = t["priority"]
+    parts = [herdr_badge(t, pending), deps_badge(t, pending),
+             badge(prio, f"prio-{prio}" if prio in PRIORITY_WEIGHT else "prio-other") if prio else "",
+             badge(t["area"], "area") if t["area"] else "",
+             date_badge(t)]
+    return f'<span class="badges">{"".join(parts)}</span>'
+
+
+def render_card(t, pending):
+    status = t["herdr"]["status"] if t["herdr"] else ""
+    state = f' data-state="{"blocked" if t["blocked"] else "open"}"' if pending else ""
+    prio = f' data-priority="{t["priority"]}"' if t["priority"] in PRIORITY_WEIGHT else ""
+    summary = f'<span class="card-summary">{esc(t["summary"])}</span>' if t["summary"] else ""
+    return (f'<li><a class="card" href="#todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}"'
+            f'{state} data-task-status="{esc(status)}"{prio}>'
+            f'<span class="card-title">{esc(t["title"])}</span>{summary}'
+            f'{card_badges(t, pending)}</a></li>')
+
+
+def render_lane(key, todos, pending, collapsed, opened=False):
+    heading = (f'<h2 data-bucket="{key}">{esc(BUCKET_LABELS[key])} '
+               f'<span class="bucket-count">{len(todos)}</span></h2>')
+    cards = '<ul class="cards">' + "".join(render_card(t, pending) for t in todos) + "</ul>"
+    if collapsed:
+        is_open = " open" if opened else ""
+        return f'<details class="lane" id="lane-{key}"{is_open}><summary>{heading}</summary>{cards}</details>'
+    return f'<section class="lane" id="lane-{key}">{heading}{cards}</section>'
+
+
+def render_counts(open_todos):
+    # Each todo counts once, in the bucket open_bucket gives it.
+    buckets = [open_bucket(t) for t in open_todos]
+    pills = [f'<span><b data-count="open">{len(open_todos)}</b> open</span>']
+    for key in BUCKET_ORDER:
+        pills.append(f'<a href="#lane-{key}"><b data-count="{key}">{buckets.count(key)}</b> '
+                     f'{esc(BUCKET_LABELS[key].lower())}</a>')
+    return f'<nav class="counts" aria-label="Lanes">{"".join(pills)}</nav>'
+
+
+def render_deps(t, on_page):
+    items = []
+    for ref, state in t["deps"]:
+        label = f"{esc(ref)} ({esc(state)})"
+        target = ref[len("todo:"):] if ref.startswith("todo:") else ""
+        if target in on_page:
+            label = f'<a href="#todo-{esc(target)}">{label}</a>'
+        items.append(f'<li class="dep {"ok" if state in SATISFIED else "bad"} mono">{label}</li>')
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def render_facts(t, pending, edit, on_page):
+    out = []
+    chips = copy_chips(t["basename"]) if edit is not None and pending else ""
+    if chips:
+        out.append("<h3>Copy</h3>" + chips)
+    else:
+        out.append(f'<h3>Id</h3><div class="mono">{esc(t["basename"])}</div>')
+    dates = [f"{label} {t[key]}" for label, key in (("created", "created"), ("due", "due"),
+                                                     ("surfaces", "surface")) if t[key]]
+    if dates:
+        out.append("<h3>Dates</h3><ul>" + "".join(f"<li>{esc(d)}</li>" for d in dates) + "</ul>")
+    level = " / ".join(x for x in (t["maturity"], t["tier"]) if x)
+    if level:
+        out.append(f"<h3>Maturity / tier</h3><div>{esc(level)}</div>")
+    if t["deps"]:
+        out.append("<h3>Depends on</h3>" + render_deps(t, on_page))
+    if t["herdr"]:
+        out.append("<h3>Herdr</h3>" + render_herdr(t["herdr"]))
+    if t["files"]:
+        out.append("<h3>Files</h3><ul>" + "".join(f'<li class="mono">{esc(f)}</li>' for f in t["files"]) + "</ul>")
+    if t["links"]:
+        out.append("<h3>Links</h3><ul>" + "".join(
+            f'<li><a href="{esc(u)}">{esc(label)}</a></li>' for label, u in t["links"]) + "</ul>")
+    return "".join(out)
+
+
+def render_modal(t, pending, edit, on_page):
+    """One todo's details, shown by CSS :target when the URL is #todo-<id>.
+
+    edit is None on the static page; on a served page it is {"token", ...}
+    and a pending todo gets a note form after each note section.
+    """
+    def forms(name):
+        return note_form(t, name, edit["token"]) if name in NOTE_SECTIONS else ""
+
+    bid = esc(t["basename"])
+    body = render_body(t["text"], forms if edit is not None and pending else None)
+    return (f'<div class="modal" id="todo-{bid}" data-modal="{bid}" role="dialog" aria-labelledby="title-{bid}">'
+            '<a class="backdrop" href="#board" tabindex="-1" aria-hidden="true"></a>'
+            '<article class="sheet" tabindex="-1"><header class="sheet-head">'
+            f'<h2 id="title-{bid}">{esc(t["title"])}</h2>'
+            '<a class="close" href="#board" aria-label="Close">&times;</a>'
+            f'{card_badges(t, pending)}</header>'
+            f'<div class="sheet-body"><div class="prd">{body}</div>'
+            f'<aside class="facts">{render_facts(t, pending, edit, on_page)}</aside></div>'
+            "</article></div>")
+
+
+def render_lanes(open_todos, completed, show_completed, edit):
+    grouped = {key: [] for key in BUCKET_ORDER}
+    for t in open_todos:
         grouped[open_bucket(t)].append(t)
-    sections = []
-    for bucket in BUCKET_ORDER:
-        items = grouped[bucket]
-        if not items:
-            continue
-        heading = (f'<h3 data-bucket="{bucket}">{esc(BUCKET_LABELS[bucket])} '
-                   f'<span class="bucket-count">{len(items)}</span></h3>')
-        table = render_open_table(items, edit)
-        if bucket == "someday":
-            # A native, JS-free collapse -- someday items are real but not
-            # meant to compete for attention with what is actionable now.
-            sections.append(f'<details class="bucket"><summary>{heading}</summary>{table}</details>')
-        else:
-            sections.append(f'<div class="bucket">{heading}{table}</div>')
-    return "".join(sections)
-
-
-def render_completed(todos):
-    if not todos:
-        return '<p class="empty">Nothing completed yet.</p>'
-    rows = []
-    for t in todos:
-        status = t["herdr"]["status"] if t["herdr"] else ""
-        rows.append(
-            f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
-            f'data-task-status="{esc(status)}">'
-            f'<td>{render_todo_cell(t)}</td><td class="dates">{esc(t["created"])}</td>'
-            f'<td>{render_herdr(t["herdr"])}</td><td>{render_links(t["links"])}</td></tr>'
-            + render_prd_row(t, 4))
-    return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created</th>'
-            '<th>Herdr</th><th>Links</th></tr></thead><tbody>'
-            + "".join(rows) + "</tbody></table></div>")
+    lanes = [render_lane(key, grouped[key], True, key == "someday")
+             for key in BUCKET_ORDER if grouped[key]]
+    if not open_todos:
+        lanes.append('<p class="empty">No open todos.</p>')
+    if show_completed and completed:
+        view = edit["view"] if edit else {}
+        searching = any(view.get(k) for k in ("q", "area", "priority"))
+        lanes.append(render_lane("done", completed, False, True, searching))
+    return "".join(lanes)
 
 
 def render_research(entries):
@@ -1398,24 +1449,16 @@ def render_filters(view, todos, token, shown, total):
 
 def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed,
                 edit=None, filters=""):
-    # Every tile derives from open_bucket, which is mutually exclusive per
-    # todo (blocked wins over in-flight): a todo that is both dependency-
-    # blocked and herdr-in-flight must count once, in Blocked, not in both
-    # tiles.
-    n_open = len(open_todos)
-    n_blocked = sum(1 for t in open_todos if open_bucket(t) == "blocked")
-    n_flight = sum(1 for t in open_todos if open_bucket(t) == "in-flight")
-    n_waiting = sum(1 for t in open_todos if open_bucket(t) == "waiting")
-    n_someday = sum(1 for t in open_todos if open_bucket(t) == "someday")
     if edit is None:
         how = "Static page: rerun <span class=\"mono\">todos.sh dashboard</span> and reload to refresh."
     else:
         how = ("Served by <span class=\"mono\">todos.sh serve</span>: reload to refresh; "
                "notes are appended to the todo file.")
+    shown_completed = completed if show_completed else []
+    on_page = {t["basename"] for t in open_todos} | {t["basename"] for t in shown_completed}
+    modals = ("".join(render_modal(t, True, edit, on_page) for t in open_todos)
+              + "".join(render_modal(t, False, edit, on_page) for t in shown_completed))
     script = f"<script>{BOARD_JS}</script>" if edit is not None else ""
-    completed_html = ""
-    if show_completed:
-        completed_html = "<h2>Completed</h2>" + render_completed(completed)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1425,25 +1468,19 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 <style>{CSS}</style>
 </head>
 <body>
-<main>
-<h1>{esc(repo_name)} board</h1>
-<div class="meta">generated {esc(stamp)} on <span class="mono">{esc(branch)}</span>.
-{how}</div>
-<div class="counts">
-<div><b data-count="open">{n_open}</b><span>open</span></div>
-<div><b data-count="blocked">{n_blocked}</b><span>blocked</span></div>
-<div><b data-count="in-flight">{n_flight}</b><span>in-flight</span></div>
-<div><b data-count="waiting">{n_waiting}</b><span>waiting</span></div>
-<div><b data-count="someday">{n_someday}</b><span>someday</span></div>
-</div>
-<h2>Open</h2>
+<header class="top"><div class="top-inner">
+<div class="top-row"><h1>{esc(repo_name)} board</h1>
+<span class="meta">generated {esc(stamp)} on <span class="mono">{esc(branch)}</span>. {how}</span>
+{render_counts(open_todos)}</div>
 {filters}
-{render_open(open_todos, edit)}
-{completed_html}
-<h2>Research</h2>
-{render_research(research)}
-{script}
+</div></header>
+<main>
+{render_lanes(open_todos, completed, show_completed, edit)}
+<section class="lane" id="research"><h2>Research <span class="bucket-count">{len(research)}</span></h2>
+{render_research(research)}</section>
 </main>
+<div class="modals">{modals}</div>
+{script}
 </body>
 </html>
 """
@@ -1611,7 +1648,7 @@ def board_context(args):
 
 
 def build_page(ctx, args, edit=None):
-    """Read the board fresh and render it; edit as in render_prd_row, plus,
+    """Read the board fresh and render it; edit as in render_modal, plus,
     on a served page, edit["view"]: the filter form's q, area, priority, sort."""
     root, todos_dir = ctx["root"], ctx["todos_dir"]
     _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
