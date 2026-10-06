@@ -19,8 +19,8 @@ is the staging tier, not an archive.
 
 - (2026-09) Bind headless workers, reviewers and probes to an explicit clean env
   and account: inherited settings outlive the config change they predate.
-- (2026-09) Shell variables: zsh does not word-split unquoted expansions and
-  uses `pipestatus`; rm/git-meta guards reject them -- pass literal paths.
+- (2026-10) zsh: unquoted vars do not word-split, `$v:h` is a modifier (write
+  `${v}:h`), use `pipestatus`; rm/git guards reject vars -- pass literal paths.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
 - (2026-09) Never emit an identifier from memory, or one an earlier edit moved:
@@ -37,7 +37,8 @@ is the staging tier, not an archive.
   action, say you are blocked once, and wait instead of restating.
 - (2026-09) Verify external CLI syntax against its help/docs before writing it
   into a skill: unverified gh fields and flag combinations shipped broken.
-- (2026-09) Run suites to a file, then grep it: pipes hide failures and stderr.
+- (2026-10) Run suites one at a time, to a file, then grep it; size the wait
+  from `timeout_secs`. Concurrent suites flake; pipes hide failures and stderr.
 - (2026-09) Settle a factual review dispute by executing the case, not by rank.
 - (2026-09) Bound a reviewer by its diff, not a fixed clock: a live reviewer
   past a static deadline is re-sized or waited on, never interrupted and re-run.
@@ -49,10 +50,8 @@ is the staging tier, not an archive.
   write "substitute seat" or "work config" up front, not after a block.
 - (2026-09) A contract pinned before a long-lived branch ships goes stale when
   main moves: after any main merge re-run the whole gate, never one check.
-- (2026-09) Re-run CI, lint and format checks and re-read the head before
-  finalizing every review round; a prior round's clean result is not evidence.
-- (2026-09) Re-derive the scope of any finding carried from an earlier round; a
-  prior "unreachable" can hide a real gap at the same site.
+- (2026-10) Each review round re-runs CI, lint and format, re-reads the head and
+  re-derives any carried finding's scope; prior results are not evidence.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
 - (2026-09) Never brief a Claude substitute on a recorded Codex quota premise:
@@ -67,4 +66,5 @@ is the staging tier, not an archive.
   or a detached worktree); a partial `cp` misses the files a test imports.
 - (2026-10) Re-grep anchors after a Markdown Write/Edit: the formatter reflows.
 - (2026-10) Never pass `-c commit.gpgsign=false`; a locked signer means pause.
-- (2026-10) Size a background wait from the contract's `timeout_secs`.
+- (2026-10) Read a script's usage before passing it `--help`: some run the
+  whole suite, and `todos.sh new --help` filed a todo titled --help.
