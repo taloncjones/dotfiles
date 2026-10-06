@@ -1172,6 +1172,9 @@ PY
     '<a class="card" href="#todo-2026-05-04-done" data-todo="2026-05-04-done" data-task-status="">'
   assert_file_has "cards: count pill links to its lane" "$f" '<a href="#lane-ready"><b data-count="ready">2</b> ready</a>'
   assert_file_lacks "cards: no element is the #board target" "$f" 'id="board"'
+  assert_file_has "cards: modal shown by :target" "$f" '.modal:target { display: block; }'
+  assert_file_has "cards: page stops scrolling under a modal" "$f" 'body:has(.modal:target) { overflow: hidden; }'
+  assert_file_has "cards: modal text wraps long tokens" "$f" '.prd, .facts { overflow-wrap: anywhere; }'
   rm_fixture "$repo" "$sr"
 }
 test_cards
