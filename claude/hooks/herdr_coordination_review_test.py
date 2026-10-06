@@ -538,6 +538,133 @@ class ReviewRegressions(unittest.TestCase):
         with self.assertRaises((ValueError, OSError)):
             core.append_payload(fifo, b"private")
 
+    def test_bound_repo_id_reads_the_registry_binding(self):
+        self.assertIsNone(coordination.bound_repo_id("repo"))
+        self.claim()
+        self.assertEqual(coordination.bound_repo_id("repo"), "canonical")
+        self.assertIsNone(coordination.bound_repo_id("unbound"))
+        self.assertIsNone(coordination.bound_repo_id(None))
+        (coordination.coordination_root() / "bindings.json").write_text("not json")
+        self.assertIsNone(coordination.bound_repo_id("repo"))
+
+    def test_plan_artifacts_fall_back_to_the_correlated_plan_completion(self):
+        self.claim()
+        account = self.root / "account"
+        launch = account / "herdr-orch/repo/artifacts/td-a/L1"
+        launch.mkdir(parents=True)
+        refs = []
+        for kind in ("spec", "plan"):
+            path = launch / f"{kind}.md"
+            path.write_text(f"reviewed {kind}\n")
+            refs.append(
+                {
+                    "kind": kind,
+                    "path": str(path),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        head = "a" * 40
+        row = {
+            "phase": "plan",
+            "runtime": "claude",
+            "launch_id": "L1",
+            "workspace_id": "w1",
+            "pane_id": "w1:p1",
+            "source_head_sha": head,
+        }
+        task = {"task_id": "td-a", "repo_slug": "repo", "base_sha": head, "workers": [row]}
+        done = dict(
+            row,
+            task_id="td-a",
+            outcome="completed",
+            head_sha=head,
+            base_sha=head,
+            plan_artifacts=refs,
+        )
+        self.assertTrue(core.is_plan_completed(task, done, head, "w1", account))
+        self.assertTrue(
+            core.is_plan_completed(dict(task, plan_artifacts=None), done, head, "w1", account)
+        )
+        self.assertTrue(
+            core.is_plan_completed(dict(task, plan_artifacts=refs), done, head, "w1", account)
+        )
+        disagreeing = json.loads(json.dumps(refs))
+        disagreeing[1]["sha256"] = "0" * 64
+        self.assertFalse(
+            core.is_plan_completed(
+                dict(task, plan_artifacts=disagreeing), done, head, "w1", account
+            )
+        )
+        self.assertFalse(
+            core.is_plan_completed(dict(task, plan_artifacts=[]), done, head, "w1", account)
+        )
+        no_refs = {key: value for key, value in done.items() if key != "plan_artifacts"}
+        self.assertFalse(core.is_plan_completed(task, no_refs, head, "w1", account))
+        self.assertFalse(
+            core.is_plan_completed(task, dict(done, plan_artifacts=refs[:1]), head, "w1", account)
+        )
+        self.assertFalse(
+            core.is_plan_completed(task, dict(done, launch_id="L0"), head, "w1", account)
+        )
+        self.assertFalse(
+            core.is_plan_completed(task, dict(done, phase="implement"), head, "w1", account)
+        )
+        plan = Path(refs[1]["path"])
+        plan.write_text("unreviewed\n")
+        self.assertFalse(core.is_plan_completed(task, done, head, "w1", account))
+
+    def test_missing_task_repo_id_uses_the_registry_binding(self):
+        self.claim()
+        account = self.root / "account"
+        launch = account / "herdr-orch/repo/artifacts/td-a/L1"
+        launch.mkdir(parents=True)
+        metadata = {
+            "task_id": "td-a",
+            "repo_id": "canonical",
+            "account_id": coordination.account_id_for_root(account),
+        }
+        refs = []
+        for kind in ("spec", "plan"):
+            path = launch / f"{kind}.md"
+            path.write_text(f"reviewed {kind}\n")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            refs.append(
+                {
+                    "kind": kind,
+                    "path": str(path),
+                    "sha256": digest,
+                    "source": {"repo_id": "canonical", "sha256": digest},
+                    "task": metadata,
+                }
+            )
+        head = "a" * 40
+        row = {
+            "phase": "plan",
+            "runtime": "claude",
+            "launch_id": "L1",
+            "workspace_id": "w1",
+            "pane_id": "w1:p1",
+            "source_head_sha": head,
+        }
+        task = {"task_id": "td-a", "repo_slug": "repo", "base_sha": head, "workers": [row]}
+        done = dict(
+            row,
+            task_id="td-a",
+            outcome="completed",
+            head_sha=head,
+            base_sha=head,
+            plan_artifacts=refs,
+        )
+        self.assertTrue(core.is_plan_completed(task, done, head, "w1", account))
+        self.assertFalse(
+            core.is_plan_completed(dict(task, repo_id="other"), done, head, "w1", account)
+        )
+        registry = coordination.coordination_root() / "bindings.json"
+        registry.write_text("not json")
+        self.assertFalse(core.is_plan_completed(task, done, head, "w1", account))
+        registry.unlink()
+        self.assertFalse(core.is_plan_completed(task, done, head, "w1", account))
+
     def test_plan_artifacts_belong_to_current_task_and_one_launch_directory(self):
         account = self.root / "account"
         for task_id, suffix in (

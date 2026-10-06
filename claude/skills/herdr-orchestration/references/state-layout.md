@@ -633,6 +633,12 @@ exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.
 `confirm-plan` verifies hashes, selected payload containment, and current
 attempt identity. It does not require HEAD ahead of base. Implementation
 completion requires its own current HEAD/base/contract gates.
+When the task record has no `plan_artifacts` (absent or null), `confirm-plan`
+and check-in verify the correlated plan completion's list instead, with the
+same checks. Without a pinned payload selection, a task with no `repo_id`
+takes the slug's canonical `repo_id` from the coordination registry
+(`bindings.json`). An unbound or unreadable registry leaves `repo_id` unset,
+so refs that carry repository metadata (`task`, `source`) refuse.
 
 `peer_name` is the worker's Claude Code session name as `ListAgents` showed
 it after launch (dispatch-time discovery metadata, retained for
