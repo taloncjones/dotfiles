@@ -799,6 +799,8 @@ def schema() -> dict:
             "scenario": "nonempty reproduction or review scenario",
             "evidence": "nonempty supporting evidence",
             "impact": "nonempty for confirmed or unresolved critical, high, and major findings",
+            "category": "optional; structure for a Structure fit finding",
+            "proposed_layout": "optional; for a structure finding, what moves where",
         },
         "coverage": {"architecture": list(_AXES), "checklist": list(_CHECKLIST)},
         "report_example": {

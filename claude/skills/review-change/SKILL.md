@@ -24,7 +24,7 @@ if source and (not Path(source).is_absolute() or Path(source).name != "SKILL.md"
 root = Path(source).resolve(strict=True).parents[3] if source else (
     Path(fallback).expanduser().resolve(strict=True) if fallback else None
 )
-required = ("claude/hooks/agent_runtime.py", "claude/skills/lib/workflow_context.py")
+required = ("claude/hooks/agent_runtime.py", "claude/skills/lib/workflow_context.py", "claude/skills/co-review/references/failure-classes.md")
 if root is None or not all((root / name).is_file() for name in required):
     raise SystemExit("Installed review helpers are unavailable")
 print(root)
@@ -32,6 +32,7 @@ PYROOT
 ) || exit 2
 RUNNER="$REVIEW_ROOT/claude/hooks/agent_runtime.py"
 CONTEXT="$REVIEW_ROOT/claude/skills/lib/workflow_context.py"
+RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 ```
 
 Use the exact target worktree and a pinned base from the caller. Derive the full
@@ -72,7 +73,9 @@ if [ -n "${REVIEW_REPAIR_PACKET:-}" ]; then
 else
   REPAIR_PACKET_CONTENT="No repair packet supplied."
 fi
-printf '%s\n' "Review $REVIEW_REPO against pinned base $REVIEW_BASE. Intent: $REVIEW_INTENT. Inspect the full relevant diff and affected callers. Repair packet path: ${REVIEW_REPAIR_PACKET:-none}. Repair packet content: $REPAIR_PACKET_CONTENT. When supplied, verify its self-review, behavioral-regression and affected failure-path evidence; classify each new blocker as repair-introduced, previously missed, or changed requirements with a concrete consequence. Report blocking findings, useful advisory findings, safe reproduction evidence, and coverage gaps. Use relevant reference skills for language, security, framework and architecture guidance. Apply this review scope and material-impact threshold if reference guidance differs. Perform the review yourself; do not launch another review workflow, delegate reviewers, modify code or publish findings. Do not invoke co-review, partners, markers, external posts, or fixes." >"$PROMPT_FILE"
+printf '%s\n' "Review $REVIEW_REPO against pinned base $REVIEW_BASE. Intent: $REVIEW_INTENT. Inspect the full relevant diff and affected callers. Repair packet path: ${REVIEW_REPAIR_PACKET:-none}. Repair packet content: $REPAIR_PACKET_CONTENT. When supplied, verify its self-review, behavioral-regression and affected failure-path evidence; classify each new blocker as repair-introduced, previously missed, or changed requirements with a concrete consequence. Report blocking findings, useful advisory findings, safe reproduction evidence, and coverage gaps. Apply the appended review rubric: probe its classes, apply the lenses its path table selects, and report an Architecture section as it describes. Use relevant reference skills for language, security, framework and architecture guidance. Apply this review scope and material-impact threshold if reference guidance differs. Perform the review yourself; do not launch another review workflow, delegate reviewers, modify code or publish findings. Do not invoke co-review, partners, markers, external posts, or fixes." >"$PROMPT_FILE"
+grep -q '^## Classes' "$RUBRIC" || exit 2
+sed -n '/^## Classes/,$p' "$RUBRIC" >>"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime claude --role development_reviewer --risk normal --provisional \
   --cwd "$REVIEW_REPO" --sandbox read-only --timeout-secs 600 \

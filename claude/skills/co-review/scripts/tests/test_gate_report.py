@@ -678,6 +678,32 @@ class GateReportTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "APPROVE")
         self.assertTrue(result["approve_allowed"])
 
+    def test_schema_lists_structure_finding_fields(self):
+        fields = gate.schema()["finding_fields"]
+        self.assertIn("structure", fields["category"])
+        self.assertIn("what moves where", fields["proposed_layout"])
+
+    def test_confirmed_advisory_structure_finding_approves(self):
+        self.report["findings"] = [{
+            "id": "s1", "severity": "advisory", "disposition": "confirmed",
+            "scenario": "fault rows keep landing in one test file",
+            "evidence": "four PRs append to the same file",
+            "category": "structure",
+            "proposed_layout": "move voltage rows to test_voltage_faults.py",
+        }]
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_confirmed_major_structure_finding_with_impact_changes(self):
+        self.report["findings"] = [{
+            "id": "s1", "severity": "major", "disposition": "confirmed",
+            "scenario": "a new test file is not matched by the suite selector",
+            "evidence": "the selector lists files by name",
+            "impact": "new tests silently drop out of the CI configuration",
+            "category": "structure",
+            "proposed_layout": "select by directory glob in the suite config",
+        }]
+        self.assertEqual(self.verdict()["verdict"], "CHANGES")
+
     def test_missing_failed_or_empty_seat_is_incomplete(self):
         for mutation in (
             lambda: self.report["seats"].pop("codex"),

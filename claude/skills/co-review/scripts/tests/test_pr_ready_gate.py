@@ -35,6 +35,14 @@ class SelectMarkerTests(unittest.TestCase):
         body = "| x |\n" + marker()
         self.assertEqual(gate.select_marker([comment(body)], ME)["sha"], SHA_A)
 
+    def test_structure_line_after_blockers_keeps_the_marker(self):
+        plain = (marker(verdict="CHANGES") + "\nCo-review verdict: CHANGES\n"
+                 "f1: lost update\n| x |\n")
+        with_structure = plain + "Structure: s1: move voltage rows to test_voltage_faults.py\n"
+        selected = gate.select_marker([comment(with_structure)], ME)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected, gate.select_marker([comment(plain)], ME))
+
     def test_other_author_ignored(self):
         self.assertIsNone(gate.select_marker([comment(marker(), author="x")], ME))
 

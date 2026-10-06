@@ -379,5 +379,42 @@ class PrBasePinText(unittest.TestCase):
         self.assertIn("baseRefOid", BRIEF)
 
 
+class StructureLensText(unittest.TestCase):
+    def test_policy_names_structure_fit_without_checklist_id(self):
+        flat = " ".join(POLICY_FILE.split())
+        self.assertIn(
+            "The Structure fit class has no checklist ID; seats report it in "
+            "their `Architecture` section and as findings.",
+            flat,
+        )
+
+
+    def test_both_entrypoints_hand_finders_the_diff_and_frozen_worktree(self):
+        for text in (CO_REVIEW, MIRROR):
+            flat = " ".join(text.split())
+            self.assertIn("frozen diff path (`$RUN_DIR/frozen.diff`)", flat)
+            self.assertIn("as the frozen worktree for reading files outside the diff", flat)
+        self.assertIn("sed -n '/^## Classes/,$p' \"$RUBRIC\" >>\"$RUN_DIR/$seat.prompt\"",
+                      CO_REVIEW)
+
+    def test_both_entrypoints_keep_structure_finding_fields(self):
+        for text in (CO_REVIEW, MIRROR):
+            flat = " ".join(text.split())
+            self.assertIn("Copy each seat's Structure fit findings into `findings` with "
+                          "`category: \"structure\"` and their `proposed_layout`", flat)
+
+    def test_both_entrypoints_allow_one_structure_marker_line(self):
+        for text in (CO_REVIEW, MIRROR):
+            flat = " ".join(text.split())
+            self.assertIn("one line per blocker (`<id>: <title>`), then at most one "
+                          "`Structure: <id>: <proposed layout>` line", flat)
+
+    def test_brief_template_forbids_per_run_architecture_addendum(self):
+        section = BRIEF[BRIEF.index("## Director-authored repair and ship briefs"):]
+        flat = " ".join(section.split())
+        self.assertIn("adds no architecture or lens addendum", flat)
+        self.assertIn("`claude/skills/co-review/references/failure-classes.md`", flat)
+
+
 if __name__ == "__main__":
     unittest.main()
