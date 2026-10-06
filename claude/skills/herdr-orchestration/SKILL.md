@@ -632,6 +632,10 @@ phase; it never marks the task `completed` and never dispatches review.
    Use the `co-review` artifact helper to freeze reviewed documents under
    `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/<launch>`. Record the same artifact
    references in the task and plan completion. Never commit private plans.
+   When the task lacks the references, `confirm-plan` accepts the correlated
+   plan completion's list; record those confirmed references in the task with
+   `write-task` before `settle` and the implement dispatch, because the
+   implement worker's `emit-done` replaces `done.json`.
    Before advancing, run the Lesson harvest (section 4) on the plan worker's
    pane.
 2. A plan-only milestone may have HEAD equal to base. The contract the plan

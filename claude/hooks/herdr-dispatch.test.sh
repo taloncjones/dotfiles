@@ -138,6 +138,18 @@ if args[:2] == ["pane", "get"]:
         "terminal_id": "t1", "tab_id": "tab1", "focused": False,
         "agent_status": "idle", "revision": 1}}}))
 elif args[:2] == ["pane", "process-info"]:
+    # Herdr state that changes while settle reads this pane's processes.
+    if mode == "process-info-root-vanishes":
+        ppath = Path(os.environ["FAKE_PANES"])
+        ppath.write_text(json.dumps([p for p in json.loads(ppath.read_text())
+                                     if p["pane_id"] != "w1:p1"]))
+    elif mode in ("process-info-occupant-appears", "process-info-malformed-appears"):
+        target = args[args.index("--pane") + 1]
+        newcomer = ({"name": "newcomer", "pane_id": target, "workspace_id": "w1",
+                     "agent_status": "working"}
+                    if mode == "process-info-occupant-appears" else {"name": "ghost"})
+        apath = Path(os.environ["FAKE_AGENTS"])
+        apath.write_text(json.dumps(json.loads(apath.read_text()) + [newcomer]))
     if mode == "process-info-empty-foreground":
         # herdr's real shape when process enumeration fails: a valid
         # shell_pid but no foreground entries.
@@ -434,6 +446,8 @@ elif args[:2] == ["agent", "list"]:
             removed = json.loads(removed_path.read_text())
             if not any(a["name"] == removed["name"] for a in agents):
                 agents = agents + [removed]
+    # Reported only by `agent list`, so other handlers never parse them.
+    agents = agents + json.loads(os.environ.get("FAKE_AGENT_LIST_EXTRA", "[]"))
     print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
 elif args[:2] == ["pane", "list"]:
     ws = args[args.index("--workspace") + 1]
@@ -1554,6 +1568,140 @@ def test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed
         # agent_not_found delivered nothing: no pane read, no keys.
         assert result["agent"] == "still-live" and result["status"] == "exit-incomplete", result
         assert not [c for c in fx.calls() if c[:2] in (["pane", "read"], ["agent", "send-keys"], ["pane", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_the_last_pane_on_a_duplicated_pane_entry():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        # The root pane is gone and herdr lists the row's pane twice: two
+        # entries, one distinct pane.
+        fx.settle_state([impl, rev], "changes-requested", [],
+                        [pane("w1:p2", "claude", "idle", "R"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "absent", result
+        assert result["pane"] == "kept-last-pane", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-running"
+        fx.env["FAKE_AGENT_LIST_EXTRA"] = json.dumps([None])
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # A member settle cannot place could be the row's agent: unknown, not gone.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_an_agent_member_lacks_a_pane_id():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-running"
+        fx.env["FAKE_AGENT_LIST_EXTRA"] = json.dumps([{"name": "ghost"}])
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_pane_beside_an_unnamed_agent_in_another_workspace():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-running"
+        # Live herdr lists hand-started agents with no name; that is normal.
+        fx.env["FAKE_AGENT_LIST_EXTRA"] = json.dumps(
+            [{"pane_id": "w9:p1", "workspace_id": "w9", "agent_status": "idle"}])
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "exited", result
+        assert result["pane"] == "closed", result
+        assert [c for c in fx.calls() if c[:2] == ["pane", "close"]] == [["pane", "close", "w1:p2"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_the_root_pane_vanishes_before_close():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        # The root pane closes during the process read; w1:p2 is now the last.
+        fx.env["FAKE_HERDR_MODE"] = "process-info-root-vanishes"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "absent", result
+        assert result["pane"] == "kept-changed", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_an_occupant_appears_before_close():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-occupant-appears"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "absent", result
+        assert result["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_a_malformed_agent_member_appears_before_close():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-malformed-appears"
+        result = fx.settle("R")
+        # Unknown occupancy at the last read: report the exit as incomplete.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
     finally:
         fx.close()
 
@@ -4364,6 +4512,13 @@ for name, test in (
     ("settle closes a pane when exit reports agent_not_found", test_settle_closes_a_pane_when_exit_reports_agent_not_found),
     ("settle keeps a pane when agent_not_running but the agent stays listed", test_settle_keeps_a_pane_when_agent_not_running_but_the_agent_stays_listed),
     ("settle never sends keys when agent_not_found but the agent stays listed", test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed),
+    ("settle keeps the last pane on a duplicated pane entry", test_settle_keeps_the_last_pane_on_a_duplicated_pane_entry),
+    ("settle keeps a pane when the agent list has a null member", test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member),
+    ("settle keeps a pane when an agent member lacks a pane id", test_settle_keeps_a_pane_when_an_agent_member_lacks_a_pane_id),
+    ("settle closes a pane beside an unnamed agent in another workspace", test_settle_closes_a_pane_beside_an_unnamed_agent_in_another_workspace),
+    ("settle keeps a pane when the root pane vanishes before close", test_settle_keeps_a_pane_when_the_root_pane_vanishes_before_close),
+    ("settle keeps a pane when an occupant appears before close", test_settle_keeps_a_pane_when_an_occupant_appears_before_close),
+    ("settle keeps a pane when a malformed agent member appears before close", test_settle_keeps_a_pane_when_a_malformed_agent_member_appears_before_close),
     ("settle closes a superseded repair pane whose agent is gone", test_settle_closes_a_superseded_repair_pane_whose_agent_is_gone),
     ("settle keeps a non-root pane settled only by review approval", test_settle_keeps_a_non_root_pane_settled_only_by_review_approval),
     ("settle keeps a review-approved pane after its agent exits", test_settle_keeps_a_review_approved_pane_after_its_agent_exits),

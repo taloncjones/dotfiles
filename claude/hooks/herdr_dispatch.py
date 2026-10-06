@@ -1517,7 +1517,7 @@ def _agents_snapshot(herdr_cli, env):
     agents = _run_herdr(herdr_cli, ["agent", "list"], env=env).get("agents")
     if not isinstance(agents, list):
         raise DispatchError("herdr agent or pane list is malformed")
-    return [a for a in agents if isinstance(a, dict)]
+    return agents
 
 
 def _snapshot(herdr_cli, workspace_id, env):
@@ -1530,12 +1530,20 @@ def _snapshot(herdr_cli, workspace_id, env):
             [p for p in panes if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
 
 
+def _malformed_agent(agent):
+    # Unplaceable in any pane. A missing name is normal: hand-started agents.
+    return not isinstance(agent, dict) or not (
+        isinstance(agent.get("pane_id"), str) and agent["pane_id"])
+
+
 def _occupants(agents, pane_id):
-    return [a for a in agents if a.get("pane_id") == pane_id]
+    return [a for a in agents if isinstance(a, dict) and a.get("pane_id") == pane_id]
 
 
 def _is_live(agents, row):
-    return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
+    # A malformed member could be the row's agent: unknown counts as live.
+    return (any(_malformed_agent(a) for a in agents)
+            or any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"])))
 
 
 # /exit delivery is confirmed only by these two SKILL.md codes: stalled is
@@ -1589,11 +1597,16 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
     return "still-live"
 
 
+def _pane_ids(panes):
+    return {p["pane_id"] for p in panes if isinstance(p.get("pane_id"), str) and p["pane_id"]}
+
+
 def _pane_verdict(task, row, agents, panes, reasons):
     pane_id = row["pane_id"]
     if pane_id not in [p.get("pane_id") for p in panes]:
         return "absent"
-    if len(panes) < 2:
+    # Distinct ids: herdr can list one pane twice.
+    if len(_pane_ids(panes)) < 2:
         return "kept-last-pane"
     sharing = [i for i, w in enumerate(task["workers"])
                if isinstance(w, dict) and w.get("pane_id") == pane_id]
@@ -1686,8 +1699,18 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
         # user's own shell command) could still occupy the pane.
         pane = "kept-occupied"
     elif pane == "close":
-        _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
-        pane = "closed"
+        # herdr has no compare-and-close; re-read right before closing and
+        # keep the pane on any change since the verdict snapshot.
+        fresh_agents, fresh_panes = _snapshot(herdr_cli, workspace_id, env)
+        if _pane_ids(fresh_panes) != _pane_ids(panes):
+            pane = "kept-changed"
+        elif _is_live(fresh_agents, row):
+            agent, pane = "still-live", "kept-occupied"
+        elif _occupants(fresh_agents, row["pane_id"]):
+            pane = "kept-occupied"
+        else:
+            _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
+            pane = "closed"
     status = "exit-incomplete" if agent == "still-live" and pane != "closed" else "settled"
     return {**base, "status": status, "agent": agent, "pane": pane}
 
