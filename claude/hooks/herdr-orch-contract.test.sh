@@ -202,6 +202,8 @@ ok "skill: messaging-live director arms only the undelivered backstop" \
   "grep -Fq -- '--undelivered-only --exit-on-signal' $SKILL && ! grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
 ok "skill: retry and deadline timers replace the heartbeat" \
   "grep -Fq 'sleep 300' $SKILL && grep -Fq 'review-deadlines' $SKILL && grep -Fq 'sleep <remaining + 30>' $SKILL && ! grep -Fq 'let the watch (or the next push)' $SKILL && ! grep -Fq 'at the next heartbeat' $SKILL"
+ok "skill: backstop arms the keepalive watch and drops the heartbeat re-arm rule" \
+  "grep -Fq -- '--undelivered-only --exit-on-signal --since-epoch \$EPOCH --messaging-socket \"\$CLAUDE_CODE_MESSAGING_SOCKET\"' $SKILL && grep -Fq 'owner: holder-gone' $SKILL && grep -Fq 'owner: lost' claude/skills/herdr-orchestration/references/event-schema.md && ! grep -Fq 'heartbeat one exists only' $SKILL"
 ok "skill: unverifiable evidence is the integrity halt, never retried" \
   "grep -Fq 'unverifiable-evidence' $SKILL && grep -Fq 'not retried' $SKILL"
 ok "skill: dirty worktree after a Claude review is reported" \
