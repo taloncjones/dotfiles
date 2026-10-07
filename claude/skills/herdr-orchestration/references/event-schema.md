@@ -33,8 +33,11 @@ watch uses the same predicate -- `WATCH_DIRS` does not include
 happened" means. The hint remains authoritative for `fold_status`.
 
 The `$CORE watch` subcommand (director wake, SKILL.md section 1 step 7)
-emits only the closed stdout vocabulary `signal` / `heartbeat` and never
-appends events.
+never appends events. The default watch
+emits only the closed stdout vocabulary `signal` / `heartbeat`.
+The backstop (`--undelivered-only`) with `--messaging-socket` emits `signal`, `owner: lost` or `owner: holder-gone`
+and refreshes the owner heartbeat while a task is active; without
+`--messaging-socket` it keeps the legacy `signal` / `heartbeat` vocabulary.
 
 ## Check-in actions
 

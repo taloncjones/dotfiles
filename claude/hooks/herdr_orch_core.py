@@ -1910,6 +1910,10 @@ BACKSTOP_GRACE_SECS = 120
 # otherwise a stalled worker with no completion record (a block, or an exit
 # with nothing written) has no path back to the director at all.
 BACKSTOP_HEARTBEAT_SECS = 600
+# The keepalive backstop refreshes the lease itself on this wall-clock
+# cadence: two chances inside WAKE_HEARTBEAT_STALE_SECS, so worker pushes
+# stay deliverable without waking an idle director.
+BACKSTOP_REFRESH_SECS = 300
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
 
@@ -2168,16 +2172,20 @@ def backstop_pass(st, seen, prev, snap, delivered, blocks, now, grace_secs) -> b
 
 
 def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
-                    heartbeat_secs=BACKSTOP_HEARTBEAT_SECS):
+                    heartbeat_secs=BACKSTOP_HEARTBEAT_SECS, holder_pid=None):
     """Silent backstop: print `signal` for an undelivered completion record or
-    a dropped blocked wake, or `heartbeat` when nothing is undelivered but a
-    task is still active -- the director has no other path to refresh its
-    own ownership heartbeat while idle, and wake delivery starts failing once
-    that heartbeat is stale."""
+    a dropped blocked wake. With holder_pid (keepalive) it refreshes the owner
+    lease every heartbeat_secs of wall clock while a task is active, and exits
+    1 after an `owner: lost` or `owner: holder-gone` line. Without it (legacy:
+    pre-keepalive skill text still arms this form; drop it once no director
+    runs that text) it prints `heartbeat` so the next preflight refreshes."""
     prev, _failed = watch_scan(rd, {}, BACKSTOP_DIRS)
     st = {"pending": {}}
     seen = seed_dropped_blocks(undelivered_blocks(rd), read_drop_ack(rd))
     last_emit = time.monotonic()
+    # Wall clock, not monotonic: a refresh is due on the first pass after a
+    # laptop sleep, when the stored heartbeat may already be stale.
+    last_refresh = time.time()
     if since_epoch is not None:
         since_ns = int(since_epoch * 1e9)
         start = time.monotonic()
@@ -2192,12 +2200,22 @@ def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
             last_emit = now
             if exit_on_signal:
                 return 0
-        elif (now - last_emit >= heartbeat_secs
+        elif (holder_pid is None and now - last_emit >= heartbeat_secs
               and backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd))):
             print("heartbeat", flush=True)
             last_emit = now
             if exit_on_signal:
                 return 0
+        # Independent of the signal branch: without --exit-on-signal a steady
+        # run of signals must not starve the refresh or the liveness guard.
+        wall = time.time()
+        if (holder_pid is not None and wall - last_refresh >= heartbeat_secs
+                and heartbeat_active(rd)):
+            state = keep_lease_warm(rd, holder_pid)
+            if state != "ok":
+                print(f"owner: {state}", flush=True)
+                return 1
+            last_refresh = wall
         prev = snap
 
 
@@ -2713,6 +2731,30 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
             return True
     except (OSError, ValueError):
         return False
+
+
+def keep_lease_warm(rd, holder_pid) -> str:
+    """One backstop keepalive refresh of the launcher lease holder_pid holds:
+    "ok", "holder-gone" (holder_pid is no longer this watch's ancestor) or
+    "lost" (no lease, another pid's lease, or the fenced refresh refused).
+    Uses the lease's current session and fence, so a /clear re-claim by the
+    same process stays warm."""
+    if not _is_ancestor(holder_pid):
+        return "holder-gone"
+    # Two tries: a same-process re-claim landing between the read and the
+    # fenced write fails the first; the re-read picks up its new fence.
+    for _ in range(2):
+        try:
+            with owner_transaction(rd) as tx:
+                cur = tx.current
+        except (OSError, ValueError):
+            return "lost"
+        if (cur is None or cur.get("pid") != holder_pid
+                or cur.get("control_tier", "launcher") != "launcher"):
+            return "lost"
+        if refresh_owner(rd, cur["session_id"], cur["fence"]):
+            return "ok"
+    return "lost"
 
 
 ATTEMPT_FIELDS = ("launch_id", "phase", "runtime", "workspace_id", "pane_id", "source_head_sha")
@@ -5043,13 +5085,14 @@ def _main(argv=None) -> int:
     cp.add_argument("--payload-root", default=None)
     w = add("watch")
     w.add_argument("--interval", type=int, default=15)
-    w.add_argument("--heartbeat-secs", type=int, default=1800)
+    w.add_argument("--heartbeat-secs", type=int, default=None)
     w.add_argument("--debounce-secs", type=int, default=60)
     w.add_argument("--exit-on-signal", action="store_true")
     w.add_argument("--once", action="store_true")
     w.add_argument("--since-epoch", type=float, default=None)
     w.add_argument("--undelivered-only", action="store_true")
     w.add_argument("--grace-secs", type=int, default=None)
+    w.add_argument("--messaging-socket", default=None)
     vc = add("verify-contract", "--task-id", "--worktree")
     vc.add_argument("--contract", default=None)
     vc.add_argument("--allow-unpinned", action="store_true")
@@ -7260,7 +7303,8 @@ def _main(argv=None) -> int:
     if ns.cmd == "watch":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(ns.interval >= 1, "interval must be >= 1")
-        _require(ns.heartbeat_secs >= 1, "heartbeat-secs must be >= 1")
+        _require(ns.heartbeat_secs is None or ns.heartbeat_secs >= 1,
+                 "heartbeat-secs must be >= 1")
         _require(ns.debounce_secs >= 1, "debounce-secs must be >= 1")
         _require(not (ns.once and ns.exit_on_signal), "once excludes exit-on-signal")
         _require(not ns.once or ns.since_epoch is not None, "once requires since-epoch")
@@ -7272,11 +7316,22 @@ def _main(argv=None) -> int:
         _require(ns.grace_secs is None or ns.undelivered_only,
                  "grace-secs requires undelivered-only")
         _require(not (ns.undelivered_only and ns.once), "undelivered-only excludes once")
+        _require(ns.messaging_socket is None or ns.undelivered_only,
+                 "messaging-socket requires undelivered-only")
+        holder_pid = None
+        if ns.messaging_socket is not None:
+            _sock, holder_pid, reason = validate_messaging_socket(ns.messaging_socket)
+            _require(reason == "ok", f"invalid messaging socket ({reason})")
         grace = BACKSTOP_GRACE_SECS if ns.grace_secs is None else ns.grace_secs
         _require(grace >= 30, "grace-secs must be >= 30")
         rd = repo_dir(ns.repo_slug)
         if ns.undelivered_only:
-            return _backstop_loop(rd, ns.interval, grace, ns.exit_on_signal, ns.since_epoch)
+            if holder_pid is None:
+                return _backstop_loop(rd, ns.interval, grace, ns.exit_on_signal, ns.since_epoch,
+                                      ns.heartbeat_secs or BACKSTOP_HEARTBEAT_SECS)
+            return _backstop_loop(rd, ns.interval, grace, ns.exit_on_signal, ns.since_epoch,
+                                  ns.heartbeat_secs or BACKSTOP_REFRESH_SECS,
+                                  holder_pid=holder_pid)
         if ns.once:
             snap, _failed = watch_scan(rd, {})
             since_ns = int(ns.since_epoch * 1e9)
@@ -7286,7 +7341,7 @@ def _main(argv=None) -> int:
                 print("heartbeat", flush=True)
             return 0
         return _watch_loop(
-            rd, ns.interval, ns.heartbeat_secs, ns.debounce_secs,
+            rd, ns.interval, ns.heartbeat_secs or 1800, ns.debounce_secs,
             ns.exit_on_signal, ns.since_epoch,
         )
     if ns.cmd == "verify-contract":

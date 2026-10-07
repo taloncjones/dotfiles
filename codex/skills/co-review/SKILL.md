@@ -196,6 +196,34 @@ interactive workflow, start one fresh full gate (new `run_id`,
 A herdr ship launch runs exactly one gate: write `ship.json` with the delta
 verdict and stop, and the director dispatches the full gate.
 
+## Capture CI before seats
+
+A PR gate waits for the head's CI to finish and freezes it as `ci.json`
+before any probe or seat runs. A Codex shell call is bounded, so start the
+watch under `nohup` and check for `$RUN_DIR/ci-watch.done` in short calls;
+`HEAD` is the manifest's `source.head`. A local no-PR review skips this
+section; a `lessons` class there falls back to `CLASS=light`.
+
+```bash
+nohup sh -c 'gh pr checks "$1" --watch --interval 30 >"$2/ci-watch.txt" 2>&1; echo done >"$2/ci-watch.done"' \
+  sh "$PR" "$RUN_DIR" >/dev/null 2>&1 &
+```
+
+```bash
+test -s "$RUN_DIR/ci-watch.done" || exit 3
+gh pr view "$PR" --json headRefOid,statusCheckRollup >"$RUN_DIR/pr-ci.json" || exit 2
+uv run --no-project python "$GATE_REPORT" ci-envelope --pr-json "$RUN_DIR/pr-ci.json" \
+  --head "$HEAD" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
+```
+
+Exit 3 means the watch is still running; check again. The `ci-envelope`
+exit rules match the Claude entrypoint: 0 continues; reasons exactly
+`["CI evidence is missing"]` take the no-CI path and a `lessons` class falls
+back to `CLASS=light`; any other nonzero exit stops `INCOMPLETE` before any
+probe. Then a `lessons` class runs
+`uv run --no-project python "$GATE_REPORT" lessons-check --file "$CODEX_ROOT/claude/rules/personal/agent-lessons.md"`;
+a nonzero exit stops `INCOMPLETE` before any probe.
+
 Run `gate_report.py schema` before report assembly. Resolve each fresh seat
 with the shared runner and `--provisional`; this records unknown availability
 honestly and stops if the route is actually unavailable or unsupported.
@@ -212,6 +240,11 @@ Delta tier: the `claude` reviewer seat and the verifier both run through the
 Claude runner blocks below (the probe block already probes both roles for a
 non-light class); no native Codex child runs.
 
+Lessons tier: only the Claude-runner verifier runs, through the light verifier
+block below, with no finder artifact and the Lessons fact-check section in its
+prompt; the probe block probes only the `skeptic` role; no native Codex child
+runs.
+
 Probe the Claude runner route before spending a seat on it; the Codex runtime
 needs no probe, because the controller running this skill is that runtime.
 The probe is a 60-second `Reply ok` run on `$CLAUDE_ROOT`, written under
@@ -227,7 +260,7 @@ nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
   --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
   --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json" &
-if [ "$CLASS" != "light" ]; then
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
@@ -281,7 +314,13 @@ section of the failure-class rubric, and
 declared threat model. Every prompt also names the frozen diff path
 (`$RUN_DIR/frozen.diff`) and the seat's own snapshot root as the frozen
 worktree for reading files outside the diff. The verifier also receives finder artifact
-paths/digests and known blockers. Save each runner JSON response as that seat's
+paths/digests and known blockers. Every native packet and runner prompt also
+carries a `## CI evidence` section: the line
+`ci.json: $RUN_DIR/ci.json sha256=<sha256 from ci-envelope.json>` and the
+file's content; a local no-PR review, which has no CI files, writes
+`None: a local no-PR review captures no CI.` there instead. A `lessons`
+verifier prompt adds the `## Lessons fact-check` section with the Claude
+entrypoint's exact text. Save each runner JSON response as that seat's
 nonempty artifact and preserve requested and observed route metadata. The
 controller never stands in for a seat.
 

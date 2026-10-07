@@ -59,7 +59,7 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertIn("<seat>.native.md", MIRROR)
 
     def test_co_review_gates_the_finder_dispatch_on_class(self):
-        for needle in ('if [ "$CLASS" != "light" ]; then',
+        for needle in ('if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then',
                        "Light tier: only the codex reviewer seat. Full tier: also claude and breaker."):
             self.assertIn(needle, CO_REVIEW)
         self.assertNotIn("Repeat once for claude, codex, and breaker", CO_REVIEW)
@@ -260,7 +260,7 @@ class CoReviewSkillText(unittest.TestCase):
             self.assertEqual(order, sorted(order))
 
     def test_co_review_branches_probes_and_seats_on_delta(self):
-        for needle in ('if [ "$CLASS" != "delta" ]; then', 'if [ "$CLASS" = "full" ]; then',
+        for needle in ('if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then', 'if [ "$CLASS" = "full" ]; then',
                        '[ "$CLASS" = "delta" ] && SEATS="claude verifier"',
                        "Delta tier: only the claude reviewer seat.",
                        "The delta tier runs `claude` and `verifier`"):
@@ -276,6 +276,99 @@ class CoReviewSkillText(unittest.TestCase):
         for needle in ("### Delta tier", "The delta tier runs `claude` and `verifier`",
                        'escalate: "full"', "cumulative from the full head"):
             self.assertIn(needle, policy)
+
+    def test_co_review_captures_ci_before_probes(self):
+        block = _extract_block(CO_REVIEW, '"$GATE_REPORT" ci-envelope')
+        for needle in ('gh pr checks "$PR" --watch --interval 30', "|| true",
+                       'gh pr view "$PR" --json headRefOid,statusCheckRollup >"$RUN_DIR/pr-ci.json"',
+                       '--head "$HEAD" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"'):
+            self.assertIn(needle, block)
+        self.assertLess(CO_REVIEW.index('"$GATE_REPORT" ci-envelope'),
+                        CO_REVIEW.index('"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'))
+        flat = " ".join(CO_REVIEW.split())
+        self.assertIn('exactly `["CI evidence is missing"]`', flat)
+        self.assertIn("stops co-review `INCOMPLETE` before any probe", flat)
+
+    def test_co_review_prompt_loop_names_ci_json_under_bash_and_zsh(self):
+        import json as jsonlib
+        import os
+        import shutil
+        import tempfile
+
+        body = _extract_block(CO_REVIEW, "ci.json: %s sha256=%s").split("\n", 1)[1]
+        script = 'uv() { shift 3; "$PYTHON" "$@"; }\n' + f'PYTHON="{sys.executable}"\n' + body
+        digest = "f" * 64
+        for shell in ("bash", "zsh"):
+            if not shutil.which(shell):
+                self.skipTest(f"{shell} not found")
+            for cls, prompts, with_ci in (("light", ["codex.prompt", "verifier.prompt"], True),
+                                          ("lessons", ["verifier.prompt"], True),
+                                          ("light", ["codex.prompt", "verifier.prompt"], False)):
+                with self.subTest(shell=shell, cls=cls, with_ci=with_ci), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    ci = jsonlib.dumps({"head": "a" * 40, "check_runs": [], "status_contexts": []})
+                    if with_ci:
+                        (run_dir / "ci.json").write_text(ci + "\n", encoding="utf-8")
+                        (run_dir / "ci-envelope.json").write_text(
+                            jsonlib.dumps({"sha256": digest}), encoding="utf-8")
+                    env = {**os.environ, "RUN_DIR": str(run_dir), "CLASS": cls,
+                           "REVIEW_ROOT": str(REPO)}
+                    result = subprocess.run([shell, "-c", script], capture_output=True,
+                                            text=True, env=env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(sorted(p.name for p in run_dir.glob("*.prompt")), prompts)
+                    for name in prompts:
+                        text = (run_dir / name).read_text(encoding="utf-8")
+                        if with_ci:
+                            self.assertIn(f"ci.json: {run_dir}/ci.json sha256={digest}", text)
+                            self.assertIn(ci, text)
+                        else:
+                            self.assertIn("None: a local no-PR review captures no CI.", text)
+                        self.assertIn("## Classes", text)
+                        self.assertEqual("## Lessons fact-check" in text, cls == "lessons")
+                    if cls == "lessons":
+                        text = (run_dir / "verifier.prompt").read_text(encoding="utf-8")
+                        self.assertIn("technical claim", text)
+                        self.assertIn("admission filter", text)
+
+    def test_co_review_lessons_tier_dispatch(self):
+        for needle in ('[ "$CLASS" = "lessons" ] && SEATS="verifier"',
+                       '"$GATE_REPORT" lessons-check',
+                       '--file "$CODEX_ROOT/claude/rules/personal/agent-lessons.md"',
+                       'if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then',
+                       'if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then',
+                       "The lessons tier runs only `verifier`",
+                       "falls back to `CLASS=light`"):
+            self.assertIn(needle, CO_REVIEW)
+        self.assertNotIn('if [ "$CLASS" != "delta" ]; then', CO_REVIEW)
+        self.assertNotIn('if [ "$CLASS" != "light" ]; then', CO_REVIEW)
+        self.assertLess(CO_REVIEW.index('"$GATE_REPORT" lessons-check'),
+                        CO_REVIEW.index('"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'))
+
+    def test_mirror_captures_ci_and_runs_the_lessons_tier(self):
+        for needle in ('"$GATE_REPORT" ci-envelope --pr-json "$RUN_DIR/pr-ci.json"',
+                       "ci-watch.done", "## CI evidence", "ci.json: $RUN_DIR/ci.json sha256=",
+                       '"$GATE_REPORT" lessons-check',
+                       "Lessons tier: only the Claude-runner verifier",
+                       "## Lessons fact-check",
+                       'if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then'):
+            self.assertIn(needle, MIRROR)
+        self.assertNotIn('if [ "$CLASS" != "light" ]; then', MIRROR)
+
+    def test_policy_describes_the_lessons_tier_and_ci_first(self):
+        policy = subprocess.run(
+            [sys.executable, str(REPO / "claude/skills/co-review/scripts/gate_report.py"),
+             "policy", "--section", "POLICY"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        flat = " ".join(policy.split())
+        for needle in ("The lessons tier runs one `verifier`",
+                       "`claude/rules/personal/agent-lessons.md`",
+                       "before any probe or seat runs", "`gate_report.py ci-envelope`",
+                       "names `ci.json`, its digest and its content",
+                       "none in the lessons tier"):
+            self.assertIn(needle, flat)
 
 
 class CodexReviewGatesSkillText(unittest.TestCase):
@@ -351,6 +444,10 @@ class ShipSkillText(unittest.TestCase):
                        "herdr-ship-prior-handoff:", "herdr-ship-delta-caps:",
                        "is not a relaunch after a fix"):
             self.assertIn(needle, SHIP)
+
+    def test_ship_names_the_lessons_class(self):
+        flat = " ".join(SHIP.split())
+        self.assertIn("lessons for a diff touching only `claude/rules/personal/agent-lessons.md`", flat)
 
 
 class PrBasePinText(unittest.TestCase):
