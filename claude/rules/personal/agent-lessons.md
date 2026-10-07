@@ -48,10 +48,10 @@ is the staging tier, not an archive.
   written mid-fix (record-only vs asserted, tip sha vs bench sha) drifts.
 - (2026-09) The commit guard rejects the bare word "claude" in a commit message:
   write "substitute seat" or "work config" up front, not after a block.
-- (2026-09) A contract pinned before a long-lived branch ships goes stale when
-  main moves: after any main merge re-run the whole gate, never one check.
-- (2026-10) Each review round re-runs CI, lint and format, re-reads the head and
-  re-derives any carried finding's scope; prior results are not evidence.
+- (2026-10) After each review round or main merge, re-run the whole gate and
+  re-read the head; prior results and pinned contracts are not evidence.
+- (2026-10) Before reviewing, confirm the briefed worktree exists and its HEAD
+  is the briefed sha; name the checkout actually reviewed in the report.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
 - (2026-09) Never brief a Claude substitute on a recorded Codex quota premise:
