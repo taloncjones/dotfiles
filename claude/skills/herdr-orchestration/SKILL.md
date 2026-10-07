@@ -583,6 +583,16 @@ phase-appropriate brief (references/brief-template.md) and model.
    rechecks the fence on return. The attempt binds `launch_id`, runtime, phase,
    workspace, pane, source HEAD, requested model/effort, and account. A failed
    launch is recorded as failed; never erase it to make the task look unstarted.
+
+   Render the brief with
+   `python3 "$CORE" render-brief --repo-slug <slug> --repo-path <canonical repo root> --runtime <claude|codex> --task-id <task_id> --phase <plan|implement|repair|review|ship> [--focus-file <file>] [--findings <path>] [--artifact-class advisory|behavior] [--no-workflow] [--tier delta --prior-handoff <ship.json>]`.
+   Write only the task-specific focus file (intended behavior, what to check,
+   owner direction) under the scratchpad. The verb prints `agent` and
+   `brief_path`; pass them to the adapter as `--agent` and `--prompt-file`.
+   Exit 2 means a refusal: read its `[X]` line; never hand-edit a rendered
+   brief to get past one. Fast-path implement and fast-path review
+   dispatches, mech and deep-think keep their hand-filled variants
+   (references/brief-template.md); do not render them with this verb.
 8. **Jira writeback**, only for a Jira task with existing user authorization:
    transition to In Progress (section 10). Personal todos do not use Atlassian.
 9. **Partial failure:** leave adopted resources untouched. Stop or clean only
@@ -644,8 +654,9 @@ phase; it never marks the task `completed` and never dispatches review.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
    again with `--config-json "$ROUTE_CONFIG"` (step 6 snippet), require readiness,
    append a new strict attempt through
-   the adapter, update the display role, and give the worker the exact frozen
-   PRD path and hash (and the legacy plan's, when present). Status remains `in-progress`.
+   the adapter, update the display role, and render the implement brief
+   (section 2 step 7, `--phase implement`), which lists the frozen PRD path
+   and hash (and the legacy plan's, when present). Status remains `in-progress`.
 4. Failed/paused planning never launches implementation. `confirm-completion`
    is the separate final implementation gate and rejects a plan milestone.
 
@@ -1194,18 +1205,24 @@ helper from publishing.
    consult relevant reference skills as permitted by `review-change`; it
    never applies fixes, launches another reviewer, posts externally, or runs
    final co-review. `review-change` is herdr-agnostic; the herdr-specific
-   `emit-review` call lives in this brief.
+   `emit-review` call lives in this brief. Render the brief (section 2 step 7)
+   with `--phase review`; the focus file names the intended behavior and what
+   to check.
 
-   Resolve `<findings_path>` =
+   `<findings_path>` is
    `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/review-<launch_id>/findings.md`
    (the same `<slug>` directory that holds `tasks/<task_id>.json`; a
    review-specific launch directory that never collides with the plan-artifact
-   helper's) and put it in the brief. The reviewer creates the directory,
+   helper's); the rendered brief carries it. The reviewer creates the directory,
    writes its report to a temporary name in that directory and renames it onto
    `findings.md` (so a partial write is never the named file), and passes
    exactly that path as `--findings-ref`. Content: blocking findings,
    advisories, coverage gaps, reproduction evidence, or an explicit "no
-   findings" statement naming what was inspected. `emit-review` refuses a
+   findings" statement naming what was inspected. The report opens with a
+   three-line header (`Verdict: approved|changes-requested`, `Blocking: <n>`,
+   `Advisories: none` or titles joined by `; `); inside herdr an unbound
+   `emit-review` refuses a report whose header is missing or disagrees with
+   `--outcome` and `--blocking-count`. `emit-review` refuses a
    `--findings-ref` that is not an absolute path under the orchestration state
    root to a readable, non-blank regular file, refuses to emit without one
    inside herdr, and pins the file's SHA-256 as `findings_sha256`. A findings
@@ -1282,7 +1299,9 @@ review deadline, <launch_id>`, and never fabricate a review record,
    `completed`, `review_head_sha` null) so a fresh review dispatches at the
    same head, or restore the file byte-for-byte from the reviewer's pane if
    it still exists. The verdict is honoured only after the file has been read
-   and its blocking list reconciled with `blocking_count`.
+   and its blocking list reconciled with `blocking_count`. Read the findings
+   header (its first three lines) and the `## Lessons` section; read the body
+   only for changes-requested.
    Once the digest matches, run the Lesson harvest (section 4) on the
    findings file before the verdict or stale-reset `write-task`; on an
    integrity halt, skip the Lesson harvest.
@@ -1296,7 +1315,9 @@ review deadline, <launch_id>`, and never fabricate a review record,
    fresh review dispatches. Only when all three SHAs agree:
    - `changes-requested` or blocking findings -> `status: changes-requested`,
      event `changes-requested`, and surface the findings or incomplete evidence
-     for deliberate development repair. Run a scoped `review-change` only when
+     for deliberate development repair; render the repair brief (section 2
+     step 7) with `--phase repair --findings <the review record's findings_ref
+     or the ship handoff's report_path>`. Run a scoped `review-change` only when
      the repair needs fresh evidence; structural repairs return to design. An
      exhausted final `co-review --fix` budget never resets or re-enters its gate
      here. Record the stop in the task/handoff and return control to the user.
@@ -1450,9 +1471,10 @@ only when `ship_relaunch_head` differs from `review_head_sha`,
 and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
 (every other field carried), so the budget is spent before any worker
 can start and an interrupted relaunch parks the task. Otherwise report
-the stopped run, park the task, and stop. To dispatch, write the brief,
-then launch through the adapter:
-`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent ship-<task prefix> --route-json <route> ...`
+the stopped run, park the task, and stop. To dispatch, render the brief
+(section 2 step 7, `--phase ship`, with `--tier delta --prior-handoff
+<ship.json>` for a delta gate), then launch through the adapter:
+`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent <agent from render-brief> --prompt-file <brief_path> --route-json <route> ...`
 (the same fields as any launch; resolve the route with
 `route --runtime claude --role reviewer`). The adapter refuses any other
 runtime or sandbox, starts the herdr agent under the returned
@@ -1466,8 +1488,9 @@ its launch directory, and no merge authority.
 The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
 gate gates the current PR base. A head behind that base is gated on its
-merge result; the branch is merged with its base only when `prepare`
-reports a conflict. A base that moves cleanly after the gate needs no
+merge result and needs no merge. On a `prepare` conflict the ship worker
+records INCOMPLETE and the director's repair flow resolves it; no worker
+merges the base into the branch. A base that moves cleanly after the gate needs no
 re-gate: `merge-ready` re-checks it with `base-check`.
 
 Once its `ship.json` is written, the idle ship agent settles as
