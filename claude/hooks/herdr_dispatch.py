@@ -23,7 +23,7 @@ import herdr_orch_core as core
 from herdr_dispatch_cli import (
     fresh_codex_hook_review_required as _fresh_codex_hook_review_required,
 )
-from herdr_dispatch_cli import metadata_argv, result_object
+from herdr_dispatch_cli import NOT_AT_SHELL, metadata_argv, result_object
 from herdr_dispatch_cli import prompt_state as _prompt_state
 from herdr_dispatch_cli import run_herdr as _run_herdr
 from herdr_dispatch_cli import same_directory as _same_directory
@@ -39,6 +39,8 @@ PHASES = ("plan", "implement", "review", "think", "read", "mechanical", "ship")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = core.IDLE_AGENT_STATES
 PANE_READY_ATTEMPTS = 3
+SHELL_READY_POLLS = 10
+SHELL_READY_POLL_SECS = 0.5
 # macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
 PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
@@ -130,6 +132,20 @@ def _wait_for_shell(herdr_cli: str, pane_id: str, env: dict[str, str]) -> None:
         except DispatchError:
             continue
     raise DispatchError("pane-prep: shell-not-ready")
+
+
+def _await_pane_shell(
+    herdr_cli: str, pane_id: str, workspace_id: str, cwd: Path, env: dict[str, str]
+) -> None:
+    """Retry the entry pane check while a fresh split pane's shell starts."""
+    for attempt in range(SHELL_READY_POLLS):
+        try:
+            _validate_pane(herdr_cli, pane_id, workspace_id, cwd, env)
+            return
+        except DispatchError as exc:
+            if str(exc) != NOT_AT_SHELL or attempt == SHELL_READY_POLLS - 1:
+                raise
+        time.sleep(SHELL_READY_POLL_SECS)
 
 
 def _op_env_prep_line(cwd: str | os.PathLike[str], env: dict[str, str]) -> str | None:
@@ -824,7 +840,7 @@ def launch(
         )
     agent_runtime._apply_launch_environment(child_env, scope)
     runtime_binary = _runtime_binary(runtime, child_env)
-    _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
+    _await_pane_shell(herdr_cli, pane_id, workspace_id, cwd, child_env)
     launch_id = f"{agent}-{uuid.uuid4().hex[:12]}"
     if phase == "ship":
         agent = ship_agent_name(launch_id)

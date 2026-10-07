@@ -18,6 +18,7 @@ import agent_runtime
 # launch, so a worker that runs past 24 h loses its occupancy proof; a
 # refresh path is a follow-up.
 LAUNCH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
+NOT_AT_SHELL = "designated pane is not at an interactive shell"
 
 
 def _dispatch_error(message: str) -> RuntimeError:
@@ -194,7 +195,7 @@ def validate_pane(
         or any(not isinstance(item, dict) for item in foreground)
         or any(item.get("pid") != shell_pid for item in foreground)
     ):
-        raise _dispatch_error("designated pane is not at an interactive shell")
+        raise _dispatch_error(NOT_AT_SHELL)
     process_cwds = [item.get("cwd") for item in foreground if item.get("cwd")]
     if process_cwds and not all(same_directory(item, cwd) for item in process_cwds):
         raise _dispatch_error("pane shell does not match the designated worktree")

@@ -27,7 +27,12 @@ from pathlib import Path
 
 import agent_runtime
 import herdr_dispatch
+import herdr_dispatch_cli
 import herdr_orch_core as core
+
+# Test-process globals; production keeps 0.5 s.
+herdr_dispatch.SHELL_READY_POLL_SECS = 0
+herdr_dispatch.SETTLE_POLL_SECS = 0
 
 
 PASS = 0
@@ -157,6 +162,13 @@ elif args[:2] == ["pane", "process-info"]:
     elif mode == "process-info-foreground-busy":
         # A pid other than the pane's shell -- a user's vim or test run.
         foreground = [{"pid": 202, "name": "vim", "cwd": cwd}]
+    elif mode == "shell-starting":
+        # A fresh split pane: the first two reads show a not-yet-ready shell.
+        cpath = Path(os.environ["FAKE_PROCESS_INFO_COUNT"])
+        seen = int(cpath.read_text()) if cpath.exists() else 0
+        cpath.write_text(str(seen + 1))
+        foreground = ([{"pid": 303, "name": "zsh", "cwd": cwd}] if seen < 2
+                      else [{"pid": 101, "name": "zsh", "cwd": cwd}])
     else:
         foreground = [{"pid": 101, "name": "zsh", "cwd": cwd}]
     print(json.dumps({"id": "fake", "result": {
@@ -605,6 +617,7 @@ class Fixture:
             "FAKE_PANES": str(self.root / "panes.json"),
             "FAKE_REMOVED_AGENT": str(self.root / "removed-agent.json"),
             "FAKE_AGENT_LIST_COUNT": str(self.root / "agent-list-count"),
+            "FAKE_PROCESS_INFO_COUNT": str(self.root / "process-info-count"),
             "FAKE_WORKSPACES": str(self.root / "workspaces.json"),
         }
 
@@ -3038,6 +3051,39 @@ def test_presentation_failure_is_reported_after_successful_launch():
         fixture.close()
 
 
+def test_launch_waits_for_a_fresh_panes_shell_before_validating():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "shell-starting"
+        result = fx.launch()
+        assert result["status"] == "launched", result
+        calls = fx.calls()
+        first_run = next(i for i, c in enumerate(calls) if c[:2] == ["pane", "run"])
+        reads = [c for c in calls[:first_run] if c[:2] == ["pane", "process-info"]]
+        assert len(reads) == 3, calls
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_a_pane_that_never_reaches_its_shell_after_the_bounded_wait():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "process-info-foreground-busy"
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == herdr_dispatch_cli.NOT_AT_SHELL, exc
+        else:
+            raise AssertionError("launch accepted a pane that is never at its shell")
+        calls = fx.calls()
+        reads = [c for c in calls if c[:2] == ["pane", "process-info"]]
+        assert len(reads) == herdr_dispatch.SHELL_READY_POLLS, calls
+        assert not [c for c in calls if c[:2] == ["pane", "run"]], calls
+        assert fx.worker_records() == [], fx.worker_records()
+    finally:
+        fx.close()
+
+
 def test_launch_requires_managed_herdr_environment():
     fixture = Fixture()
     try:
@@ -4554,6 +4600,8 @@ for name, test in (
     ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
     ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
+    ("launch waits for a fresh pane's shell before validating", test_launch_waits_for_a_fresh_panes_shell_before_validating),
+    ("launch refuses a pane that never reaches its shell after the bounded wait", test_launch_refuses_a_pane_that_never_reaches_its_shell_after_the_bounded_wait),
     ("pane prep waits out a slow shell before sourcing the prep", test_pane_prep_waits_out_a_slow_shell),
     ("pane prep that never sees a prompt records launch_failed with its cause", test_pane_prep_dead_shell_records_launch_failed_with_cause),
     ("pane run lines stay under MAX_CANON and the prep script is removed", test_pane_run_lines_stay_under_max_canon_and_script_is_removed),
