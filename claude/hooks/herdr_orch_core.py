@@ -4670,6 +4670,7 @@ def _rollover(ns) -> int:
         busy = other is not None and marker_live(other, ns.session, ns.fence)
         if held and not busy:
             created = time.time()
+            append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
             write_json_atomic(Path(rd) / ROLLOVER_PENDING_FILE, {
                 "v": 1, "token": token, "pane": new_pane, "from_session": ns.session,
                 "from_fence": ns.fence, "from_pane": pane, "carry": ns.carry,
@@ -4715,6 +4716,180 @@ def _rollover(ns) -> int:
         return _handed_over(rd, ns, pane, adopted, started)
     print("rollover: lease moved without a handover ack; run the section-1 preflight")
     return failed("lease-moved", hid, new_pane, close_pane=False)
+
+
+DECISIONS_FILE = "decisions.jsonl"
+DECISION_TEXT_MAX = 500
+DECISIONS_BLOCK_MAX = 3000
+
+
+def decision_id():
+    return secrets.token_hex(6)
+
+
+def append_decision(rd, *recs):
+    """Append decision-log records as one write, so a batch is never interleaved."""
+    data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in recs)
+    append_payload(Path(rd) / DECISIONS_FILE, data.encode("utf-8"))
+
+
+def read_decisions(rd):
+    """Parsed v1 dict lines in file order; bad lines are skipped, a missing
+    file is an empty log, and any other read failure propagates."""
+    try:
+        text = read_payload_text(Path(rd) / DECISIONS_FILE)
+    except FileNotFoundError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("v") == 1:
+            out.append(rec)
+    return out
+
+
+def _decision_task_closed(rd, task, archived):
+    if task in archived:
+        return True
+    try:
+        rec = json.loads(read_payload_text(Path(rd) / "tasks" / f"{task}.json"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict) and rec.get("status") in CHECKIN_TERMINAL
+
+
+def live_decisions(rd, entries, no_carry=False):
+    """Decision entries still in force (retired, closed-task and stale-carry
+    entries dropped), in file order."""
+    retired = {e.get("retires") for e in entries if e.get("event") == "retire"}
+    batches = [e.get("batch") for e in entries if e.get("event") == "carry-batch"]
+    current = batches[-1] if batches else None
+    archived = None
+    live = []
+    for e in entries:
+        if e.get("event") != "decision" or e.get("id") in retired:
+            continue
+        if not isinstance(e.get("text"), str) or not isinstance(e.get("ts"), str):
+            continue
+        if e.get("source") == "carry":
+            if no_carry or e.get("batch") != current:
+                continue
+        elif isinstance(e.get("task"), str):
+            if archived is None:
+                archived = archived_tasks(rd)
+            if _decision_task_closed(rd, e["task"], archived):
+                continue
+        live.append(e)
+    return live
+
+
+def _decision_line(e):
+    if e.get("source") == "carry":
+        scope = "carried"
+    else:
+        scope = e["task"] if isinstance(e.get("task"), str) else "repo"
+    return f"- {e['ts'][:10]} {scope}: {e['text']} [{e.get('id')}]"
+
+
+def decisions_block(entries, repo_path, show_all=False):
+    """The injected text for live entries: header, newest lines that fit
+    DECISIONS_BLOCK_MAX, and an omission line when any were dropped."""
+    if not entries:
+        return ""
+    header = ("[INFO] herdr decisions: owner decisions and directives on disk. "
+              "They stand until retired; do not re-ask them.")
+    lines = [_decision_line(e) for e in entries]
+    if show_all:
+        return "\n".join([header] + lines)
+
+    def omit(k):
+        return (f"({k} older omitted; full list: python3 ~/.claude/hooks/"
+                f"herdr_orch_core.py decisions --repo-path {repo_path} --all)")
+
+    full = "\n".join([header] + lines)
+    if len(full) <= DECISIONS_BLOCK_MAX:
+        return full
+    budget = DECISIONS_BLOCK_MAX - len(header) - len(omit(len(lines))) - 2
+    kept = []
+    for line in reversed(lines):
+        if len(line) + 1 > budget:
+            break
+        budget -= len(line) + 1
+        kept.append(line)
+    kept.reverse()
+    return "\n".join([header] + kept + [omit(len(lines) - len(kept))])
+
+
+def append_carry_decisions(rd, carry, batch, session, fence):
+    """Record a rollover's carry notes in the decisions log: one carry-batch
+    line (always, so an empty carry expires the prior batch) plus one entry
+    per 500-character chunk of each non-blank carry line."""
+    base = {"v": 1, "ts": now_iso(), "session": session, "fence": fence}
+    recs = [{**base, "id": decision_id(), "event": "carry-batch", "batch": batch}]
+    for line in carry.splitlines():
+        line = line.strip()
+        for i in range(0, len(line), DECISION_TEXT_MAX):
+            chunk = line[i:i + DECISION_TEXT_MAX]
+            text = chunk if i == 0 else f"(cont.) {chunk}"
+            recs.append({**base, "id": decision_id(), "event": "decision", "task": None,
+                         "source": "carry", "batch": batch, "text": text})
+    append_decision(rd, *recs)
+
+
+def _note_decision(ns) -> int:
+    text = ns.text.strip()
+    _require(text and len(text) <= DECISION_TEXT_MAX and not any(c in text for c in "\n\r\x00"),
+             f"--text must be 1..{DECISION_TEXT_MAX} characters on one line without NUL")
+    _require(ns.repo_wide or valid_task_id(ns.task), "invalid task id")
+    with _fenced(ns) as rd:
+        did = decision_id()
+        append_decision(rd, {"v": 1, "ts": now_iso(), "id": did, "event": "decision",
+                             "task": None if ns.repo_wide else ns.task, "source": "owner",
+                             "batch": None, "text": text, "session": ns.session,
+                             "fence": ns.fence})
+    print(f"decision: {did}")
+    return 0
+
+
+def _retire_decision(ns) -> int:
+    with _fenced(ns) as rd:
+        entries = read_decisions(rd)
+        _require(any(e.get("event") == "decision" and e.get("id") == ns.id for e in entries),
+                 "unknown decision id")
+        if any(e.get("event") == "retire" and e.get("retires") == ns.id for e in entries):
+            print(f"decision: {ns.id} already retired")
+            return 0
+        append_decision(rd, {"v": 1, "ts": now_iso(), "id": decision_id(), "event": "retire",
+                             "retires": ns.id, "session": ns.session, "fence": ns.fence})
+    print(f"retired: {ns.id}")
+    return 0
+
+
+def _decisions(ns) -> int:
+    """decisions: print the live decisions block. Exit 0, 1 unreadable log, 3 silent
+    (repository context or slug unresolved)."""
+    try:
+        context = repository_context(ns.repo_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 3
+    ns.repo_slug = _context_slug(context)
+    ns.runtime = "claude"
+    if not valid_repo_slug(ns.repo_slug):
+        return 3
+    select_payload(ns)
+    rd = repo_dir(ns.repo_slug)
+    try:
+        entries = live_decisions(rd, read_decisions(rd), no_carry=ns.no_carry)
+    except (OSError, ValueError) as exc:
+        print(f"decisions: unreadable ({exc})")
+        return 1
+    block = decisions_block(entries, ns.repo_path, show_all=ns.all)
+    if block:
+        print(block)
+    return 0
 
 
 def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
@@ -4936,6 +5111,11 @@ def _main(argv=None) -> int:
     ro.add_argument("--session", required=True)
     ro.add_argument("--messaging-socket", required=True)
     ro.add_argument("--personal", action="store_true")
+    dc = sub.add_parser("decisions")
+    dc.add_argument("--repo-path", required=True)
+    dc.add_argument("--personal", action="store_true")
+    dc.add_argument("--no-carry", action="store_true")
+    dc.add_argument("--all", action="store_true")
     ar = sub.add_parser("adopt-rollover")
     ar.add_argument("--repo-path", required=True)
     ar.add_argument("--session", required=True)
@@ -5105,6 +5285,12 @@ def _main(argv=None) -> int:
     pt.add_argument("--apply", action="store_true")
     pt.add_argument("--session", default=None)
     pt.add_argument("--fence", type=int, default=None)
+    nd = add("note-decision", fenced=True)
+    nd.add_argument("--text", required=True)
+    scope_group = nd.add_mutually_exclusive_group(required=True)
+    scope_group.add_argument("--task", default=None)
+    scope_group.add_argument("--repo-wide", action="store_true")
+    add("retire-decision", "--id", fenced=True)
     ak = add("archive-task", "--task-id", fenced=True)
     ak.add_argument("--agents-json", default=None)
     ak.add_argument("--workspaces-json", default=None)
@@ -5114,6 +5300,8 @@ def _main(argv=None) -> int:
         return _resume_owner(ns)
     if ns.cmd == "adopt-rollover":
         return _adopt_rollover(ns)
+    if ns.cmd == "decisions":
+        return _decisions(ns)
 
     # Before select_payload: this verb answers "human" for a bad path or
     # slug instead of exiting 2, so the director never mistakes an error.
@@ -5191,6 +5379,10 @@ def _main(argv=None) -> int:
         )
     if ns.cmd == "rollover":
         return _rollover(ns)
+    if ns.cmd == "note-decision":
+        return _note_decision(ns)
+    if ns.cmd == "retire-decision":
+        return _retire_decision(ns)
     if ns.cmd == "write-task":
         _require(not (ns.present and ns.binding is not None),
                  "--present is launcher scope only; drop it with --binding")

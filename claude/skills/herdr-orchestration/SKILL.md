@@ -366,7 +366,9 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
    standing directives from chat, a decision in progress. Task state is
    already on disk; do not restate it. This pane closes after the handover,
    so pass the notes with `--carry` (at most 4000 characters, one note per
-   line); the new director sees them as `carried:` lines.
+   line); the new director sees them as `carried:` lines. The same notes
+   also land in `decisions.jsonl` and show in the decisions block until the
+   next rollover.
 3. Run in the foreground, with a Bash timeout of 300000 ms:
    `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence> --carry '<notes>'`
    (add `--personal` when this director runs on an intentional personal
@@ -403,6 +405,10 @@ backstop (its `watch:` line says none exists), and run a section-4 check-in
 before any dispatch. On a `[WARNING]` block, or no block, run the section-1
 preflight; its `claim-owner` adopts through the same marker while it is
 valid, and on `BUSY` stop and ask the human.
+
+Every director start (`startup`, `resume`, `clear`, `compact`) also gets the
+`[INFO] herdr decisions` block from the core's `decisions` verb; see
+"Decisions log" in section 4.
 
 A `/clear` or compaction in place still keeps the lease: the same hook runs
 `resume-owner` and prints the `lease re-established in place` block. Nothing
@@ -834,6 +840,28 @@ cache read. A hook wake or the next human message resumes it. A question in
 prose is not a substitute; the prompt is what raises the notification on the
 user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
+
+### Decisions log
+
+Owner decisions live on disk, not only in the transcript. In the same turn
+as each `AskUserQuestion` answer or owner direction given in chat, record it
+(fenced; one line, at most 500 characters):
+
+`python3 "$CORE" note-decision --repo-slug <slug> --session <id> --fence <fence> (--task <task-id> | --repo-wide) --text '<decision>'`
+
+Use `--task` for a decision about one task and `--repo-wide` for a standing
+directive. It prints `decision: <id>`. Retire a superseded or expired one
+(for example "retry in 10 minutes" once retried):
+`python3 "$CORE" retire-decision --repo-slug <slug> --session <id> --fence <fence> --id <id>`.
+Entries for a failed, abandoned or merged task drop out on their own.
+
+The `director_rollover` hook injects the live entries as an `[INFO] herdr
+decisions` block at every session start. That block is authoritative: do not
+re-ask a listed decision. When it ends with an `older omitted` line, run the
+`--all` command it names before acting on any owner direction or starting any
+dispatch. On `[WARNING] herdr decisions: not loaded`, run the command it
+names the same way. `decisions.jsonl` is described in
+`references/state-layout.md`.
 
 A gated post (a review, a thread reply, a comment on another author's PR, a
 body that mentions someone, a Jira comment) is asked the same way.
