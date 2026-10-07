@@ -127,7 +127,7 @@ emit_map() {
 
   row_section "bin"
   for name in dotfiles-repair setup-claude identity-setup identity-doctor \
-    remote-access-doctor zed-claude-agent herdr-zed-attach dotfiles-tests; do
+    remote-access-doctor zed-claude-agent herdr-zed-attach dotfiles-tests op-env setup-op; do
     row_link "$HOME/bin/$name" "$DOTFILES/bin/$name"
   done
 
