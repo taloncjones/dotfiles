@@ -975,7 +975,21 @@ def main(argv: list[str] | None = None) -> int:
     copy_parser = sub.add_parser("copy-prior")
     for flag in ("--report", "--expected", "--report-sha256", "--expected-sha256", "--out"):
         copy_parser.add_argument(flag, required=True)
+    check_parser = sub.add_parser("base-check")
+    for flag in ("--repo", "--expected", "--head", "--live-base"):
+        check_parser.add_argument(flag, required=True)
     args = parser.parse_args(argv)
+    if args.command == "base-check":
+        try:
+            expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
+            record = _load_sibling("branch_delta").base_check(
+                Path(args.repo), args.head, expected["base"], args.live_base,
+                expected["base_ref"], expected["tree"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            record = {"pass": False, "fetched": False, "reasons": [
+                {"code": "identity", "detail": f"cannot read the expected identity: {error}"}]}
+        print(json.dumps(record, sort_keys=True))
+        return 0 if record["pass"] else 1
     if args.command == "carry-forward":
         record = carry_forward_record(
             Path(args.repo), Path(args.report), Path(args.expected),

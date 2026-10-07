@@ -953,6 +953,49 @@ class GateReportTests(unittest.TestCase):
         self.assertNotIn("Report:", body)
         self.assertNotIn("Substitute", body)
 
+    def test_base_check_cli_exit_codes(self):
+        repo = self.root / "base-check-repo"
+        repo.mkdir()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
+                   GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        (repo / "a.txt").write_text("a\n")
+        git("add", "a.txt")
+        git("commit", "-qm", "base")
+        gated = git("rev-parse", "HEAD")
+        git("checkout", "-q", "-b", "topic")
+        (repo / "f.txt").write_text("f\n")
+        git("add", "f.txt")
+        git("commit", "-qm", "feature")
+        head = git("rev-parse", "HEAD")
+        expected = self.root / "base-check-expected.json"
+        expected.write_text(json.dumps({"base": gated, "base_ref": "main",
+                                        "tree": git("rev-parse", f"{head}^{{tree}}")}))
+        command = [sys.executable, str(SPEC), "base-check", "--repo", str(repo),
+                   "--expected", str(expected), "--head", head, "--live-base"]
+
+        ok = subprocess.run([*command, gated], capture_output=True, text=True,
+                            check=False, env=env)
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertTrue(json.loads(ok.stdout)["pass"])
+
+        git("checkout", "-q", "main")
+        (repo / "f.txt").write_text("clash\n")
+        git("add", "f.txt")
+        git("commit", "-qm", "clash")
+        bad = subprocess.run([*command, git("rev-parse", "HEAD")], capture_output=True,
+                             text=True, check=False, env=env)
+        self.assertEqual(bad.returncode, 1, bad.stdout + bad.stderr)
+        self.assertEqual([r["code"] for r in json.loads(bad.stdout)["reasons"]],
+                         ["base-conflict"])
+
     def test_audit_comment_refuses_non_approval(self):
         self.report["findings"] = [{"id": "f1", "severity": "high", "disposition": "confirmed",
                                     "scenario": "s", "evidence": "e", "impact": "i"}]
