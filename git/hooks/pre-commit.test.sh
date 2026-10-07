@@ -164,6 +164,8 @@ fi
 # 10. project.env must hold op:// references only.
 LIT_LIKE="lit$(printf 'z%.0s' $(seq 1 16))"
 new_repo
+# op.env at the root marks an op-env project; only there are literals refused.
+: >"$TMP/repo/op.env"
 printf '# refs\nGH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN=%s\n' "$LIT_LIKE" >"$TMP/repo/project.env"
 git -C "$TMP/repo" add project.env
 if run_hook; then
@@ -220,6 +222,29 @@ if grep -qF "$OPS_NOTE" "$TMP/out"; then
     fail "service-account token is never printed"
 else
     pass "service-account token is never printed"
+fi
+
+# 23. Without op.env a project.env is not an op-env file: literals commit.
+new_repo
+printf 'PORT=3000\n' >"$TMP/repo/project.env"
+git -C "$TMP/repo" add project.env
+if run_hook; then
+    pass "literal project.env commits in a project without op.env"
+else
+    fail "literal project.env commits in a project without op.env"
+fi
+
+# 24. A linked worktree finds op.env at its main checkout root.
+new_repo
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$TMP/repo" commit -q --allow-empty -m seed
+: >"$TMP/repo/op.env"
+git -C "$TMP/repo" worktree add -q "$TMP/wt" -b wt
+printf 'PORT=3000\n' >"$TMP/wt/project.env"
+git -C "$TMP/wt" add project.env
+if (cd "$TMP/wt" && ECC_SKIP_GIT_HOOKS=0 ECC_SKIP_PRECOMMIT=0 "$HOOK_SRC") >"$TMP/out" 2>&1; then
+    fail "literal project.env is refused from a linked worktree of an opted-in project"
+else
+    pass "literal project.env is refused from a linked worktree of an opted-in project"
 fi
 
 # 25. A match at the top of a diff larger than a pipe buffer still blocks.
