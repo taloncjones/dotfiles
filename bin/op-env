@@ -273,7 +273,9 @@ start_agent() {
     local out pid
     agent_alive && return 0
     rm -f "$SIGNING_SOCK"
-    if ! out="$(ssh-agent -a "$SIGNING_SOCK" -s 2>/dev/null)"; then
+    # The daemon outlives the session: give it PATH only, never the
+    # session's resolved credentials.
+    if ! out="$(env -i PATH="$PATH" ssh-agent -a "$SIGNING_SOCK" -s 2>/dev/null)"; then
         agent_alive
         return
     fi

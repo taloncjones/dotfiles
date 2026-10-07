@@ -320,6 +320,24 @@ OP_ENV_FILE="$REPO/op.env" "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signk
 rc=$?
 check "a stale lock does not block signing" '[ "$rc" = 0 ] && [ $((SECONDS - start)) -lt 5 ]'
 
+# --- 8b. the signing agent never inherits the session's credentials ---
+export OP_ENV_SIGNING_SOCK="$TMP/s4/op-env-signing.sock"
+mkdir -p "$TMP/agentspy"
+cat >"$TMP/agentspy/ssh-agent" <<EOF
+#!/bin/sh
+env >"$TMP/agent-env"
+exec "$(command -v ssh-agent)" "\$@"
+EOF
+chmod +x "$TMP/agentspy/ssh-agent"
+SESSION_VALUE="session-$(printf 'w%.0s' $(seq 1 16))"
+printf 'payload\n' >"$TMP/payload4"
+PATH="$TMP/agentspy:$PATH" GH_TOKEN="$SESSION_VALUE" CLOUDFLARE_API_TOKEN="$SESSION_VALUE" \
+    OP_SERVICE_ACCOUNT_TOKEN="$SESSION_VALUE" OP_ENV_FILE="$REPO/op.env" \
+    "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signkey.pub" "$TMP/payload4" </dev/null >/dev/null 2>&1
+rc=$?
+check "signing through the scrubbed agent succeeds" '[ "$rc" = 0 ] && [ -s "$TMP/payload4.sig" ]'
+check "the signing ssh-agent starts without session tokens" '[ -s "$TMP/agent-env" ] && ! grep -qF "$SESSION_VALUE" "$TMP/agent-env"'
+
 # --- 9. status ---
 rm -f "$REPO/op.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
