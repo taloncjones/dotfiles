@@ -731,8 +731,41 @@ def _todo_body(repo_root, todo_id):
     return None
 
 
+GITHUB_REMOTE_RE = re.compile(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+                              r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+
+
 def _brief_ship_values(rd, record, ns, head, blocks, config):
-    _require(False, "phase ship is not available yet")
+    """PR, live base and tier values for a ship brief."""
+    pr = record.get("pr_number")
+    _require(str(pr).isdigit() and int(pr) > 0, "ship needs pr_number on the task record")
+    _require(record.get("review_head_sha") == head, "ship needs review_head_sha equal to the worktree HEAD")
+    remote = _brief_git(record["worktree"], "config", "--get", "remote.origin.url")
+    match = GITHUB_REMOTE_RE.match(remote)
+    _require(match is not None, "ship needs a GitHub origin remote")
+    base_ref = record["base_ref"]
+    _require(base_ref.startswith("origin/"), "ship needs base_ref of the form origin/<branch>")
+    out = _brief_git(record["worktree"], "ls-remote", "origin", f"refs/heads/{base_ref[len('origin/'):]}")
+    live = out.split()[0] if out else ""
+    _require(bool(SHA40_RE.fullmatch(live)), f"ls-remote found no live tip for {base_ref}")
+    if ns.tier == "delta":
+        _require(ns.prior_handoff is not None, "--tier delta requires --prior-handoff")
+        try:
+            findings_bytes(ns.prior_handoff, state_root())
+        except ValueError as exc:
+            _require(False, f"--prior-handoff {exc}")
+        delta = (config.get("ship") or {}).get("delta") or {}
+        tier = _brief_fill(blocks["ship-tier-delta"], {
+            "prior_handoff": ns.prior_handoff, "head_sha": head,
+            "delta_files": str(delta.get("max_files", 5)), "delta_lines": str(delta.get("max_lines", 150))})
+    else:
+        _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
+        tier = blocks["ship-tier-full"]
+    task_id = record["task_id"]
+    return {"pr_number": str(int(pr)), "pr_repo": f"{match.group(1)}/{match.group(2)}",
+            "live_base_sha": live, "tier-lines": tier,
+            "ship_launch_dir": str(rd / "artifacts" / task_id / "ship-<launch_id>") + "/",
+            "ship_report": str(rd / "tasks" / f"{task_id}.ship.md")}
 
 
 def render_brief(rd, record, ns, repo_root):
@@ -750,6 +783,8 @@ def render_brief(rd, record, ns, repo_root):
         _require(_nonempty_str(record.get(key)), f"task record lacks {key}")
     blocks = brief_blocks(BRIEF_TEMPLATE_PATH.read_text(encoding="utf-8"))
     needed = (*spec["blocks"], spec["lessons"], "lessons", "opt-in-granted", "opt-in-withheld")
+    if ns.phase == "ship":
+        needed += ("ship-tier-full", "ship-tier-delta")
     missing = [name for name in needed if name not in blocks]
     _require(not missing, f"brief template lacks blocks: {', '.join(missing)}")
     worktree, task_id = record["worktree"], record["task_id"]

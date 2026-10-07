@@ -12257,6 +12257,38 @@ p = render("--phase", "repair", "--focus-file", focus)
 assert p.returncode == 2, p.stderr
 PY
 
+check "render-brief: ship brief names the live base and no agent" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "ship", "--focus-file", focus)
+common("ship", out, brief)
+assert out["agent"] not in brief and c.valid_task_id(out["agent"])
+assert re.search(r"Live base: origin/main @ " + C, brief) and re.search(r"Task base: origin/main @ " + A, brief)
+assert "herdr-ship-brief: stop-after-gate" in brief and "herdr-ship-brief: tier=full" in brief
+assert "#77" in brief and "acme/widget" in brief and "ship.json" in brief
+assert os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") in brief
+assert "[td-render-x ship]" in brief and focus_text in brief
+handoff = os.path.join(rd, "artifacts", "td-render-x", "ship-S0", "ship.json")
+os.makedirs(os.path.dirname(handoff)); open(handoff, "w").write("{}\n")
+out, brief = rendered("--phase", "ship", "--focus-file", focus, "--tier", "delta", "--prior-handoff", handoff)
+assert "herdr-ship-brief: tier=delta" in brief and "herdr-ship-delta-caps: 5/150" in brief
+assert f"herdr-ship-prior-handoff: {handoff}" in brief and f"herdr-ship-delta-head: {B}" in brief
+PY
+
+check "render-brief: ship refuses without a PR, on a moved head, or delta without a handoff" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+def refused(*extra):
+    p = render(*extra)
+    assert p.returncode == 2, (extra, p.returncode, p.stderr)
+refused("--phase", "ship", "--focus-file", focus, "--tier", "delta")
+refused("--phase", "ship")
+put(dict(record, pr_number=None)); refused("--phase", "ship", "--focus-file", focus)
+put(dict(record, review_head_sha=A)); refused("--phase", "ship", "--focus-file", focus)
+put(record)
+out, _ = rendered("--phase", "ship", "--focus-file", focus)
+PY
+
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
 import importlib.util, json, os, sys, tempfile
 sys.path.insert(0, "claude/hooks")
