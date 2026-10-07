@@ -42,6 +42,10 @@ PANE_READY_ATTEMPTS = 3
 # macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
 PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
+# bin/op-env: a project's 1Password-resolved credentials for Claude panes.
+OP_ENV = Path(__file__).resolve().parents[2] / "bin" / "op-env"
+# Ready wait for a pane that resolves op-env: its 20 s op bound plus startup.
+OP_ENV_READY_WAIT_MS = 50_000
 # Claude Code's /exit menu when background work is running; option 1 exits.
 # Requires the numbered option, not just the phrase, so prose is never
 # mistaken for the menu. Human-verify H1: the live text is untested.
@@ -128,6 +132,20 @@ def _wait_for_shell(herdr_cli: str, pane_id: str, env: dict[str, str]) -> None:
     raise DispatchError("pane-prep: shell-not-ready")
 
 
+def _op_env_prep_line(cwd: str | os.PathLike[str], env: dict[str, str]) -> str | None:
+    """Prep line that loads the project's op-env exports, or None without op.env."""
+    try:
+        located = subprocess.run(
+            [str(OP_ENV), "locate", "--cwd", str(cwd)],
+            env=env, capture_output=True, text=True, timeout=10, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not located:
+        return None
+    return 'eval "$(' + shlex.join([str(OP_ENV), "shell-exports", "--cwd", str(cwd)]) + ')"'
+
+
 def _bind_pane_environment(
     herdr_cli: str,
     pane_id: str,
@@ -205,6 +223,14 @@ def _bind_pane_environment(
             f"printf '{token}:RUNTIME_BINARY=%s\\n' \"$(command -v '{runtime}')\""
         )
         probes.append(f"printf '{token}:GH=%s\\n' \"$(command -v gh)\"")
+    # Only command text enters the prep script; values stay in the pane shell.
+    # Codex shells drop exported variables (spec F18), so Claude panes only.
+    ready_wait_ms = 10_000
+    if runtime == "claude":
+        op_env_line = _op_env_prep_line(cwd, env)
+        if op_env_line is not None:
+            assignments.append(op_env_line)
+            ready_wait_ms = OP_ENV_READY_WAIT_MS
     ready_probe = _split_marker_line(ready_marker)
     stage = "shell-not-ready"
     script = None
@@ -219,7 +245,7 @@ def _bind_pane_environment(
         stage = "script-source"
         _pane_run(herdr_cli, pane_id, f". {shlex.quote(str(script))}", env)
         stage = "environment-probe"
-        observed = _wait_marker(herdr_cli, pane_id, ready_marker, 10_000, env)
+        observed = _wait_marker(herdr_cli, pane_id, ready_marker, ready_wait_ms, env)
         stage = "script-cleanup"
         script.unlink(missing_ok=True)
         script = None

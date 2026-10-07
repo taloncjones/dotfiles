@@ -171,6 +171,14 @@ else
   info "~/.claude-work absent -- first 'claude' launch under ~/Git/work will create it and prompt the work OAuth login"
 fi
 
+# --- agent credentials (op-env) ---------------------------------------------
+section "agent credentials (op-env)"
+if command -v op-env >/dev/null 2>&1; then
+  op-env status || FAILED=1
+else
+  info "op-env not on PATH (re-run link.sh)"
+fi
+
 # --- gh -------------------------------------------------------------------
 section "gh"
 if command -v gh >/dev/null 2>&1; then

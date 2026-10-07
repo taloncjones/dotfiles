@@ -101,6 +101,8 @@ ln -sf "$DOTFILEDIR"/bin/dotfiles-repair "$HOME"/bin/dotfiles-repair
 ln -sf "$DOTFILEDIR"/bin/setup-claude "$HOME"/bin/setup-claude
 ln -sf "$DOTFILEDIR"/bin/identity-setup "$HOME"/bin/identity-setup
 ln -sf "$DOTFILEDIR"/bin/identity-doctor "$HOME"/bin/identity-doctor
+ln -sf "$DOTFILEDIR"/bin/op-env "$HOME"/bin/op-env
+ln -sf "$DOTFILEDIR"/bin/setup-op "$HOME"/bin/setup-op
 ln -sf "$DOTFILEDIR"/bin/remote-access-doctor "$HOME"/bin/remote-access-doctor
 ln -sf "$DOTFILEDIR"/bin/zed-claude-agent "$HOME"/bin/zed-claude-agent
 ln -sf "$DOTFILEDIR"/bin/herdr-zed-attach "$HOME"/bin/herdr-zed-attach

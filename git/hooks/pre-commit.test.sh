@@ -137,5 +137,79 @@ else
     fail "empty index passes"
 fi
 
+# 9. op-env token files are refused wherever they sit (bin/op-env).
+OPS_LIKE="ops_$(printf 'q%.0s' $(seq 1 24))"
+for path in op.env sub/op.env .op.env.4242; do
+    new_repo
+    mkdir -p "$(dirname "$TMP/repo/$path")"
+    printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$OPS_LIKE" >"$TMP/repo/$path"
+    git -C "$TMP/repo" add -f "$path"
+    if run_hook; then
+        fail "staged $path is refused"
+    else
+        pass "staged $path is refused"
+    fi
+done
+if grep -q "is an op-env token file" "$TMP/out" && ! grep -qF "$OPS_LIKE" "$TMP/out"; then
+    pass "op.env refusal names the file, never the token"
+else
+    fail "op.env refusal names the file, never the token"
+fi
+
+# 10. project.env must hold op:// references only.
+LIT_LIKE="lit$(printf 'z%.0s' $(seq 1 16))"
+new_repo
+printf '# refs\nGH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN=%s\n' "$LIT_LIKE" >"$TMP/repo/project.env"
+git -C "$TMP/repo" add project.env
+if run_hook; then
+    fail "literal project.env line is refused"
+else
+    pass "literal project.env line is refused"
+fi
+if grep -q "project.env line 3 is not an op:// reference" "$TMP/out" && ! grep -qF "$LIT_LIKE" "$TMP/out"; then
+    pass "project.env refusal names the line, never the value"
+else
+    fail "project.env refusal names the line, never the value"
+fi
+GHP_LIKE="ghp_$(printf 'a%.0s' $(seq 1 36))"
+new_repo
+printf 'GH_TOKEN=%s\n' "$GHP_LIKE" >"$TMP/repo/project.env"
+git -C "$TMP/repo" add project.env
+if run_hook; then
+    fail "token-shaped project.env value is refused"
+elif grep -qF "$GHP_LIKE" "$TMP/out"; then
+    fail "token-shaped project.env value is never printed"
+else
+    pass "token-shaped project.env value is refused and never printed"
+fi
+new_repo
+printf '# old: %s\nGH_TOKEN=op://V/gh/token\n' "$GHP_LIKE" >"$TMP/repo/project.env"
+git -C "$TMP/repo" add project.env
+if run_hook; then
+    fail "token in a project.env comment is refused"
+elif grep -qF "$GHP_LIKE" "$TMP/out"; then
+    fail "token in a project.env comment is never printed"
+else
+    pass "token in a project.env comment is refused and never printed"
+fi
+new_repo
+printf '# refs\nGH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN="op://V/cf/credential"\n' >"$TMP/repo/project.env"
+git -C "$TMP/repo" add project.env
+if run_hook; then
+    pass "project.env of op:// references commits"
+else
+    fail "project.env of op:// references commits"
+fi
+
+# 22. A service-account token pasted into any file blocks the commit.
+new_repo
+printf 'note = %s\n' "ops_$(printf 'k%.0s' $(seq 1 30))" >"$TMP/repo/notes.txt"
+git -C "$TMP/repo" add notes.txt
+if run_hook; then
+    fail "staged service-account token blocks commit"
+else
+    pass "staged service-account token blocks commit"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

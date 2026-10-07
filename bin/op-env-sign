@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# gpg.ssh.program for op-env sessions; the logic lives in bin/op-env.
+exec "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/op-env" sign "$@"

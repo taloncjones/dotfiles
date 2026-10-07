@@ -10,7 +10,7 @@
 set -u
 # Every case declares its routing context; the machine running the suite
 # may itself be personal-only or inherit an account from an orchestrator.
-unset CLAUDE_PERSONAL_ONLY CLAUDE_CONFIG_DIR CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR WORKFLOW_PERSONAL_ACCOUNT
+unset CLAUDE_PERSONAL_ONLY CLAUDE_CONFIG_DIR CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR WORKFLOW_PERSONAL_ACCOUNT OP_ENV_FILE OP_ENV_ACTIVE GH_TOKEN
 
 ACCT=zsh/claude-account.zsh
 if [ ! -f "$ACCT" ]; then
@@ -583,6 +583,44 @@ if [ "$rc" = 2 ] && [ ! -s "$TMP/rec" ] && case "$err" in *unarmed*) true;; *) f
     pass "claude refuses an unarmed launch when arming does not put the shim first on PATH"
 else
     fail "claude refuses an unarmed launch when arming does not put the shim first on PATH (rc=$rc err='$err')"
+fi
+
+# --- op-env: project credentials reach the launch, never the caller ------
+mkdir -p "$TMP/opbin"
+cat >"$TMP/opbin/op" <<'EOF'
+#!/bin/sh
+[ "$1" = run ] || exit 1
+while [ "$1" != -- ]; do shift; done
+shift
+GH_TOKEN=resolved-gh exec "$@"
+EOF
+cat >"$TMP/opbin/claude" <<'EOF'
+#!/bin/sh
+printf 'gh=%s sa=%s\n' "${GH_TOKEN-UNSET}" "${OP_SERVICE_ACCOUNT_TOKEN-UNSET}" >"$RECORD"
+EOF
+chmod +x "$TMP/opbin/op" "$TMP/opbin/claude"
+for kind in personal work; do
+    proj="$SBHOME/Git/$kind/opproj"
+    git init -q "$proj"
+    printf 'OP_SERVICE_ACCOUNT_TOKEN=sa-fixture\n' >"$proj/op.env"
+    chmod 600 "$proj/op.env"
+    printf 'GH_TOKEN=op://V/gh/token\n' >"$proj/project.env"
+    : >"$TMP/rec"
+    after="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/opbin:$PATH" \
+        zsh -c "cd '$proj' && source '$REPO/$ACCT' && claude; print -r -- \"\${GH_TOKEN-UNSET}\"" 2>/dev/null)"
+    if [ "$(cat "$TMP/rec")" = "gh=resolved-gh sa=UNSET" ] && [ "$after" = UNSET ]; then
+        pass "$kind project: op-env credentials reach claude only"
+    else
+        fail "$kind project: op-env credentials reach claude only (rec='$(cat "$TMP/rec")' after='$after')"
+    fi
+done
+: >"$TMP/rec"
+RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/opbin:$PATH" \
+    zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" >/dev/null 2>&1
+if [ "$(cat "$TMP/rec")" = "gh=UNSET sa=UNSET" ]; then
+    pass "unconfigured directory: claude gets no op-env credentials"
+else
+    fail "unconfigured directory: claude gets no op-env credentials (rec='$(cat "$TMP/rec")')"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

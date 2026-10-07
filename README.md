@@ -266,6 +266,45 @@ identity-setup   # writes ~/.gitconfig-work, ~/.ssh/id_ed25519_work.pub, ~/.ssh/
 identity-doctor  # verify the full chain (also available as: git identity)
 ```
 
+### Agent Credentials (op-env)
+
+Agent sessions can sign commits, push and call APIs without the 1Password desktop app. A project opts in with two untracked files at its main checkout root; without them nothing changes.
+
+```bash
+cd ~/Git/personal/<project>
+setup-op                                      # project.env template + service-account token (input hidden)
+$EDITOR project.env                           # NAME=op://<vault>/<item>/<field>, references only
+setup-op --signing-key op://<vault>/<item>    # optional: this machine's SSH signing key
+identity-doctor                               # "agent credentials (op-env)" shows each path
+```
+
+```mermaid
+flowchart LR
+  L["claude() / director()\nzed-claude-agent\nherdr Claude pane"] -->|"eval op-env shell-exports"| R["bin/op-env"]
+  R -->|"op run --no-masking (bounded)"| OP[("1Password service account")]
+  R -->|"GH_TOKEN, API tokens\nGIT_CONFIG_SYSTEM (HTTPS)\ngpg.ssh.program = op-env-sign"| A["agent"]
+  A -->|push| GH["https://github.com"]
+  A -->|"commit -S"| S["bin/op-env-sign"] -->|"op read | ssh-add -t TTL -"| SA["plain ssh-agent"]
+```
+
+**How it works:**
+
+- `op.env` (mode 600, never committed) holds the project's 1Password service-account token and, optionally, `OP_SIGNING_KEY`, `OP_SIGNING_PUBKEY` and `OP_SIGNING_TTL` (default `1h`). `project.env` lists `op://` references; the pre-commit hook refuses literal values there and any staged `op.env`.
+- `claude()`/`director()`, `zed-claude-agent` and herdr Claude worker panes eval `bin/op-env shell-exports`, which resolves `project.env` with `op run --no-masking` (bounded by `OP_ENV_OP_TIMEOUT`, default 20 s) and exports the values into that launch only. The token itself is never exported.
+- A tracked `project.env` in the current worktree takes precedence over the one beside `op.env`, so checking out an untrusted branch can choose which vault items load.
+- `GH_TOKEN` in `project.env` switches the session's git to HTTPS: `git/agent-https.gitconfig`, loaded as `GIT_CONFIG_SYSTEM`, rewrites every GitHub remote form to `https://github.com/` and answers credentials from `GH_TOKEN`. Interactive shells keep the SSH aliases.
+- Signing: git calls `bin/op-env-sign`, which loads the machine's key from 1Password into a plain `ssh-agent` (`~/.local/state/dotfiles/op-env-signing.sock`) with `ssh-add -t <ttl>` on first use and again after the TTL; the key never touches disk. `commit.gpgsign` still comes from the identity includes.
+- The same files work on macOS and on a headless Linux VM (needs `op`, `ssh-agent`, git 2.34+, OpenSSH 8.4+).
+- Codex sessions are not covered: Codex's `shell_environment_policy` drops exported variables from its shells.
+
+**One vault per project.** Create a vault for the project, a read-only service account scoped to that vault, and only the items agents need. Personal and work projects each get their own token, so the GitHub token always belongs to the account that owns the repo.
+
+**Signing keys are per machine.** Create one SSH Key item per machine or VM in the project vault, add its public key on GitHub as a Signing Key (Settings, SSH and GPG keys), and run `setup-op --signing-key`. Revoke one machine by deleting its key on GitHub and its item in 1Password. In a work repo whose employer requires 1Password-backed signing, leave `OP_SIGNING_KEY` unset.
+
+**Blast radius.** While `op.env` exists, any process running as you can read the whole project vault, and every agent session holds the resolved values and can sign as the machine key. Keep the vault small.
+
+**Rotation and expiry.** Service-account tokens can expire. Create a new token, run `setup-op --rotate` (it keeps the signing settings), then revoke the old token in 1Password. Running sessions keep their resolved values until they exit; signing stops at the next key reload.
+
 ### Remote Access
 
 **Status:** unverified. The client stanza below is inert until a zone is

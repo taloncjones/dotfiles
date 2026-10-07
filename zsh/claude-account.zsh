@@ -95,6 +95,17 @@ function claude-account() {    # claude-account() prints which Claude account/co
 # file's path; no leading underscore because the snapshot strips those.
 typeset -g DOTFILES_GH_SHIM_HOME="${${(%):-%N}:A:h:h}/bin/herdr-shims"
 
+# op-env (bin/op-env) loads a project's 1Password-resolved credentials into
+# a launch. Resolved at source time for the same snapshot reason as above.
+typeset -g DOTFILES_OP_ENV="${${(%):-%N}:A:h:h}/bin/op-env"
+
+function dotfiles_op_env_apply() {    # dotfiles_op_env_apply() loads a project's op-env exports into the current subshell; a no-op without op.env. ex: $ ( dotfiles_op_env_apply "$PWD"; command claude )
+    [[ -x "${DOTFILES_OP_ENV:-}" ]] || return 0
+    local exports
+    exports="$("$DOTFILES_OP_ENV" shell-exports --cwd "$1")" || return 0
+    eval "$exports"
+}
+
 function dotfiles_arm_gh_shim() {    # dotfiles_arm_gh_shim() puts the herdr gh shim first on PATH for an agent launched from this shell. ex: $ ( dotfiles_arm_gh_shim; command claude )
     export PATH="$DOTFILES_GH_SHIM_HOME:$PATH"
     [[ -n "${BASH_ENV:-}" ]] || export BASH_ENV="$DOTFILES_GH_SHIM_HOME/path.sh"
@@ -152,10 +163,14 @@ function claude() {    # claude() will launch Claude Code with the work account 
         (
             unset CLAUDE_CONFIG_DIR
             export WORKFLOW_PERSONAL_ACCOUNT=1
+            (( $+functions[dotfiles_op_env_apply] )) && dotfiles_op_env_apply "$target"
             command claude "${forwarded[@]}"
         )
     else
-        CLAUDE_CONFIG_DIR="$cfg" command claude "${forwarded[@]}"
+        (
+            (( $+functions[dotfiles_op_env_apply] )) && dotfiles_op_env_apply "$target"
+            CLAUDE_CONFIG_DIR="$cfg" command claude "${forwarded[@]}"
+        )
     fi
 }
 

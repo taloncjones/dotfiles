@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# op-env - resolve a project's 1Password references for headless agents.
+#
+# A project opts in with two untracked files at its main checkout root:
+# op.env (mode 600: a service-account token and an optional signing key
+# reference) and project.env (NAME=op://vault/item/field lines). Launch
+# paths eval `op-env shell-exports`; git signs through bin/op-env-sign.
+#
+# Usage: op-env locate [--cwd DIR]
+#        op-env shell-exports [--cwd DIR]
+#        op-env status [--cwd DIR]
+#        op-env exec [--cwd DIR] -- CMD...
+#        op-env sign SSH-KEYGEN-ARGS...
+
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+DOTFILES="$(cd -P "$(dirname "$src")/.." && pwd)"
+OP_ENV_BIN="$DOTFILES/bin/op-env"
+HTTPS_GITCONFIG="$DOTFILES/git/agent-https.gitconfig"
+SIGN_PROGRAM="$DOTFILES/bin/op-env-sign"
+SIGNING_SOCK="${OP_ENV_SIGNING_SOCK:-$HOME/.local/state/dotfiles/op-env-signing.sock}"
+OP_TIMEOUT="${OP_ENV_OP_TIMEOUT:-20}"
+
+err() { printf '%s\n' "$1" >&2; }
+
+# Never prints a value: callers pass rule text only.
+fail_rule() { err "[X] op-env: $1"; }
+
+main_root() {
+    local common
+    common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+    case "$common" in
+        */.git) printf '%s\n' "${common%/.git}" ;;
+        *) return 1 ;;
+    esac
+}
+
+locate_op_env() {
+    local root
+    root="$(main_root "$1")" || return 0
+    # An inherited OP_ENV_FILE counts only inside this cwd's own checkout root.
+    if [ -n "${OP_ENV_FILE:-}" ] && [ "$(dirname "$OP_ENV_FILE")" = "$root" ]; then
+        [ -f "$OP_ENV_FILE" ] && printf '%s\n' "$OP_ENV_FILE"
+        return 0
+    fi
+    [ -f "$root/op.env" ] && printf '%s\n' "$root/op.env"
+    return 0
+}
+
+# A tracked project.env in the current worktree wins over the one beside op.env.
+locate_project_env() {
+    local top
+    top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)"
+    if [ -n "$top" ] && [ -f "$top/project.env" ]; then
+        printf '%s\n' "$top/project.env"
+    elif [ -f "$(dirname "$2")/project.env" ]; then
+        printf '%s\n' "$(dirname "$2")/project.env"
+    fi
+}
+
+file_mode() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+unquote() {
+    local v="$1"
+    case "$v" in
+        \"*\") v="${v#\"}"; v="${v%\"}" ;;
+        \'*\') v="${v#\'}"; v="${v%\'}" ;;
+    esac
+    printf '%s' "$v"
+}
+
+# Sets OPE_TOKEN, OPE_SIGNING_KEY, OPE_SIGNING_PUBKEY, OPE_SIGNING_TTL.
+read_op_env() {
+    local f="$1" line key value n=0 mode
+    OPE_TOKEN="" OPE_SIGNING_KEY="" OPE_SIGNING_PUBKEY="" OPE_SIGNING_TTL=""
+    if [ -L "$f" ] || [ ! -f "$f" ]; then fail_rule "op.env is not a regular file: $f"; return 1; fi
+    if [ ! -O "$f" ]; then fail_rule "op.env is not owned by $(id -un): $f"; return 1; fi
+    mode="$(file_mode "$f")"
+    if [ "$mode" != 600 ]; then fail_rule "op.env mode is $mode, expected 600: $f"; return 1; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        case "$line" in ''|'#'*) continue ;; esac
+        key="${line%%=*}"
+        # Only OP_* names are printable: any other text before = may be a pasted token.
+        if [ "$key" = "$line" ] || [[ ! "$key" =~ ^OP_[A-Z0-9_]*$ ]]; then
+            fail_rule "op.env line $n is not KEY=VALUE"
+            return 1
+        fi
+        value="$(unquote "${line#*=}")"
+        case "$key" in
+            OP_SERVICE_ACCOUNT_TOKEN) OPE_TOKEN="$value" ;;
+            OP_SIGNING_KEY) OPE_SIGNING_KEY="$value" ;;
+            OP_SIGNING_PUBKEY) OPE_SIGNING_PUBKEY="$value" ;;
+            OP_SIGNING_TTL) OPE_SIGNING_TTL="$value" ;;
+            *) fail_rule "op.env line $n has unknown key $key"; return 1 ;;
+        esac
+    done <"$f"
+    if [ -z "$OPE_TOKEN" ]; then fail_rule "op.env has no OP_SERVICE_ACCOUNT_TOKEN"; return 1; fi
+    if [ -n "$OPE_SIGNING_KEY" ]; then
+        case "$OPE_SIGNING_KEY" in op://*) ;; *) fail_rule "OP_SIGNING_KEY is not an op:// reference"; return 1 ;; esac
+        case "$OPE_SIGNING_PUBKEY" in ssh-*|sk-*) ;; *) fail_rule "OP_SIGNING_KEY is set but OP_SIGNING_PUBKEY is missing (rerun setup-op --signing-key)"; return 1 ;; esac
+    fi
+    return 0
+}
+
+# Sets PE_NAMES to the variable names project.env assigns.
+read_project_env() {
+    local f="$1" line name value n=0
+    PE_NAMES=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in ''|'#'*) continue ;; esac
+        name="${line%%=*}"
+        if [ "$name" = "$line" ] || [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            fail_rule "project.env line $n is not NAME=op://..."
+            return 1
+        fi
+        value="$(unquote "${line#*=}")"
+        case "$value" in
+            op://*) ;;
+            *) fail_rule "project.env line $n is not NAME=op://..."; return 1 ;;
+        esac
+        PE_NAMES+=("$name")
+    done <"$f"
+    return 0
+}
+
+# Bound a command that may block on the network or the desktop app.
+bounded() {
+    local seconds="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$seconds" "$@"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+    else
+        err "[WARNING] op-env: no timeout, gtimeout or perl to bound op; skipping it"
+        return 124
+    fi
+}
+
+# Pattern and replacement live in variables: bash 3.2 keeps the backslashes
+# of an inline \' replacement and breaks the quoting.
+sq() {
+    local s="$1" q="'" r="'\\''"
+    printf "'%s'" "${s//$q/$r}"
+}
+
+# Runs under `op run`: print the resolved names as shell exports.
+cmd_emit() {
+    local name
+    for name in "$@"; do
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 2
+        [ -n "${!name+x}" ] || continue
+        printf 'export %s=%s\n' "$name" "$(sq "${!name}")"
+    done
+}
+
+has_name() {
+    local want="$1" name
+    shift
+    for name in "$@"; do [ "$name" = "$want" ] && return 0; done
+    return 1
+}
+
+cmd_shell_exports() {
+    local cwd="$1" opfile penv resolved count resolved_ok=1
+    opfile="$(locate_op_env "$cwd")"
+    [ -n "$opfile" ] || return 0
+    read_op_env "$opfile" || return 0
+    PE_NAMES=()
+    penv="$(locate_project_env "$cwd" "$opfile")"
+    if [ -n "$penv" ]; then
+        read_project_env "$penv" || return 0
+    fi
+    if [ "${#PE_NAMES[@]}" -gt 0 ]; then
+        if resolved="$(OP_SERVICE_ACCOUNT_TOKEN="$OPE_TOKEN" bounded "$OP_TIMEOUT" \
+            op run --no-masking --env-file "$penv" -- "$OP_ENV_BIN" _emit "${PE_NAMES[@]}")"; then
+            printf '%s\n' "$resolved"
+            if has_name GH_TOKEN "${PE_NAMES[@]}"; then
+                printf 'export GIT_CONFIG_SYSTEM=%s\n' "$(sq "$HTTPS_GITCONFIG")"
+            fi
+        else
+            resolved_ok=0
+            err "[WARNING] op-env: op run failed or timed out; launching without project credentials"
+        fi
+    fi
+    if [ -n "$OPE_SIGNING_KEY" ]; then
+        count="${GIT_CONFIG_COUNT:-0}"
+        [[ "$count" =~ ^[0-9]+$ ]] || count=0
+        printf 'export GIT_CONFIG_KEY_%d=gpg.format GIT_CONFIG_VALUE_%d=ssh\n' "$count" "$count"
+        printf 'export GIT_CONFIG_KEY_%d=gpg.ssh.program GIT_CONFIG_VALUE_%d=%s\n' \
+            $((count + 1)) $((count + 1)) "$(sq "$SIGN_PROGRAM")"
+        printf 'export GIT_CONFIG_KEY_%d=user.signingkey GIT_CONFIG_VALUE_%d=%s\n' \
+            $((count + 2)) $((count + 2)) "$(sq "key::$OPE_SIGNING_PUBKEY")"
+        printf 'export GIT_CONFIG_COUNT=%d\n' $((count + 3))
+    fi
+    printf 'export OP_ENV_FILE=%s\n' "$(sq "$opfile")"
+    # Status reads this as "credentials resolved": a failed op run clears any
+    # marker inherited from another project's session.
+    if [ "$resolved_ok" = 1 ]; then
+        printf 'export OP_ENV_ACTIVE=1\n'
+    else
+        printf 'unset OP_ENV_ACTIVE\n'
+    fi
+    return 0
+}
+
+pub_body() {
+    local type body
+    read -r type body _ <<<"$1"
+    printf '%s %s' "$type" "$body"
+}
+
+key_loaded() {
+    SSH_AUTH_SOCK="$SIGNING_SOCK" ssh-add -L 2>/dev/null | grep -qF -- "$(pub_body "$OPE_SIGNING_PUBKEY")"
+}
+
+agent_alive() {
+    SSH_AUTH_SOCK="$SIGNING_SOCK" ssh-add -l >/dev/null 2>&1
+    [ $? -ne 2 ]
+}
+
+# Re-check before removing a socket and after a failed bind: an unlocked
+# racer may have started a live agent in between.
+start_agent() {
+    local out pid
+    agent_alive && return 0
+    rm -f "$SIGNING_SOCK"
+    if ! out="$(ssh-agent -a "$SIGNING_SOCK" -s 2>/dev/null)"; then
+        agent_alive
+        return
+    fi
+    pid="$(printf '%s\n' "$out" | sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')"
+    printf '%s\n' "$pid" >"${SIGNING_SOCK%.sock}.pid"
+}
+
+load_key() {
+    local -a status
+    OP_SERVICE_ACCOUNT_TOKEN="$OPE_TOKEN" bounded "$OP_TIMEOUT" \
+        op read "$OPE_SIGNING_KEY/private key?ssh-format=openssh" |
+        SSH_AUTH_SOCK="$SIGNING_SOCK" ssh-add -t "${OPE_SIGNING_TTL:-1h}" - >/dev/null 2>&1
+    status=("${PIPESTATUS[@]}")
+    [ "${status[0]}" = 0 ] && [ "${status[1]}" = 0 ]
+}
+
+# Dedup only: every guarded step re-checks state, so a lost race costs one
+# extra op read or agent start, never a wrong key.
+take_lock() {
+    local lock="$SIGNING_SOCK.lock" tries=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+            rmdir "$lock" 2>/dev/null
+            continue
+        fi
+        tries=$((tries + 1))
+        [ "$tries" -ge 300 ] && return 1
+        sleep 0.1
+    done
+}
+
+ensure_signing_key() {
+    local locked=0 rc=0
+    if [ -z "${OP_ENV_FILE:-}" ]; then err "[X] op-env sign: OP_ENV_FILE is not set"; return 1; fi
+    read_op_env "$OP_ENV_FILE" || return 1
+    if [ -z "$OPE_SIGNING_KEY" ]; then err "[X] op-env sign: op.env has no OP_SIGNING_KEY"; return 1; fi
+    key_loaded && return 0
+    mkdir -p "$(dirname "$SIGNING_SOCK")" && chmod 700 "$(dirname "$SIGNING_SOCK")"
+    take_lock && locked=1
+    agent_alive || start_agent || rc=1
+    if [ "$rc" = 0 ] && ! key_loaded; then
+        load_key || { err "[X] op-env sign: could not load the signing key from 1Password"; rc=1; }
+    fi
+    [ "$locked" = 1 ] && rmdir "$SIGNING_SOCK.lock" 2>/dev/null
+    return "$rc"
+}
+
+cmd_sign() {
+    case " $* " in
+        *" -Y sign "*) ensure_signing_key || exit 1 ;;
+    esac
+    exec env SSH_AUTH_SOCK="$SIGNING_SOCK" ssh-keygen "$@"
+}
+
+report() { printf '%-10s%s\n' "$1" "$2"; }
+
+signing_active() {
+    local i=0
+    while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+        local k="GIT_CONFIG_KEY_$i" v="GIT_CONFIG_VALUE_$i"
+        [ "${!k:-}" = gpg.ssh.program ] && [ "${!v:-}" = "$SIGN_PROGRAM" ] && return 0
+        i=$((i + 1))
+    done
+    return 1
+}
+
+cmd_status() {
+    local cwd="$1" opfile penv active=0
+    opfile="$(locate_op_env "$cwd")"
+    if [ -z "$opfile" ]; then
+        report "[INFO]" "credentials: not configured (no op.env)"
+        report "[INFO]" "push: not configured"
+        report "[INFO]" "signing: not configured"
+        return 0
+    fi
+    if ! read_op_env "$opfile" 2>/dev/null; then
+        report "[X]" "credentials: $(read_op_env "$opfile" 2>&1 >/dev/null | sed 's/^\[X\] op-env: //')"
+        return 1
+    fi
+    PE_NAMES=()
+    penv="$(locate_project_env "$cwd" "$opfile")"
+    if [ -n "$penv" ] && ! read_project_env "$penv" 2>/dev/null; then
+        report "[X]" "credentials: $(read_project_env "$penv" 2>&1 >/dev/null | sed 's/^\[X\] op-env: //')"
+        return 1
+    fi
+    [ "${OP_ENV_ACTIVE:-}" = 1 ] && [ "${OP_ENV_FILE:-}" = "$opfile" ] && active=1
+    if [ "${#PE_NAMES[@]}" -eq 0 ]; then
+        report "[INFO]" "credentials: configured ($opfile), project.env has no references"
+    elif [ "$active" = 1 ]; then
+        report "[OK]" "credentials: active in this shell (${#PE_NAMES[@]} references)"
+    else
+        report "[INFO]" "credentials: configured (${#PE_NAMES[@]} references), not active in this shell"
+    fi
+    if ! has_name GH_TOKEN ${PE_NAMES[@]+"${PE_NAMES[@]}"}; then
+        report "[INFO]" "push: not configured (project.env has no GH_TOKEN)"
+    elif [ "${GIT_CONFIG_SYSTEM:-}" = "$HTTPS_GITCONFIG" ]; then
+        report "[OK]" "push: HTTPS with GH_TOKEN, active in this shell"
+    else
+        report "[INFO]" "push: configured, not active in this shell"
+    fi
+    if [ -z "$OPE_SIGNING_KEY" ]; then
+        report "[INFO]" "signing: not configured (no OP_SIGNING_KEY)"
+        return 0
+    fi
+    if signing_active; then
+        report "[OK]" "signing: op-env-sign, active in this shell"
+    else
+        report "[INFO]" "signing: configured, not active in this shell"
+    fi
+    if key_loaded; then
+        report "[OK]" "signing: key loaded in the op-env agent"
+    elif agent_alive; then
+        report "[INFO]" "signing: agent running, key loads on the next signature"
+    else
+        report "[INFO]" "signing: agent not running, starts on the next signature"
+    fi
+}
+
+cmd_exec() {
+    local exports
+    exports="$(cmd_shell_exports "$1")"
+    shift
+    eval "$exports"
+    exec "$@"
+}
+
+usage() {
+    err "usage: op-env locate|shell-exports|status [--cwd DIR] | exec [--cwd DIR] -- CMD... | sign ARGS..."
+    exit 2
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"
+shift
+case "$verb" in
+    sign) cmd_sign "$@"; exit ;;
+    _emit) cmd_emit "$@"; exit ;;
+esac
+cwd="$PWD"
+if [ "${1:-}" = --cwd ]; then
+    [ $# -ge 2 ] || usage
+    cwd="$2"
+    shift 2
+fi
+case "$verb" in
+    locate) [ $# -eq 0 ] || usage; locate_op_env "$cwd" ;;
+    shell-exports) [ $# -eq 0 ] || usage; cmd_shell_exports "$cwd" ;;
+    status) [ $# -eq 0 ] || usage; cmd_status "$cwd" ;;
+    exec) [ "${1:-}" = -- ] || usage; shift; [ $# -ge 1 ] || usage; cmd_exec "$cwd" "$@" ;;
+    *) usage ;;
+esac
