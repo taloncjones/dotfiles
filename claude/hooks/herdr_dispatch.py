@@ -146,7 +146,6 @@ def _op_env_prep_line(cwd: str | os.PathLike[str], env: dict[str, str]) -> str |
     return 'eval "$(' + shlex.join([str(OP_ENV), "shell-exports", "--cwd", str(cwd)]) + ')"'
 
 
-
 def _bind_pane_environment(
     herdr_cli: str,
     pane_id: str,
