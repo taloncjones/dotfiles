@@ -187,6 +187,23 @@ class PreconditionsTests(unittest.TestCase):
             checks.evaluate(self.report(ci=missing), self.root)["approve_allowed"]
         )
 
+    def test_raw_gh_rollup_names_ci_capture(self):
+        raw = {
+            "head": SHA,
+            "headRefOid": SHA,
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "tests",
+                 "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+        }
+        verdict = checks.evaluate(self.report(ci=raw), self.root)
+        self.assertFalse(verdict["approve_allowed"])
+        self.assertEqual(
+            verdict["reasons"],
+            ["CI payload is raw gh output, not the {head, check_runs, "
+             "status_contexts} envelope; capture it with gate_report.py ci-capture"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
