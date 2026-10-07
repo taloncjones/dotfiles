@@ -105,10 +105,14 @@ test_serve_page() {
   assert_contains "serve: GET / is 200" "${r%%|*}" "200"
   assert_contains "serve: pending row has a note form" "$r" "name=\"id\" value=\"$ID\"><input type=\"hidden\" name=\"section\" value=\"Solution\">"
   assert_contains "serve: form carries the file's hash" "$r" "name=\"sha\" value=\"$sha\""
-  assert_contains "serve: completed row is rendered" "$r" 'data-prd="2026-05-30-finished"'
+  assert_contains "serve: completed todo has a modal" "$r" 'data-modal="2026-05-30-finished"'
   assert_missing "serve: completed row has no form" "$r" 'name="id" value="2026-05-30-finished"'
-  r=$(http "$URL" GET "/?t=$TOKEN&open=$ID")
-  assert_contains "serve: ?open= opens that row" "$r" "<details class=\"prd\" id=\"prd-$ID\" open>"
+  assert_eq "serve: the open parameter is ignored" "$(http "$URL" GET "/?t=$TOKEN&open=$ID")" "$(http "$URL" GET "/?t=$TOKEN")"
+  assert_eq "serve: note forms sit in the pending modal" "$(printf '%s' "$r" | python3 -c '
+import sys
+t = sys.stdin.read()
+a = t.index("<div class=\"modal\" id=\"todo-'"$ID"'\"")
+print(t.count("<form class=\"note\"", a, t.index("</article></div>", a)))')" "2"
   r=$(http "$URL" GET "/nope?t=$TOKEN")
   assert_eq "serve: unknown path is 404" "${r%%|*}" "404"
 }
@@ -151,7 +155,7 @@ test_serve_post_note() {
   token=$(printf '%s' "$page" | sed -n 's/.*name="token" value="\([^"]*\)".*/\1/p' | head -1)
   sha=$(sha_of "$F"); cp "$F" "$REPO/old.md"
   r=$(http "$URL" POST /note "" "$(form id=$ID section=Solution sha="$sha" token="$token" note=$'Served idea.\r\nSecond line.')")
-  assert_eq "serve: good post redirects back to the row" "${r%|*}" "303|/?t=$TOKEN&open=$ID#prd-$ID"
+  assert_eq "serve: good post redirects back to the modal" "${r%|*}" "303|/?t=$TOKEN#todo-$ID"
   assert_eq "serve: note appended as LF note LF, CRLF folded to LF" \
     "$(python3 - "$REPO/old.md" "$F" <<'PY'
 import sys
@@ -472,6 +476,16 @@ test_serve_filter_form() {
   assert_missing "form: query never becomes markup" "$r" '<script>x</script>'
 }
 test_serve_filter_form
+test_serve_done_lane() {
+  local r
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "done lane: collapsed without a filter" "$r" '<details class="lane" id="lane-done"><summary>'
+  r=$(http "$URL" GET "/?t=$TOKEN&q=needle")
+  assert_contains "done lane: open while searching" "$r" '<details class="lane" id="lane-done" open><summary>'
+  r=$(http "$URL" GET "/?t=$TOKEN&area=board")
+  assert_missing "done lane: omitted when the filter matches no completed todo" "$r" 'id="lane-done"'
+}
+test_serve_done_lane
 test_serve_copy_chips() {
   local r
   r=$(http "$URL" GET "/?t=$TOKEN")
@@ -513,7 +527,7 @@ resp = c.getresponse()
 page = resp.read().decode()
 scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
 print(page.count("<script"))
-print(len(scripts) == 1 and "hashchange" in scripts[0] and "clipboard" in scripts[0])
+print(len(scripts) == 1 and all(k in scripts[0] for k in ("hashchange", "clipboard", "location.replace", "a.close", "Escape")))
 digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode() if scripts else ""
 print(resp.getheader("Content-Security-Policy") == f"frame-ancestors 'none'; script-src 'sha256-{digest}'; base-uri 'none'; form-action 'self'")
 PY
@@ -523,6 +537,18 @@ True
 True"
 }
 test_serve_board_script
+
+test_serve_theme_toggle() {
+  local r script
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "theme: served page has the toggle" "$r" '<button type="button" class="theme">Theme: System</button>'
+  script=$(printf '%s' "$r" | python3 -c 'import re, sys; print(re.search(r"<script>(.*?)</script>", sys.stdin.read(), re.S).group(1))')
+  assert_contains "theme: script cycles system, light, dark" "$script" 'var THEMES = ["system", "light", "dark"];'
+  assert_contains "theme: reads the saved choice inside try" "$script" 'try {
+    var name = localStorage.getItem(THEME_KEY);'
+  assert_contains "theme: saves the choice inside try" "$script" 'try { localStorage.setItem(THEME_KEY, next); }'
+}
+test_serve_theme_toggle
 
 test_serve_filter_before_cap() {
   local r n

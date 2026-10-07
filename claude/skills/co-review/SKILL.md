@@ -207,6 +207,43 @@ interactive workflow, start one fresh full gate (new `run_id`,
 A herdr ship launch runs exactly one gate: write `ship.json` with the delta
 verdict and stop, and the director dispatches the full gate.
 
+## Capture CI before seats
+
+A PR gate waits for the head's CI to finish and freezes it as `ci.json`
+before any probe or seat runs, so no seat reports a CI gap the coordinator
+already holds. CI can outlast a foreground call: a Claude coordinator runs
+this block with `run_in_background` and waits for its completion, as for the
+seats. `HEAD` is the manifest's `source.head`. A local no-PR review skips
+this block; a `lessons` class there falls back to `CLASS=light`.
+
+```bash
+gh pr checks "$PR" --watch --interval 30 >"$RUN_DIR/ci-watch.txt" 2>&1 || true
+gh pr view "$PR" --json headRefOid,statusCheckRollup >"$RUN_DIR/pr-ci.json" || exit 2
+uv run --no-project python "$GATE_REPORT" ci-envelope --pr-json "$RUN_DIR/pr-ci.json" \
+  --head "$HEAD" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
+```
+
+The watch's exit status is ignored; `ci-envelope` decides. Exit 0
+continues. A nonzero exit whose `reasons` is exactly
+`["CI evidence is missing"]` means the PR has no checks: record the no-CI
+evidence in `preconditions.no_ci` as `schema` describes, and a `lessons`
+class falls back to `CLASS=light` (rewrite the expected identity's `class`
+before any seat runs). Any other nonzero exit stops co-review `INCOMPLETE`
+before any probe, quoting `reasons`. `ci.json` is the report's
+`preconditions.ci` artifact; its digest is `ci-envelope.json`'s `sha256`.
+
+A `lessons` class checks the frozen file before spending a seat:
+
+```bash
+if [ "$CLASS" = "lessons" ]; then
+  uv run --no-project python "$GATE_REPORT" lessons-check \
+    --file "$CODEX_ROOT/claude/rules/personal/agent-lessons.md" >"$RUN_DIR/lessons-check.json" || exit 2
+fi
+```
+
+A nonzero exit stops co-review `INCOMPLETE` before any probe, quoting the
+printed `reasons`.
+
 ## Dispatch and collect seats
 
 The full tier runs `claude`, `codex`, and `breaker`, then `verifier`. The
@@ -215,6 +252,9 @@ then the verifier with that one finder artifact; skip `claude` and `breaker`.
 The delta tier runs `claude` and `verifier`: the `claude` reviewer command
 below, then the verifier with that one finder artifact; skip `codex` and
 `breaker`. `SUBSTITUTE` never applies in the delta tier.
+The lessons tier runs only `verifier`, on its Claude route with the Lessons
+fact-check section and no finder artifact; skip `claude`, `codex` and
+`breaker`. `SUBSTITUTE` never applies in the lessons tier.
 
 Probe every runner route the tier uses before spending seats. Each probe is a
 60-second `Reply ok` run on that seat's route and snapshot root, written under
@@ -227,7 +267,7 @@ that can. A probe is never a seat artifact.
 
 ```bash
 printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
-if [ "$CLASS" != "delta" ]; then
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime codex --role reviewer --risk normal --provisional \
     --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
@@ -237,7 +277,7 @@ uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
   --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
   --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json" &
-if [ "$CLASS" != "light" ]; then
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
@@ -332,7 +372,8 @@ if failed:
 PY
 ```
 
-Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
+Save the exact `POLICY`, frozen diff, the CI evidence section the block below
+appends, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
 identity, expected identity, and declared threat model in each prompt. Each
 prompt also names the frozen diff path (`$RUN_DIR/frozen.diff`) and the
@@ -354,10 +395,34 @@ its reset; the gate is `INCOMPLETE`.
 ```bash
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || exit 2
+# A local no-PR review skips the CI block, so it has no ci-envelope.json.
+CI_SHA256=
+if [ -f "$RUN_DIR/ci-envelope.json" ]; then
+  CI_SHA256=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$RUN_DIR/ci-envelope.json") || exit 2
+fi
 SEATS="claude codex breaker verifier"
 [ "$CLASS" = "light" ] && SEATS="codex verifier"
 [ "$CLASS" = "delta" ] && SEATS="claude verifier"
-for seat in $SEATS; do
+[ "$CLASS" = "lessons" ] && SEATS="verifier"
+# A literal word list: the coordinator's zsh does not word-split $SEATS.
+for seat in claude codex breaker verifier; do
+  case " $SEATS " in *" $seat "*) ;; *) continue ;; esac
+  if [ -n "$CI_SHA256" ]; then
+    printf '\n## CI evidence\n\nci.json: %s sha256=%s\n\n' "$RUN_DIR/ci.json" "$CI_SHA256" >>"$RUN_DIR/$seat.prompt"
+    cat "$RUN_DIR/ci.json" >>"$RUN_DIR/$seat.prompt"
+  else
+    printf '\n## CI evidence\n\nNone: a local no-PR review captures no CI.\n' >>"$RUN_DIR/$seat.prompt"
+  fi
+  if [ "$CLASS" = "lessons" ]; then
+    printf '%s\n' "" "## Lessons fact-check" "" \
+      "This diff touches only claude/rules/personal/agent-lessons.md and passed" \
+      "its contract check; no finder seat ran. For every added or changed rule," \
+      "test each technical claim (command syntax, flags, paths, tool behavior)" \
+      "against the frozen tree or a disposable fixture, and check the file" \
+      "header's admission filter. Report a false or unverifiable claim as a" \
+      "finding. Fill the whole coverage ledger; where a prose-only diff cannot" \
+      "affect an entry, say why." >>"$RUN_DIR/$seat.prompt"
+  fi
   sed -n '/^## Classes/,$p' "$RUBRIC" >>"$RUN_DIR/$seat.prompt"
 done
 ```
@@ -377,13 +442,14 @@ BREAKER_SEAT_RUNTIME=codex BREAKER_SEAT_ROOT=$CODEX_ROOT
 case " ${SUBSTITUTE:-} " in *" breaker "*) BREAKER_SEAT_RUNTIME=claude BREAKER_SEAT_ROOT=$CLAUDE_ROOT ;; esac
 # Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
 # Delta tier: only the claude reviewer seat.
-if [ "$CLASS" != "delta" ]; then
+# Lessons tier: no finder seat; only the verifier runs.
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
     --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
     --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
 fi
-if [ "$CLASS" != "light" ]; then
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
@@ -408,7 +474,8 @@ reviewers, invoke a partner, post feedback, fix code, or act outside disposable
 fixtures.
 
 After every finder artifact exists (full: `claude`, `codex`, `breaker`; light:
-`codex`; delta: `claude`) and its digest is recorded, run the verifier with role `skeptic` and
+`codex`; delta: `claude`; lessons: none, so the verifier starts
+once the probes pass) and its digest is recorded, run the verifier with role `skeptic` and
 the same frozen snapshot. Its prompt also contains the finder artifact
 paths/digests and all known blockers; it tests their material claims
 independently, accounts for each blocker and reconciles the combined coverage

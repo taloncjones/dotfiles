@@ -57,7 +57,7 @@ in this skill.
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-spec-review.XXXXXX")
-printf '%s\n' "Independently review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, skills, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Independently review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. It is a PRD reviewed before implementation. Check that every acceptance criterion maps to a contract command or named human-verify evidence. Flag a PRD that bundles separable mechanisms as a scope finding, and flag a check that reimplements what an existing tool already computes. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, skills, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime claude --role reviewer --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \

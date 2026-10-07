@@ -9,6 +9,7 @@ GATE_PREFIXES = (
     "claude/skills/review-change/",
     "codex/skills/review-change/",
 )
+LESSONS_PATH = "claude/rules/personal/agent-lessons.md"
 _HEADER = "diff --git "
 
 
@@ -33,7 +34,10 @@ def paths_from_diff(text: str) -> list[str] | None:
 
 
 def classify(paths: list[str]) -> str:
-    """Return "light" only when every path is prose outside the gate skills."""
+    """Return "lessons" for the lessons file alone, "light" when every path is
+    prose outside the gate skills, else "full"."""
+    if paths == [LESSONS_PATH]:
+        return "lessons"
     if not paths:
         return "full"
     for path in paths:

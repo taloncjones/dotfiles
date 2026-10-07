@@ -45,7 +45,8 @@ target base. Stop if either identity is unavailable or mismatched.
    session cannot renew the allowance; only new explicit user direction after
    the stop can. Changed identity or interruption invalidates approval and is
    a stop, not permission to automatically launch another gate.
-   `co-review` self-classifies the frozen diff (light for prose-only changes,
+   `co-review` self-classifies the frozen diff (lessons for a diff touching only
+   `claude/rules/personal/agent-lessons.md`, light for other prose-only changes,
    full otherwise); pass `--full` when a prose change alters a machine-read
    contract, such as a SKILL.md block a test greps.
 A herdr brief line `herdr-ship-brief: tier=full` runs `co-review --full`.

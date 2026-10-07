@@ -22,11 +22,8 @@ is tracked separately.
 | ------------------------- | -------------------- | ---------------- | ------- | ---------------------------------------------------------- |
 | isolated worktree         | dispatch harness     | --               | --      | auto                                                       |
 | brainstorming             | planner              | opus/high        | Claude  | HUMAN                                                      |
-| write spec                | planner              | opus/high        | Claude  | auto                                                       |
+| write PRD                 | planner              | opus/high        | Claude  | auto                                                       |
 | codex-spec-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
-| writing-plans             | planner              | opus/high        | Claude  | auto                                                       |
-| plan-review               | plan_reviewer        | fable/medium     | Claude  | read-only sandbox, single pass                             |
-| codex-plan-review         | codex plan_reviewer  | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
 | implement                 | implementation       | sonnet/medium    | Claude  | auto + per-task review                                     |
 | implement, UX/UI override | codex implementation | gpt-6-astra/high | Codex   | fresh Claude review before commit                          |
 | implementation review     | development_reviewer | sonnet/high      | Claude  | task-local advisory review; blockers return to development |
@@ -41,7 +38,10 @@ floor applies -- `fable/medium` normally, `fable/high` under `difficulty=hard`.
 fable/medium is opus/high's tier peer (fable needs one less effort step for
 the same design quality), not a same-effort swap, so a fable fallback is never
 actually weaker than the opus seat it replaces. One planning worker spans
-brainstorm, spec and plan -- not three dispatches.
+brainstorm and the PRD -- not separate dispatches.
+
+The default pipeline no longer runs a plan review; the `plan_reviewer` seat below
+serves only an on-request `writing-plans` plan.
 
 Plan review is the one review step that does not share the `reviewer` role.
 `plan_reviewer` is `fable/medium` with an `opus/high` fallback (the two are
