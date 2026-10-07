@@ -25,6 +25,9 @@ HTTPS_GITCONFIG="$DOTFILES/git/agent-https.gitconfig"
 SIGN_PROGRAM="$DOTFILES/bin/op-env-sign"
 SIGNING_SOCK="${OP_ENV_SIGNING_SOCK:-$HOME/.local/state/dotfiles/op-env-signing.sock}"
 OP_TIMEOUT="${OP_ENV_OP_TIMEOUT:-20}"
+# Set at command scope after an empty reset: command scope is read last, so
+# no global or repo-local credential helper ever receives GH_TOKEN.
+GH_HELPER='!f() { test "$1" = get && test -n "$GH_TOKEN" && printf '\''username=x-access-token\npassword=%s\n'\'' "$GH_TOKEN"; }; f'
 
 err() { printf '%s\n' "$1" >&2; }
 
@@ -184,6 +187,12 @@ emit_resolved() {
     return 0
 }
 
+# Prints one command-scope git config entry and advances the caller's count.
+emit_config() {
+    printf 'export GIT_CONFIG_KEY_%d=%s GIT_CONFIG_VALUE_%d=%s\n' "$count" "$1" "$count" "$(sq "$2")"
+    count=$((count + 1))
+}
+
 has_name() {
     local want="$1" name
     shift
@@ -192,7 +201,7 @@ has_name() {
 }
 
 cmd_shell_exports() {
-    local cwd="$1" opfile penv resolved count name resolved_ok=1
+    local cwd="$1" opfile penv resolved count first name resolved_ok=1
     local -a unset_args
     opfile="$(locate_op_env "$cwd")"
     [ -n "$opfile" ] || return 0
@@ -202,6 +211,9 @@ cmd_shell_exports() {
     if [ -n "$penv" ]; then
         read_project_env "$penv" || return 0
     fi
+    count="${GIT_CONFIG_COUNT:-0}"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    first="$count"
     if [ "${#PE_NAMES[@]}" -gt 0 ]; then
         # op starts without the listed names, so every listed name env -0
         # reports is one op run set, never one inherited from the caller.
@@ -213,6 +225,8 @@ cmd_shell_exports() {
             printf '%s\n' "$resolved"
             if has_name GH_TOKEN "${PE_NAMES[@]}"; then
                 printf 'export GIT_CONFIG_SYSTEM=%s\n' "$(sq "$HTTPS_GITCONFIG")"
+                emit_config credential.https://github.com.helper ""
+                emit_config credential.https://github.com.helper "$GH_HELPER"
             fi
         else
             resolved_ok=0
@@ -220,14 +234,12 @@ cmd_shell_exports() {
         fi
     fi
     if [ -n "$OPE_SIGNING_KEY" ]; then
-        count="${GIT_CONFIG_COUNT:-0}"
-        [[ "$count" =~ ^[0-9]+$ ]] || count=0
-        printf 'export GIT_CONFIG_KEY_%d=gpg.format GIT_CONFIG_VALUE_%d=ssh\n' "$count" "$count"
-        printf 'export GIT_CONFIG_KEY_%d=gpg.ssh.program GIT_CONFIG_VALUE_%d=%s\n' \
-            $((count + 1)) $((count + 1)) "$(sq "$SIGN_PROGRAM")"
-        printf 'export GIT_CONFIG_KEY_%d=user.signingkey GIT_CONFIG_VALUE_%d=%s\n' \
-            $((count + 2)) $((count + 2)) "$(sq "key::$OPE_SIGNING_PUBKEY")"
-        printf 'export GIT_CONFIG_COUNT=%d\n' $((count + 3))
+        emit_config gpg.format ssh
+        emit_config gpg.ssh.program "$SIGN_PROGRAM"
+        emit_config user.signingkey "key::$OPE_SIGNING_PUBKEY"
+    fi
+    if [ "$count" != "$first" ]; then
+        printf 'export GIT_CONFIG_COUNT=%d\n' "$count"
     fi
     printf 'export OP_ENV_FILE=%s\n' "$(sq "$opfile")"
     # Status reads this as "credentials resolved": a failed op run clears any

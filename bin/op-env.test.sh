@@ -249,6 +249,23 @@ done
 cred="$( (unset GIT_CONFIG_NOSYSTEM; eval "$exports"; printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git -C "$TMP/r-https" credential fill) )"
 check "credential helper answers from GH_TOKEN" 'printf "%s\n" "$cred" | grep -qx "username=x-access-token" && printf "%s\n" "$cred" | grep -qx "password=resolved-GH_TOKEN"'
 
+# No other helper may see GH_TOKEN, on get or on store.
+git config --global credential.helper "!f() { echo global-\$1 >>\"$TMP/helper.log\"; }; f"
+git -C "$TMP/r-https" config credential.helper "!f() { echo local-\$1 >>\"$TMP/helper.log\"; }; f"
+CRED_IN="$(printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=resolved-GH_TOKEN\n')"
+printf '%s\n\n' "$CRED_IN" | git -C "$TMP/r-https" credential approve
+check "fixture: credential recorders see a store without op-env" 'grep -qx global-store "$TMP/helper.log" && grep -qx local-store "$TMP/helper.log"'
+: >"$TMP/helper.log"
+(
+    unset GIT_CONFIG_NOSYSTEM
+    eval "$exports"
+    printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git -C "$TMP/r-https" credential fill >/dev/null
+    printf '%s\n\n' "$CRED_IN" | git -C "$TMP/r-https" credential approve
+    printf '%s\n\n' "$CRED_IN" | git -C "$TMP/r-https" credential reject
+)
+check "a GH_TOKEN session hands credentials to no global or repo-local helper" '[ ! -s "$TMP/helper.log" ]'
+git config --global --unset-all credential.helper
+
 # --- 7. signing through a plain ssh-agent ---
 ssh-keygen -q -t ed25519 -N '' -C op-env-test -f "$TMP/signkey"
 export FAKE_OP_KEY="$TMP/signkey"
@@ -273,6 +290,12 @@ check "an expired key (TTL) reloads on the next signature" '[ "$(grep -c "^read 
 
 out="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
 check "signing entries append after an existing GIT_CONFIG_COUNT" 'printf "%s\n" "$out" | grep -q "^export GIT_CONFIG_KEY_1=gpg.format " && printf "%s\n" "$out" | grep -qx "export GIT_CONFIG_COUNT=4"'
+
+printf 'GH_TOKEN=op://V/gh/token\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+got="$( (eval "$out"; git -C "$REPO" config --get gpg.ssh.program) )"
+check "credential and signing entries share one GIT_CONFIG_COUNT" 'printf "%s\n" "$out" | grep -qx "export GIT_CONFIG_COUNT=5" && [ "$(printf "%s\n" "$out" | grep -c "^export GIT_CONFIG_COUNT=")" = 1 ] && [ "$got" = "$ROOT/bin/op-env-sign" ]'
+rm -f "$REPO/project.env"
 
 # --- 8. concurrent first signatures and a stale lock ---
 export OP_ENV_SIGNING_SOCK="$TMP/s2/op-env-signing.sock"
