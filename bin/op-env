@@ -127,7 +127,7 @@ read_project_env() {
         value="$(unquote "${line#*=}")"
         case "$value" in
             op://*) ;;
-            *) fail_rule "project.env line $n ($name) is not an op:// reference"; return 1 ;;
+            *) fail_rule "project.env line $n is not NAME=op://..."; return 1 ;;
         esac
         PE_NAMES+=("$name")
     done <"$f"

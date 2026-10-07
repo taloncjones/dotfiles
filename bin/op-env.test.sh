@@ -125,9 +125,16 @@ check "OP_SIGNING_KEY without OP_SIGNING_PUBKEY is refused" '[ -z "$out" ] && gr
 write_op_env
 printf '# refs\nGH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN=%s\n' "$LITERAL" >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
-check "literal project.env line is refused by line and name" '[ -z "$out" ] && grep -q "project.env line 3 (CLOUDFLARE_API_TOKEN) is not an op:// reference" "$TMP/err"'
+check "literal project.env line is refused by line number" '[ -z "$out" ] && grep -q "project.env line 3 is not NAME=op://" "$TMP/err"'
 check "literal value never printed" '! grep -qF "$LITERAL" "$TMP/err"'
 check "literal refusal calls no op" '[ ! -s "$OP_LOG" ]'
+
+PADDED="ops_$(printf 'padded%s' token | base64 | tr -d '\n')"
+printf 'GH_TOKEN=op://V/gh/token\n%s\n' "$PADDED" >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+check "project.env bare padded token is refused without its content" '[ -z "$out" ] && grep -q "project.env line 2 is not NAME=op://" "$TMP/err" && ! grep -qF "${PADDED%%=*}" "$TMP/err"'
+out="$("$OP_ENV" status --cwd "$REPO" 2>&1)"
+check "status never prints the bare padded token" '! printf "%s" "$out" | grep -qF "${PADDED%%=*}"'
 
 # --- 4. resolution ---
 printf 'GH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN="op://V/cf/credential"\n' >"$REPO/project.env"
