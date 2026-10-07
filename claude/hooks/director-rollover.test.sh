@@ -1369,6 +1369,250 @@ assert len(hits) == 1 and hits[0]["matcher"] == "startup|resume|clear|compact", 
 PY
 SH
 
+# Decisions log: shared fixture lines for the checks below are inlined per
+# check on purpose (each reads top to bottom).
+
+check "decisions: note-decision appends one line and decisions prints it" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+out=$($CORE note-decision $A --task some-task --text "  fix N1 only  ")
+printf '%s\n' "$out" | grep -Eqx 'decision: [0-9a-f]{12}'
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+test -n "$LOG"
+python3 - "$LOG" <<'PY'
+import json, sys
+rec = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert set(rec) == {"v", "ts", "id", "event", "task", "source", "batch", "text", "session", "fence"}, rec
+assert rec["event"] == "decision" and rec["task"] == "some-task" and rec["source"] == "owner", rec
+assert rec["batch"] is None and rec["text"] == "fix N1 only", rec
+PY
+$CORE note-decision $A --repo-wide --text "ship serially" >/dev/null
+b=$($CORE decisions --repo-path "$FX_REPO")
+printf '%s\n' "$b" | head -n 1 | grep -q '^\[INFO\] herdr decisions:'
+printf '%s\n' "$b" | grep -Eq -- '^- [0-9]{4}-[0-9]{2}-[0-9]{2} some-task: fix N1 only \[[0-9a-f]{12}\]$'
+printf '%s\n' "$b" | grep -Eq -- '^- [0-9]{4}-[0-9]{2}-[0-9]{2} repo: ship serially \[[0-9a-f]{12}\]$'
+SH
+
+check "decisions: stale fence refuses note-decision and retire-decision, nothing appended" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1"
+id=$($CORE note-decision $A --fence "$F" --repo-wide --text keep)
+id=${id#decision: }
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+n=$(wc -l < "$LOG")
+if $CORE note-decision $A --fence $((F + 7)) --repo-wide --text stale >/dev/null 2>&1; then exit 1; fi
+if $CORE retire-decision $A --fence $((F + 7)) --id "$id" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --session 33333333-3333-4333-8333-333333333333 --fence "$F" --repo-wide --text x >/dev/null 2>&1; then exit 1; fi
+test "$(wc -l < "$LOG")" -eq "$n"
+SH
+
+check "decisions: note-decision input validation refuses bad text, scope flags and task id" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+if $CORE note-decision $A --repo-wide --text "   " >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --repo-wide --text "$(python3 -c 'print("x" * 501)')" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --repo-wide --text "$(printf 'a\nb')" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --repo-wide --text "$(printf 'a\rb')" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --repo-wide --task t1 --text y >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --text y >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --task ../x --text y >/dev/null 2>&1; then exit 1; fi
+test -z "$(find "$FX" -name decisions.jsonl -type f)"
+$CORE note-decision $A --repo-wide --text "$(python3 -c 'print("x" * 500)')" >/dev/null
+$CORE note-decision $A --task never-recorded --text ok >/dev/null
+test "$(wc -l < "$(find "$FX" -name decisions.jsonl -type f)")" -eq 2
+SH
+
+check "decisions: retire-decision hides the entry, repeats are no-ops, unknown id refused" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+id=$($CORE note-decision $A --repo-wide --text "retry in 10 minutes")
+id=${id#decision: }
+$CORE decisions --repo-path "$FX_REPO" | grep -q 'retry in 10 minutes'
+test "$($CORE retire-decision $A --id "$id")" = "retired: $id"
+test -z "$($CORE decisions --repo-path "$FX_REPO")"
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+n=$(wc -l < "$LOG")
+test "$($CORE retire-decision $A --id "$id")" = "decision: $id already retired"
+if $CORE retire-decision $A --id 000000000000 >/dev/null 2>&1; then exit 1; fi
+test "$(wc -l < "$LOG")" -eq "$n"
+SH
+
+check "decisions: terminal and archived task entries drop, unknown-task and repo-wide stay" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+for t in t-open t-failed t-abandoned t-merged t-archived t-unknown; do
+    $CORE note-decision $A --task $t --text "note for $t" >/dev/null
+done
+$CORE note-decision $A --repo-wide --text "note for repo" >/dev/null
+mkdir -p "$RD/tasks" "$RD/archive/2026-09/tasks"
+printf '{"status":"implementing"}' > "$RD/tasks/t-open.json"
+printf '{"status":"failed"}' > "$RD/tasks/t-failed.json"
+printf '{"status":"abandoned"}' > "$RD/tasks/t-abandoned.json"
+printf '{"status":"merged"}' > "$RD/tasks/t-merged.json"
+printf '{"status":"merged"}' > "$RD/archive/2026-09/tasks/t-archived.json"
+printf 'not json\n[1]\n{"v":2,"event":"decision","text":"other version","ts":"2026-10-07T00:00:00Z"}\n' >> "$(find "$FX" -name decisions.jsonl -type f)"
+b=$($CORE decisions --repo-path "$FX_REPO")
+for t in t-open t-unknown repo; do printf '%s\n' "$b" | grep -q "note for $t "; done
+for t in t-failed t-abandoned t-merged t-archived; do ! printf '%s\n' "$b" | grep -q "note for $t "; done
+! printf '%s\n' "$b" | grep -q 'other version'
+SH
+
+check "decisions: rollover carry lands in the log, latest batch only, --no-carry hides it" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+roll() {
+    PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+        $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+        --carry "$1" --ack-secs 1 --poll-secs 0.1 >/dev/null || true
+}
+roll "$(printf 'first note\nsecond note')"
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+python3 - "$LOG" <<'PY'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1])]
+assert [r["event"] for r in recs] == ["carry-batch", "decision", "decision"], recs
+assert recs[1]["batch"] == recs[2]["batch"] == recs[0]["batch"], recs
+assert recs[1]["source"] == "carry" and recs[1]["task"] is None, recs
+PY
+b=$($CORE decisions --repo-path "$FX_REPO")
+printf '%s\n' "$b" | grep -Eq -- 'carried: first note \['
+printf '%s\n' "$b" | grep -Eq -- 'carried: second note \['
+test -z "$($CORE decisions --repo-path "$FX_REPO" --no-carry)"
+roll "later note"
+b=$($CORE decisions --repo-path "$FX_REPO")
+! printf '%s\n' "$b" | grep -q 'first note'
+printf '%s\n' "$b" | grep -qF 'carried: later note ['
+roll ""
+test -z "$($CORE decisions --repo-path "$FX_REPO")"
+long=$(python3 -c 'print("".join(chr(97 + i % 26) for i in range(1200)))')
+roll "$long"
+python3 - "$LOG" "$long" <<'PY'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1])]
+batch = [r for r in recs if r["event"] == "carry-batch"][-1]["batch"]
+chunks = [r["text"] for r in recs if r["event"] == "decision" and r["batch"] == batch]
+assert len(chunks) == 3, chunks
+assert chunks[1].startswith("(cont.) ") and chunks[2].startswith("(cont.) "), chunks
+assert chunks[0] + chunks[1][8:] + chunks[2][8:] == sys.argv[2]
+PY
+SH
+
+check "decisions: block capped at 3000 chars with omission line, --all prints every entry" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+T=$(python3 -c 'print("x" * 390)')
+i=0
+while [ $i -lt 30 ]; do $CORE note-decision $A --repo-wide --text "n$i $T" >/dev/null; i=$((i + 1)); done
+b=$($CORE decisions --repo-path "$FX_REPO")
+test "$(printf '%s' "$b" | wc -c)" -le 3000
+printf '%s\n' "$b" | tail -n 1 | grep -Eq '^\([0-9]+ older omitted; full list: python3 ~/\.claude/hooks/herdr_orch_core\.py decisions --repo-path .+ --all\)$'
+printf '%s\n' "$b" | grep -q ' repo: n29 '
+! printf '%s\n' "$b" | grep -q ' repo: n0 '
+test "$($CORE decisions --repo-path "$FX_REPO" --all | grep -c ' repo: n[0-9]* ')" -eq 30
+SH
+
+check "hook: decisions block injected on startup, resume, clear and compact" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+H="python3 $REPO_ROOT/claude/hooks/director_rollover.py"
+SOCK=/tmp/cc-socks/$$.sock
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket "$SOCK")
+p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$1" "$FX_REPO"; }
+test -z "$(p startup | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p resume | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+$CORE note-decision --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F" --repo-wide --text "serial shipping" >/dev/null
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+for src in startup resume; do
+    p $src | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H | ctx > "$FX/c.$src"
+    head -n 1 "$FX/c.$src" | grep -q '^\[INFO\] herdr decisions:'
+    grep -q 'repo: serial shipping \[' "$FX/c.$src"
+done
+p clear | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H | ctx > "$FX/c.clear"
+head -n 1 "$FX/c.clear" | grep -q '^\[INFO\] herdr director rollover'
+grep -q '^\[INFO\] herdr decisions:' "$FX/c.clear"
+grep -q 'repo: serial shipping \[' "$FX/c.clear"
+p compact | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H | ctx > "$FX/c.compact"
+grep -q 'repo: serial shipping \[' "$FX/c.compact"
+SH
+
+check "hook: decisions after adopt-rollover omit carry already printed as carried lines" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+sleep 60 & OLD=$!
+S1=11111111-1111-4111-8111-111111111111
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+$CORE note-decision --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F1" --repo-wide --text "owner standing rule" >/dev/null
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+# The rollover verb writes the carry entries and the marker; the marker is then
+# rewritten for the token this check holds.
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$OLD.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F1" \
+    --carry "carry note one" --ack-secs 1 --poll-secs 0.1 >/dev/null || true
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 $S1 "$F1" 60
+python3 - "$RD/rollover-pending.json" <<'PY'
+import json, sys
+p = sys.argv[1]; m = json.load(open(p)); m["carry"] = "carry note one"
+json.dump(m, open(p, "w"))
+PY
+printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_ENV=1 HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h"
+kill $OLD
+python3 - "$FX/h" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
+assert c.startswith("[INFO] herdr director rollover: lease handed over"), c
+assert c.count("carry note one") == 1, c
+assert "carried: carry note one" in c, c
+assert "[INFO] herdr decisions:" in c and "repo: owner standing rule [" in c, c
+PY
+SH
+
+check "hook: decisions verb failure adds the one-line warning and keeps the lease block" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+SOCK=/tmp/cc-socks/$$.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+mkdir "$RD/decisions.jsonl"
+printf '{"hook_event_name":"SessionStart","source":"clear","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h" && rc=0 || rc=$?
+test "$rc" = 0
+python3 - "$FX/h" "$FX_REPO" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
+assert c.startswith("[INFO] herdr director rollover"), c
+last = c.splitlines()[-1]
+assert last.startswith("[WARNING] herdr decisions: not loaded; run python3 ~/.claude/hooks/herdr_orch_core.py decisions --repo-path "), last
+PY
+SH
+
+check "decisions: director.md and the skill document the decisions log and compact instructions" <<'SH'
+D="$REPO_ROOT/claude/agents/director.md"
+S="$REPO_ROOT/claude/skills/herdr-orchestration/SKILL.md"
+python3 - "$D" "$S" "$REPO_ROOT/claude/skills/herdr-orchestration/references/state-layout.md" <<'PY'
+import sys
+d, s, layout = (open(p).read() for p in sys.argv[1:4])
+assert "\n# Compact instructions\n" in d, "heading"
+sec = d.split("\n# Compact instructions\n", 1)[1].lower()
+for w in ("lease", "fence", "open question", "in-flight", "note-decision"):
+    assert w in sec, w
+assert "note-decision" in d and "[INFO] herdr decisions" in d
+body = s.split("### Decisions log", 1)[1].split("\n## ", 1)[0]
+for w in ("note-decision", "retire-decision", "AskUserQuestion", "--repo-wide", "--all", "older omitted"):
+    assert w in body, w
+assert "decisions.jsonl" in layout
+PY
+SH
+
 rm -f "$WRITE_MARKER" "$HANDOVER_STUB"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

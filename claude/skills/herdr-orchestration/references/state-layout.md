@@ -61,6 +61,7 @@ STATE_ROOT/
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
     rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
+    decisions.jsonl                   # append-only owner decisions (see "decisions.jsonl" below); fenced verbs and `rollover --carry` write it
     rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed|takeover, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
     tasks/
       <task_id>.json                  # durable task record
@@ -240,6 +241,21 @@ appends `{"v":2,"event":"adopted","handover":<sha256(token)[:16]>,...}` to
 the token itself is never logged. A malformed or expired marker reads as
 absent. `carry` (at most 4000 characters) is printed as `carried:` lines in
 the new director's startup block.
+
+### `decisions.jsonl`
+
+Append-only, one JSON object per line, `v: 1`. Writers: `note-decision`
+(fenced; `event: decision`, `source: owner`, `task` a task id or null for
+repo-wide, `text` at most 500 characters), `retire-decision` (fenced;
+`event: retire`, `retires: <id>`), and the `rollover` verb's carry (inside
+the marker's owner transaction: one `event: carry-batch` line with
+`batch: <handover id>`, then one `source: carry` decision per 500-character
+chunk). A decision is live unless a retire names it, its task is failed,
+abandoned, merged or archived, or it is a carry entry whose batch is not the
+last `carry-batch`. Unparseable lines and other versions are skipped. The
+`decisions --repo-path <P> [--no-carry] [--all]` verb prints the live entries
+(newest kept, 3000 characters unless `--all`); the SessionStart hook injects
+that block.
 
 ### `config.json`
 

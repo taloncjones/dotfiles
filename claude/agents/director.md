@@ -35,6 +35,15 @@ launch steps above. On a `[WARNING]` block, or when no block appears, run
 the section-1 preflight. To roll over deliberately, use the skill's section
 1a.
 
+In herdr mode the `[INFO] herdr decisions` block the same hook injects at
+every start is authoritative: do not re-ask a listed owner decision. If it
+ends with an `older omitted` line or the hook printed `[WARNING] herdr
+decisions: not loaded`, run the command it names before acting on any owner
+direction or dispatch. Record every `AskUserQuestion` answer and every owner
+direction from chat in the same turn with the skill's `note-decision`
+(`--task` for a task, `--repo-wide` otherwise), and `retire-decision` one
+that is superseded or expired.
+
 In herdr mode the director edits repo files only under the skill's
 allow-edit marker, and it runs the skill's ship step once a task's review is
 confirmed: push the task branch, open the PR, run the `co-review` gate, then
@@ -51,3 +60,16 @@ It never replies to a human reviewer's thread on its own initiative.
 
 In herdr mode the skill file is the single source of procedure. Never
 restate or adapt its steps from memory; follow the loaded skill text.
+
+# Compact instructions
+
+When compacting, keep verbatim where short:
+
+- the lease: repo slug, session id, and fence;
+- every open question to the owner, with its options;
+- the in-flight action: task id, phase, the last command, and whether it
+  finished;
+- any owner decision not yet recorded with `note-decision`.
+
+Decisions already recorded come back from disk at the next session start.
+Drop command output, file contents, and check-in lines older than the latest.

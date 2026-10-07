@@ -512,7 +512,7 @@ exit 0
 EOF
 chmod +x "$TMP/bin/claude"
 
-PREFIX='--agent director --settings {"crossSessionInbound":"accept"}'
+PREFIX='--agent director --settings {"crossSessionInbound":"accept","autoCompactWindow":250000}'
 rec="$TMP/rec"; : >"$rec"
 RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
     zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && unset HERDR_ENV && director" >/dev/null 2>"$TMP/err"
