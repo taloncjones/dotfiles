@@ -12184,6 +12184,46 @@ assert c.row_settlement({"status": "merged", "workers": [row]}, 0, done=None, re
                         head=h, payload_root=tempfile.mkdtemp()) == "task-terminal"
 PY
 
+check "row_settlement: a paused or failed plan or implement attempt may exit" <<'PY'
+import calendar, importlib.util, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+T = calendar.timegm((2026, 10, 7, 12, 0, 0, 0, 0, 0))
+def row(phase, lid, **kw):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": "w1:p1", "source_head_sha": h, "agent": lid, "status": "launched", **kw}
+def done_for(r, outcome, **kw):
+    d = {k: r[k] for k in c.ATTEMPT_FIELDS}
+    d.update(task_id="t", outcome=outcome, ts="2026-10-07T12:00:00Z", head_sha=h, base_sha=h)
+    d.update(kw)
+    return d
+def rs(r, done):
+    return c.row_settlement({"status": "in-progress", "workers": [r]}, 0, done=done,
+                            review=None, head=h, payload_root=tempfile.mkdtemp())
+for phase in ("plan", "implement"):
+    r = row(phase, "X")
+    for outcome in ("paused", "failed"):
+        assert rs(r, done_for(r, outcome)) == "attempt-stopped", (phase, outcome)
+    assert rs(r, done_for(r, "completed")) is None, phase
+    assert rs(r, done_for(r, "paused", launch_id="other")) is None, phase
+    assert rs(r, done_for(r, "paused", ts="garbled")) is None, phase
+    missing = done_for(r, "paused"); missing.pop("ts")
+    assert rs(r, missing) is None, phase
+rev = row("review", "R")
+assert rs(rev, done_for(rev, "paused")) is None
+impl = row("implement", "I")
+def with_reprompt(status, secs):
+    return dict(impl, reprompts=[{"seq": 1, "status": status, "started_ns": secs * 10**9}])
+assert rs(with_reprompt("delivered", T + 5), done_for(impl, "paused")) is None
+assert rs(with_reprompt("delivered", T), done_for(impl, "paused")) is None
+assert rs(with_reprompt("delivered", T - 5), done_for(impl, "paused")) == "attempt-stopped"
+assert rs(with_reprompt("failed", T + 5), done_for(impl, "paused")) == "attempt-stopped"
+assert rs(dict(impl, reprompts=[{"seq": 1, "status": "delivered"}]),
+          done_for(impl, "paused")) is None, "non-int started_ns vetoes"
+PY
+
 check "ship handoff helpers: ship_launch_dir refuses odd ids and merge_ready reads through them" <<'PY'
 import importlib.util, inspect, sys, tempfile
 from pathlib import Path

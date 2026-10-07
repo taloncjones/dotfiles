@@ -1195,6 +1195,26 @@ def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
         fx.close()
 
 
+def test_settle_exits_an_idle_implementer_whose_attempt_paused():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        fx.settle_state([impl], "in-progress",
+                        [{"name": "I", "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2")])
+        done = {k: impl[k] for k in core.ATTEMPT_FIELDS}
+        done.update(task_id="td-a", outcome="paused", ts=core.now_iso(),
+                    head_sha=head, base_sha=head, agent="I")
+        (fx.rd / "tasks" / "td-a.done.json").write_text(json.dumps(done))
+        result = fx.settle("I")
+        assert result["reason"] == "attempt-stopped" and result["status"] == "settled", result
+        assert result["agent"] == "exited" and result["pane"].startswith("kept"), result
+        assert fx.worker_records()[0]["exit_requested"] == "attempt-stopped", fx.worker_records()
+    finally:
+        fx.close()
+
+
 def test_settle_exits_an_idle_ship_worker_once_its_report_exists():
     fx = Fixture()
     try:
@@ -4610,6 +4630,7 @@ for name, test in (
     ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
     ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
+    ("settle exits an idle implementer whose attempt paused", test_settle_exits_an_idle_implementer_whose_attempt_paused),
     ("settle exits an idle ship worker once its report exists", test_settle_exits_an_idle_ship_worker_once_its_report_exists),
     ("settle leaves a ship worker without a report", test_settle_leaves_a_ship_worker_without_a_report),
     ("settle exits an idle ship agent once its handoff is recorded", test_settle_exits_an_idle_ship_agent_once_its_handoff_is_recorded),
