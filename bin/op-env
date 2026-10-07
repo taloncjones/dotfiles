@@ -113,13 +113,18 @@ read_op_env() {
     return 0
 }
 
-# Names that steer op, git, the shell, the loader or account routing, or
-# that the shell maintains itself.
+# Refused project.env names: the prefixes OP_ BASH_ LC_ LD_ DYLD_ GIT_ XDG_
+# PYTHON PERL5 RUBY, any *_PROXY or *_proxy, and the exact names PATH HOME
+# SHELL ENV IFS PS4 PROMPT_COMMAND CDPATH SHELLOPTS BASHOPTS ZDOTDIR LANG
+# NODE_OPTIONS NODE_PATH GH_CONFIG_DIR SSH_AUTH_SOCK CLAUDE_CONFIG_DIR PWD
+# OLDPWD SHLVL _. Other names, GH_TOKEN included, are allowed.
 is_reserved_name() {
     case "$1" in
-        OP_*|GIT_*|LD_*|DYLD_*) return 0 ;;
-        PATH|HOME|SHELL|IFS|ENV|BASH_ENV|ZDOTDIR|SSH_AUTH_SOCK|CLAUDE_CONFIG_DIR) return 0 ;;
-        PWD|OLDPWD|SHLVL|_) return 0 ;;
+        OP_*|BASH_*|LC_*|LD_*|DYLD_*|GIT_*|XDG_*|PYTHON*|PERL5*|RUBY*) return 0 ;;
+        *_PROXY|*_proxy) return 0 ;;
+        PATH|HOME|SHELL|ENV|IFS|PS4|PROMPT_COMMAND|CDPATH|SHELLOPTS|BASHOPTS) return 0 ;;
+        ZDOTDIR|LANG|NODE_OPTIONS|NODE_PATH|GH_CONFIG_DIR) return 0 ;;
+        SSH_AUTH_SOCK|CLAUDE_CONFIG_DIR|PWD|OLDPWD|SHLVL|_) return 0 ;;
     esac
     return 1
 }

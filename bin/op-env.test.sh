@@ -139,12 +139,17 @@ out="$("$OP_ENV" status --cwd "$REPO" 2>&1)"
 check "status never prints the bare padded token" '! printf "%s" "$out" | grep -qF "${PADDED%%=*}"'
 
 : >"$OP_LOG"
-for name in OP_SERVICE_ACCOUNT_TOKEN PATH BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM PWD; do
+for name in OP_SERVICE_ACCOUNT_TOKEN PATH BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM PWD \
+    SHELLOPTS BASHOPTS BASH_XTRACEFD BASH_COMPAT LC_ALL LANG PS4 PROMPT_COMMAND CDPATH NODE_OPTIONS NODE_PATH \
+    PYTHONPATH PERL5LIB RUBYOPT HTTPS_PROXY https_proxy NO_PROXY XDG_CONFIG_HOME GH_CONFIG_DIR LD_PRELOAD DYLD_INSERT_LIBRARIES; do
     printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
     out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
     check "project.env reserved name $name is refused" '[ -z "$out" ] && grep -q "project.env line 2 names a reserved variable" "$TMP/err" && ! grep -qF "$name" "$TMP/err"'
 done
 check "reserved-name refusal calls no op" '[ ! -s "$OP_LOG" ]'
+printf 'GH_TOKEN=op://V/gh/token\nBASH_COMPAT=op://V/x/y\nNODE_OPTIONS=op://V/x/y\n' >"$REPO/project.env"
+out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf "%s|%s" "${BASH_COMPAT-unset}" "${NODE_OPTIONS-unset}"' 2>/dev/null)"
+check "exec does not pass a reserved shell-steering name to the child" '[ "$out" = "unset|unset" ]'
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
 check "status reports a reserved project.env name as [X]" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*names a reserved variable"'
 printf 'GITHUB_TOKEN=op://V/gh/token\n' >"$REPO/project.env"
