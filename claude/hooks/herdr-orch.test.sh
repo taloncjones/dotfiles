@@ -12236,6 +12236,27 @@ out, brief = rendered("--phase", "implement", "--focus-file", focus)
 assert focus_text in brief
 PY
 
+check "render-brief: repair and review briefs name the findings, artifacts and emit phase" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "repair", "--focus-file", focus, "--findings", findings)
+common("repair", out, brief)
+assert f"`{out['agent']}`" in brief and findings in brief and focus_text in brief
+assert "FIXTURE-TODO-BODY" not in brief and spec_sha in brief
+assert "--phase implement" in brief and "[td-render-x repair]" in brief
+assert "never merge\nmain into the branch" in brief
+out, brief = rendered("--phase", "review", "--focus-file", focus)
+common("review", out, brief)
+assert os.path.join(rd, "artifacts", "td-render-x", "review-<launch_id>", "findings.md") in brief
+assert "Verdict: approved" in brief and "Blocking: <n>" in brief and "Advisories: none" in brief
+assert "emit-review" in brief and "[td-render-x review]" in brief and spec_sha in brief
+outside = os.path.join(tmp, "outside.md"); open(outside, "w").write("x\n")
+p = render("--phase", "repair", "--focus-file", focus, "--findings", outside)
+assert p.returncode == 2, p.stderr
+p = render("--phase", "repair", "--focus-file", focus)
+assert p.returncode == 2, p.stderr
+PY
+
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
 import importlib.util, json, os, sys, tempfile
 sys.path.insert(0, "claude/hooks")
