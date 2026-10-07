@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,9 @@ SHA_B = "b" * 40
 GREEN_RUN = {"__typename": "CheckRun", "name": "tests", "status": "COMPLETED",
              "conclusion": "SUCCESS", "workflowName": "tests"}
 GREEN_CONTEXT = {"__typename": "StatusContext", "context": "ci/x", "state": "SUCCESS"}
+STUB_GH = ('#!/bin/sh\npwd -P >"$STUB_DIR/cwd"\nprintf "%s\\n" "$@" >"$STUB_DIR/argv"\n'
+           'cat "$STUB_DIR/out.json"\nexit "$(cat "$STUB_DIR/rc")"\n')
+GH_ARGV = ["pr", "view", "7", "--json", "headRefOid,statusCheckRollup"]
 
 
 class CiEnvelopeTests(unittest.TestCase):
@@ -68,17 +72,27 @@ class CiEnvelopeTests(unittest.TestCase):
         self.assertEqual(reasons, ["CI evidence is missing",
                                    f"PR head moved: {SHA_B} is not {SHA_A}"])
 
-    def test_cli_writes_a_green_envelope_preconditions_accept(self):
+
+class CiCaptureCliTests(unittest.TestCase):
+    def test_cli_capture_writes_a_green_envelope_preconditions_accept(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "pr-ci.json").write_text(json.dumps(
-                {"headRefOid": SHA_A, "statusCheckRollup": [GREEN_RUN, GREEN_CONTEXT]}),
-                encoding="utf-8")
+            root = Path(os.path.realpath(tmp))
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(STUB_GH, encoding="utf-8")
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "co").mkdir()
+            (root / "rc").write_text("0", encoding="utf-8")
+            (root / "out.json").write_text(json.dumps({"headRefOid": SHA_A, "statusCheckRollup": [GREEN_RUN, GREEN_CONTEXT]}), encoding="utf-8")
+            (root / "expected.json").write_text(json.dumps(
+                {"repository": "o/r", "pr_number": 7, "head": SHA_A}), encoding="utf-8")
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "STUB_DIR": str(root)}
             result = subprocess.run(
-                [sys.executable, str(SPEC), "ci-envelope", "--pr-json", str(root / "pr-ci.json"),
-                 "--head", SHA_A, "--out", str(root / "ci.json")],
-                capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stdout)
+                [sys.executable, str(SPEC), "ci-capture", "--repo", str(root / "co"),
+                 "--expected", str(root / "expected.json"), "--out", str(root / "ci.json")],
+                capture_output=True, text=True, env=env, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "argv").read_text(encoding="utf-8").splitlines(), GH_ARGV)
+            self.assertEqual((root / "cwd").read_text(encoding="utf-8").strip(), str(root / "co"))
             digest = hashlib.sha256((root / "ci.json").read_bytes()).hexdigest()
             self.assertEqual(json.loads(result.stdout),
                              {"artifact": "ci.json", "sha256": digest, "checks": 2, "reasons": []})
@@ -90,17 +104,95 @@ class CiEnvelopeTests(unittest.TestCase):
                  "ci": {"artifact": "ci.json", "sha256": digest}}, root)
             self.assertEqual(verdict, {"approve_allowed": True, "reasons": []})
 
-    def test_cli_malformed_pr_json_writes_nothing(self):
+    def test_cli_capture_gh_failure_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "pr-ci.json").write_text(json.dumps({"statusCheckRollup": []}), encoding="utf-8")
+            root = Path(os.path.realpath(tmp))
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(STUB_GH, encoding="utf-8")
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "co").mkdir()
+            (root / "rc").write_text("1", encoding="utf-8")
+            (root / "out.json").write_text("{}", encoding="utf-8")
+            (root / "expected.json").write_text(json.dumps(
+                {"repository": "o/r", "pr_number": 7, "head": SHA_A}), encoding="utf-8")
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "STUB_DIR": str(root)}
             result = subprocess.run(
-                [sys.executable, str(SPEC), "ci-envelope", "--pr-json", str(root / "pr-ci.json"),
-                 "--head", SHA_A, "--out", str(root / "ci.json")],
-                capture_output=True, text=True, check=False)
+                [sys.executable, str(SPEC), "ci-capture", "--repo", str(root / "co"),
+                 "--expected", str(root / "expected.json"), "--out", str(root / "ci.json")],
+                capture_output=True, text=True, env=env, check=False)
             self.assertEqual(result.returncode, 1)
             self.assertIn("error", json.loads(result.stdout))
             self.assertFalse((root / "ci.json").exists())
+
+    def test_cli_capture_reports_a_moved_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(STUB_GH, encoding="utf-8")
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "co").mkdir()
+            (root / "rc").write_text("0", encoding="utf-8")
+            (root / "out.json").write_text(json.dumps({"headRefOid": SHA_B, "statusCheckRollup": [GREEN_RUN]}), encoding="utf-8")
+            (root / "expected.json").write_text(json.dumps(
+                {"repository": "o/r", "pr_number": 7, "head": SHA_A}), encoding="utf-8")
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "STUB_DIR": str(root)}
+            result = subprocess.run(
+                [sys.executable, str(SPEC), "ci-capture", "--repo", str(root / "co"),
+                 "--expected", str(root / "expected.json"), "--out", str(root / "ci.json")],
+                capture_output=True, text=True, env=env, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["reasons"],
+                             [f"PR head moved: {SHA_B} is not {SHA_A}"])
+            self.assertTrue((root / "ci.json").exists())
+
+    def test_cli_capture_empty_rollup_is_missing_ci_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(STUB_GH, encoding="utf-8")
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "co").mkdir()
+            (root / "rc").write_text("0", encoding="utf-8")
+            (root / "out.json").write_text(json.dumps({"headRefOid": SHA_A, "statusCheckRollup": []}), encoding="utf-8")
+            (root / "expected.json").write_text(json.dumps(
+                {"repository": "o/r", "pr_number": 7, "head": SHA_A}), encoding="utf-8")
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "STUB_DIR": str(root)}
+            result = subprocess.run(
+                [sys.executable, str(SPEC), "ci-capture", "--repo", str(root / "co"),
+                 "--expected", str(root / "expected.json"), "--out", str(root / "ci.json")],
+                capture_output=True, text=True, env=env, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["reasons"], ["CI evidence is missing"])
+            self.assertEqual(json.loads((root / "ci.json").read_text(encoding="utf-8")),
+                             {"head": SHA_A, "check_runs": [], "status_contexts": []})
+
+    def test_cli_capture_rejects_a_bad_expected_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            (root / "bin").mkdir()
+            (root / "bin" / "gh").write_text(STUB_GH, encoding="utf-8")
+            (root / "bin" / "gh").chmod(0o755)
+            (root / "co").mkdir()
+            (root / "rc").write_text("0", encoding="utf-8")
+            (root / "out.json").write_text(json.dumps({"headRefOid": SHA_A, "statusCheckRollup": [GREEN_RUN]}), encoding="utf-8")
+            (root / "expected.json").write_text(json.dumps(
+                {"repository": "o/r", "pr_number": True, "head": SHA_A}), encoding="utf-8")
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "STUB_DIR": str(root)}
+            result = subprocess.run(
+                [sys.executable, str(SPEC), "ci-capture", "--repo", str(root / "co"),
+                 "--expected", str(root / "expected.json"), "--out", str(root / "ci.json")],
+                capture_output=True, text=True, env=env, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("error", json.loads(result.stdout))
+            self.assertFalse((root / "argv").exists())
+            self.assertFalse((root / "ci.json").exists())
+
+    def test_ci_envelope_subcommand_is_retired(self):
+        result = subprocess.run(
+            [sys.executable, str(SPEC), "ci-envelope", "--pr-json", "x", "--head", SHA_A, "--out", "y"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice", result.stderr)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import importlib.util
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -258,7 +259,7 @@ _ROLLUP_FIELDS = {"CheckRun": ("name", "status", "conclusion"),
 
 
 def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
-    """(envelope, reasons) from `gh pr view --json headRefOid,statusCheckRollup`;
+    """(envelope, reasons) from `gh pr view --json headRefOid,statusCheckRollup` (ci-capture);
     envelope is None when the input is unusable."""
     if (not isinstance(pr, dict) or not _sha(pr.get("headRefOid"))
             or not isinstance(pr.get("statusCheckRollup"), list)):
@@ -957,9 +958,9 @@ def main(argv: list[str] | None = None) -> int:
     classify_parser.add_argument("--diff", required=True)
     lessons_parser = sub.add_parser("lessons-check")
     lessons_parser.add_argument("--file", required=True)
-    envelope_parser = sub.add_parser("ci-envelope")
-    for flag in ("--pr-json", "--head", "--out"):
-        envelope_parser.add_argument(flag, required=True)
+    capture_parser = sub.add_parser("ci-capture")
+    for flag in ("--repo", "--expected", "--out"):
+        capture_parser.add_argument(flag, required=True)
     audit_parser = sub.add_parser("audit-comment")
     audit_parser.add_argument("--report", required=True)
     audit_parser.add_argument("--expected", required=True)
@@ -1024,13 +1025,23 @@ def main(argv: list[str] | None = None) -> int:
             reasons = _load_sibling("lessons_contract").check(text)
         print(json.dumps({"pass": not reasons, "reasons": reasons}, sort_keys=True))
         return 0 if not reasons else 1
-    if args.command == "ci-envelope":
+    if args.command == "ci-capture":
+        # gh runs from the checkout so a non-github.com host resolves from its remote.
         try:
-            pr = json.loads(Path(args.pr_json).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as error:
+            expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
+            number, head = expected.get("pr_number"), expected.get("head")
+            if isinstance(number, bool) or not isinstance(number, int) or number <= 0 or not _sha(head):
+                raise ValueError("expected identity needs a positive int pr_number and a SHA head")
+            proc = subprocess.run(
+                ["gh", "pr", "view", str(number), "--json", "headRefOid,statusCheckRollup"],
+                cwd=args.repo, capture_output=True, text=True, timeout=120, check=False)
+            if proc.returncode != 0:
+                raise ValueError(f"gh pr view exited {proc.returncode}: {proc.stderr.strip()[-300:]}")
+            pr = json.loads(proc.stdout)
+        except (OSError, UnicodeError, ValueError, AttributeError, subprocess.TimeoutExpired) as error:
             print(json.dumps({"error": str(error)}))
             return 1
-        envelope, reasons = ci_envelope(pr, args.head)
+        envelope, reasons = ci_envelope(pr, head)
         if envelope is None:
             print(json.dumps({"error": reasons[0]}))
             return 1
