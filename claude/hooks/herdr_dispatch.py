@@ -44,6 +44,8 @@ SHELL_READY_POLL_SECS = 0.5
 # macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
 PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
+SETTLE_POLLS = 20
+SETTLE_POLL_SECS = 0.5
 # bin/op-env: a project's 1Password-resolved credentials for Claude panes.
 OP_ENV = Path(__file__).resolve().parents[2] / "bin" / "op-env"
 # Ready wait for a pane that resolves op-env: its 20 s op bound plus startup.
@@ -1578,14 +1580,39 @@ def _malformed_agent(agent):
         isinstance(agent.get("pane_id"), str) and agent["pane_id"])
 
 
-def _occupants(agents, pane_id):
-    return [a for a in agents if isinstance(a, dict) and a.get("pane_id") == pane_id]
+def _other_occupants(agents, row):
+    """List members that keep the row's pane: malformed ones, or other agents in it."""
+    return [a for a in agents if _malformed_agent(a)
+            or (a.get("pane_id") == row["pane_id"] and a.get("name") != row["agent"])]
 
 
-def _is_live(agents, row):
-    # A malformed member could be the row's agent: unknown counts as live.
-    return (any(_malformed_agent(a) for a in agents)
-            or any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"])))
+def _row_agent(herdr_cli, row, env):
+    """Whether the row's named agent is ("gone", None), ("present", record) or ("unknown", None)."""
+    try:
+        result = _run_herdr(herdr_cli, ["agent", "get", row["agent"]], env=env)
+    except DispatchError as exc:
+        return ("gone", None) if str(exc).endswith(": agent_not_found") else ("unknown", None)
+    record = result.get("agent")
+    if (result.get("type") != "agent_info" or not isinstance(record, dict)
+            or record.get("name") != row["agent"]
+            or not isinstance(record.get("pane_id"), str) or not record["pane_id"]):
+        return "unknown", None
+    if record["pane_id"] != row["pane_id"]:
+        return "gone", None
+    return "present", record
+
+
+def _poll(check):
+    for attempt in range(SETTLE_POLLS):
+        if check():
+            return True
+        if attempt < SETTLE_POLLS - 1:
+            time.sleep(SETTLE_POLL_SECS)
+    return False
+
+
+def _await_gone(herdr_cli, row, env):
+    return _poll(lambda: _row_agent(herdr_cli, row, env)[0] == "gone")
 
 
 # /exit delivery is confirmed only by these two SKILL.md codes: stalled is
@@ -1596,7 +1623,7 @@ _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 
 # herdr says the agent is gone: agent_not_running (it left the pane during
 # --wait) or agent_not_found (nothing to deliver to). Only a fresh agent
-# list decides; settle never reads the pane or sends keys after these.
+# get decides; settle never reads the pane or sends keys after these.
 _EXIT_GONE_CODES = frozenset({"agent_not_running", "agent_not_found"})
 
 
@@ -1613,30 +1640,24 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
         code = (message[len(_EXIT_DELIVERED_PREFIX):]
                 if message.startswith(_EXIT_DELIVERED_PREFIX) else None)
         if code in _EXIT_GONE_CODES:
-            agents, _panes = _snapshot(herdr_cli, workspace_id, env)
-            return "still-live" if _is_live(agents, row) else "exited"
+            return "exited" if _await_gone(herdr_cli, row, env) else "still-live"
         if code not in _EXIT_DELIVERED_CODES:
             return "still-live"
-    agents, _panes = _snapshot(herdr_cli, workspace_id, env)
-    if not _is_live(agents, row):
-        return "exited"
-    text = _run_herdr(herdr_cli, ["pane", "read", row["pane_id"], "--source", "detection",
-                                  "--lines", "20"], env=env, json_result=False)
-    if BACKGROUND_EXIT_MENU_RE.search(text):
-        # Target the agent by name, not the pane. herdr resolves TARGET at
-        # call time and refuses with agent_not_found if it is gone, so there
-        # is no occupant snapshot left to go stale between read and send.
-        try:
-            _run_herdr(herdr_cli, ["agent", "send-keys", row["agent"], "1", "enter"],
-                       env=env, json_result=False)
-        except DispatchError as exc:
-            if str(exc).endswith(": agent_not_found"):
-                return "exited"
-            raise
-        agents, _panes = _snapshot(herdr_cli, workspace_id, env)
-        if not _is_live(agents, row):
-            return "exited"
-    return "still-live"
+    if _row_agent(herdr_cli, row, env)[0] != "gone":
+        text = _run_herdr(herdr_cli, ["pane", "read", row["pane_id"], "--source", "detection",
+                                      "--lines", "20"], env=env, json_result=False)
+        if BACKGROUND_EXIT_MENU_RE.search(text):
+            # Target the agent by name, not the pane. herdr resolves TARGET at
+            # call time and refuses with agent_not_found if it is gone, so there
+            # is no occupant snapshot left to go stale between read and send.
+            try:
+                _run_herdr(herdr_cli, ["agent", "send-keys", row["agent"], "1", "enter"],
+                           env=env, json_result=False)
+            except DispatchError as exc:
+                if str(exc).endswith(": agent_not_found"):
+                    return "exited"
+                raise
+    return "exited" if _await_gone(herdr_cli, row, env) else "still-live"
 
 
 def _pane_ids(panes):
@@ -1659,7 +1680,7 @@ def _pane_verdict(task, row, agents, panes, reasons):
         return "kept-shared"
     if any(reasons(i) is None for i in sharing):
         return "kept-unsettled"
-    if any(a.get("name") != row["agent"] for a in _occupants(agents, pane_id)):
+    if _other_occupants(agents, row):
         return "kept-occupied"
     return "close"
 
@@ -1688,6 +1709,10 @@ def _pane_idle(herdr_cli, pane_id, env):
     return all(isinstance(item, dict) and item.get("pid") == shell_pid for item in foreground)
 
 
+def _await_pane_idle(herdr_cli, pane_id, env):
+    return _poll(lambda: _pane_idle(herdr_cli, pane_id, env))
+
+
 def _occupant_proven(task, index, panes):
     # The pane's launch token names this attempt, and no later row claims the
     # pane: a successor may be reserved (row written) before its agent starts.
@@ -1712,12 +1737,14 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
     base = {"launch_id": row.get("launch_id"), "reason": reason}
     if reason is None or not _nonempty_str_row(row):
         return {**base, "status": "not-settled"}
+    state, record = _row_agent(herdr_cli, row, env)
+    if state == "unknown":
+        raise DispatchError("settle could not read the row's agent")
     agents, panes = _snapshot(herdr_cli, workspace_id, env)
-    live = [a for a in _occupants(agents, row["pane_id"]) if a.get("name") == row["agent"]]
     agent = "absent"
-    if live and live[0].get("agent_status") not in AGENT_STATES:
+    if state == "present" and record.get("agent_status") not in AGENT_STATES:
         return {**base, "status": "busy", "agent": "busy", "pane": "untouched"}
-    if live:
+    if state == "present":
         if not _occupant_proven(task, index, panes):
             return {**base, "status": "occupant-unverified", "agent": "live",
                     "pane": "untouched"}
@@ -1725,18 +1752,16 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
             _mark_exit_requested(task_path, task, index, reason)
         agent = _exit_agent(herdr_cli, row, workspace_id, env)
         agents, panes = _snapshot(herdr_cli, workspace_id, env)
-        if _is_live(agents, row):
-            # _exit_agent's own verdict can go stale between its last
-            # snapshot and this one; trust the freshest read before deciding
-            # whether to close.
+        if agent == "exited" and _row_agent(herdr_cli, row, env)[0] != "gone":
+            # The exit verdict can go stale before this read; trust the
+            # freshest one before deciding whether to close.
             agent = "still-live"
     pane = _pane_verdict(task, row, agents, panes, reasons)
     if pane == "close" and agent == "still-live":
-        # The agent never actually exited; _pane_verdict only checks the
-        # occupant's registered name, not liveness, so keep the pane here
-        # rather than closing one whose agent is still working.
+        # The agent never actually exited; keep the pane rather than close
+        # one whose agent is still working.
         pane = "kept-occupied"
-    elif pane == "close" and not _pane_idle(herdr_cli, row["pane_id"], env):
+    elif pane == "close" and not _await_pane_idle(herdr_cli, row["pane_id"], env):
         # No registered agent is live, but an untracked live process (the
         # user's own shell command) could still occupy the pane.
         pane = "kept-occupied"
@@ -1746,9 +1771,9 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
         fresh_agents, fresh_panes = _snapshot(herdr_cli, workspace_id, env)
         if _pane_ids(fresh_panes) != _pane_ids(panes):
             pane = "kept-changed"
-        elif _is_live(fresh_agents, row):
+        elif _row_agent(herdr_cli, row, env)[0] != "gone":
             agent, pane = "still-live", "kept-occupied"
-        elif _occupants(fresh_agents, row["pane_id"]):
+        elif _other_occupants(fresh_agents, row):
             pane = "kept-occupied"
         else:
             _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
