@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 
@@ -84,6 +85,60 @@ def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict
               _names(repo, new_base, current))
     except ProofError as error:
         reasons.append(f"git proof failed: {error}")
+    record["pass"] = not reasons
+    return record
+
+
+# Objects only: no refmap, no FETCH_HEAD, so a recheck writes no ref.
+_FETCH = ("fetch", "--no-tags", "--no-write-fetch-head",
+          "--no-recurse-submodules", "--refmap=", "origin")
+
+
+def _has_commit(repo: Path, sha: str) -> bool:
+    found = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True, env=_review.git_environment(), check=False,
+    )
+    return found.returncode == 0
+
+
+def base_check(repo: Path, head: str, gated_base: str, live_base: str,
+               base_ref: str, tree: str) -> dict:
+    """Prove tree is head merged with gated_base and head still merges with live_base."""
+    record = {"pass": False, "reasons": [], "fetched": False}
+    reasons = record["reasons"]
+
+    def fail(code: str, detail: str) -> None:
+        reasons.append({"code": code, "detail": detail})
+
+    missing = [sha for sha in (gated_base, live_base) if not _has_commit(repo, sha)]
+    if missing:
+        record["fetched"] = True
+        try:
+            _review.git(repo, *_FETCH, f"refs/heads/{base_ref}", timeout=60)
+        except ProofError as error:
+            fail("base-unreadable", f"cannot fetch origin/{base_ref}: {error}")
+        for sha in missing:
+            if not _has_commit(repo, sha):
+                fail("base-unreadable", f"commit {sha} is not available from origin/{base_ref}")
+    if reasons:
+        return record
+    try:
+        reviewed, conflicted = _review.merge_tree(repo, head, gated_base)
+    except ProofError as error:
+        reviewed, conflicted = None, [str(error)]
+    if conflicted or reviewed != tree:
+        fail("identity", f"git's merge of {head} with gated base {gated_base} is "
+                         f"{reviewed} (conflicts: {_review.named_paths(conflicted) or 'none'}); "
+                         f"the gate reviewed {tree}")
+    if live_base != gated_base:
+        try:
+            _, conflicted = _review.merge_tree(repo, head, live_base)
+        except ProofError as error:
+            conflicted = [str(error)]
+        if conflicted:
+            fail("base-conflict", f"{head} does not merge cleanly with live origin/{base_ref} "
+                                  f"tip {live_base}: {_review.named_paths(conflicted)}")
     record["pass"] = not reasons
     return record
 
