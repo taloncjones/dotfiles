@@ -59,13 +59,19 @@ schema inspection fails.
 
 The coordinator independently creates and retains a fresh expected-identity JSON
 separate from the report before the snapshot. It gets repository, PR number, full head,
-full base, base branch, committed tree, and CI for the actual target. Verify
+full base, base branch, committed tree (the manifest's `source.source_tree`, the head merged with the live base), and CI for the actual target. Verify
 that the PR target repository is the fetch target before resolving `--base-ref`.
 For a PR, read the live base tip from `git ls-remote origin refs/heads/<base>` (not `baseRefOid`, which can lag) before `prepare`, write it as
-`expected.base`, and pass it as `--pr-base` with `--base-ref`. The gate needs
-an up-to-date branch: `prepare` refuses a head behind that base. Merge the base
-into the branch and re-run; the carry-forward rule keeps an APPROVE across a
-clean merge of the base.
+`expected.base`, and pass it as `--pr-base` with `--base-ref`. A head behind the live base is gated on its merge result: `prepare`
+freezes git's merge of the head with the live base (`git merge-tree
+--write-tree`), so `source.source_tree` and the reviewed tree are what the
+squash merge lands, and the frozen diff `base..codex_tree` holds only the
+PR's change. `prepare` refuses only a merge conflict: merge the base into
+the branch, resolve the conflict, and re-run. Merging the base cleanly
+needs no new round (carry-forward). When the `prepare` output's `behind_by`
+is nonzero, add one line to each seat prompt and the final summary:
+"Behind <base_ref> by <n> commits; the reviewed tree is git's merge of the
+head with the live base." It is never a finding.
 Prepare and verify one frozen snapshot with `review.py prepare` and
 `review.py verify`; a dirty source is still frozen for findings, but a committed
 tree mismatch makes approval incomplete. A local no-PR review cannot fabricate a

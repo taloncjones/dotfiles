@@ -468,5 +468,74 @@ class DeltaRangeTests(unittest.TestCase):
         self.assertFalse(bd.delta_range(self.repo, side, head)["ancestor"])
 
 
+class BaseCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        self.gated = commit_file(self.repo, "shared.txt", SHARED, "base")
+        git(self.repo, "checkout", "-q", "-b", "topic")
+        self.head = commit_file(self.repo, "feature.txt", "feature\n", "branch feature")
+        git(self.repo, "checkout", "-q", "main")
+        self.tree = git(self.repo, "rev-parse", f"{self.head}^{{tree}}")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add_origin(self) -> Path:
+        origin = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", "-b", "main", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        git(self.repo, "push", "-q", "origin", "main")
+        return origin
+
+    def test_base_check_passes_for_a_clean_behind_head(self):
+        live = commit_file(self.repo, "main_only.txt", "m\n", "main moves")
+        merged = git(self.repo, "merge-tree", "--write-tree", self.head, live)
+        record = bd.base_check(self.repo, self.head, live, live, "main", merged)
+        self.assertTrue(record["pass"], record["reasons"])
+        self.assertFalse(record["fetched"])
+
+    def test_base_check_passes_after_the_base_moves_cleanly(self):
+        live = commit_file(self.repo, "main_only.txt", "m\n", "main moves")
+        record = bd.base_check(self.repo, self.head, self.gated, live, "main", self.tree)
+        self.assertTrue(record["pass"], record["reasons"])
+
+    def test_base_check_conflict_fails_with_base_conflict(self):
+        live = commit_file(self.repo, "feature.txt", "main version\n", "main clashes")
+        record = bd.base_check(self.repo, self.head, self.gated, live, "main", self.tree)
+        self.assertFalse(record["pass"])
+        self.assertEqual([r["code"] for r in record["reasons"]], ["base-conflict"])
+        self.assertIn("feature.txt", record["reasons"][0]["detail"])
+        self.assertIn(live, record["reasons"][0]["detail"])
+
+    def test_base_check_tree_mismatch_fails_with_identity(self):
+        record = bd.base_check(self.repo, self.head, self.gated, self.gated, "main", "e" * 40)
+        self.assertFalse(record["pass"])
+        self.assertEqual([r["code"] for r in record["reasons"]], ["identity"])
+
+    def test_base_check_fetches_a_missing_live_base_without_refs(self):
+        origin = self.add_origin()
+        other = self.root / "other"
+        git(self.root, "clone", "-q", str(origin), str(other))
+        live = commit_file(other, "main_only.txt", "m\n", "main moves elsewhere")
+        git(other, "push", "-q", "origin", "HEAD:main")
+        refs = git(self.repo, "for-each-ref")
+        record = bd.base_check(self.repo, self.head, self.gated, live, "main", self.tree)
+        self.assertTrue(record["pass"], record["reasons"])
+        self.assertTrue(record["fetched"])
+        self.assertEqual(git(self.repo, "for-each-ref"), refs)
+        self.assertFalse((self.repo / ".git" / "FETCH_HEAD").exists())
+
+    def test_base_check_missing_base_after_fetch_fails_with_base_unreadable(self):
+        self.add_origin()
+        record = bd.base_check(self.repo, self.head, self.gated, "f" * 40, "main", self.tree)
+        self.assertFalse(record["pass"])
+        self.assertTrue(record["fetched"])
+        self.assertEqual([r["code"] for r in record["reasons"]], ["base-unreadable"])
+
+
 if __name__ == "__main__":
     unittest.main()

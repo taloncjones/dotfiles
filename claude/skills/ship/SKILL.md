@@ -65,8 +65,11 @@ gate.
    present from this same uninterrupted workflow. Cleanup failure invalidates
    and removes the active expected identity, so it always requires a new gate.
    Read the expected file and stop unless its
-   repository, PR number, head, base, base branch, and tree exactly equal the
-   live values. Also stop unless `git merge-base --is-ancestor <live-base> <head>` succeeds; a behind branch needs the base merged in, then carry-forward. Refresh its exact-head CI artifact and digest, then
+   repository, PR number, head, and base branch exactly equal the live
+   values. Also stop unless `gate_report.py base-check --repo <repo>
+   --expected EXPECTED --head <head> --live-base <live-base>` exits 0; it
+   re-derives the reviewed tree from the gated base and refuses a head that
+   no longer merges cleanly with the live base. Refresh its exact-head CI artifact and digest, then
    invoke `gate_report.py evaluate --report REPORT --expected EXPECTED`. The
    co-review snapshot has already been verified and cleaned; this step checks
    live source/PR identity and retained report artifacts, not a deleted manifest.

@@ -453,34 +453,40 @@ class ShipSkillText(unittest.TestCase):
 class PrBasePinText(unittest.TestCase):
     def test_both_entrypoints_pin_the_pr_base(self):
         for text in (CO_REVIEW, MIRROR):
-            for needle in ("baseRefOid", "--pr-base", "up-to-date branch", "carry-forward"):
+            for needle in ("baseRefOid", "--pr-base", "merge result", "behind_by", "carry-forward"):
                 self.assertIn(needle, text)
+            self.assertNotIn("up-to-date branch", text)
             self.assertNotIn("merge_tree", text)
 
     def test_co_review_prepare_passes_the_pr_base(self):
         block = _extract_block(CO_REVIEW, '"$REVIEW_HELPER" prepare')
         self.assertIn('--pr-base "$PR_BASE"', block)
 
-    def test_policy_frozen_inputs_require_an_up_to_date_branch(self):
+    def test_policy_frozen_inputs_gate_the_merge_result(self):
         start = POLICY_FILE.index("### Frozen inputs and report construction")
         end = POLICY_FILE.index("\n### ", start + 1)
         section = POLICY_FILE[start:end]
-        for needle in ("baseRefOid", "up-to-date branch", "carry-forward"):
+        for needle in ("baseRefOid", "merge result", "base-check", "carry-forward"):
             self.assertIn(needle, section)
+        self.assertNotIn("up-to-date branch", section)
         self.assertNotIn("merge_tree", section)
 
     def test_herdr_section_6_names_the_pr_base(self):
         start = HERDR.index("\n## 6. ")
         end = HERDR.index("\n## 6a. ")
         self.assertIn("baseRefOid", HERDR[start:end])
-        self.assertIn("up-to-date branch", HERDR[start:end])
+        self.assertIn("merge result", HERDR[start:end])
+        self.assertNotIn("up-to-date branch", HERDR)
+        self.assertNotIn("rule (d)", HERDR)
 
-    def test_pr_ready_and_ship_require_the_base_inside_the_head(self):
-        for needle in ("baseRefOid", "git ls-remote", "merge-base --is-ancestor"):
+    def test_pr_ready_and_ship_run_base_check(self):
+        for needle in ("baseRefOid", "git ls-remote", "base-check"):
             self.assertIn(needle, PR_READY)
             self.assertIn(needle, SHIP)
         self.assertNotIn("resolve-base", PR_READY)
+        self.assertIn("never compared for equality", PR_READY)
         for text in (PR_READY, SHIP):
+            self.assertNotIn("merge-base --is-ancestor", text)
             self.assertNotIn("merge_tree", text)
 
     def test_ship_handoff_base_sha_is_the_pr_base(self):

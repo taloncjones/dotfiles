@@ -4851,37 +4851,35 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     out["base_sha"] = base_tip
-    try:
-        live_tree = context_git(worktree, "rev-parse", f"{live_head}^{{tree}}")
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        live_tree = None
-        fail("identity", f"cannot read the head tree: {exc}")
     if len({live_head, pr.get("headRefOid"), expected.get("head")}) != 1:
         fail("head-moved", f"live={live_head} pr={pr.get('headRefOid')} "
                            f"expected={expected.get('head')}")
+    gated_base, tree = expected.get("base"), expected.get("tree")
     if base_tip is None:
-        fail("base-moved", f"cannot read the live {pr.get('baseRefName')} tip with git ls-remote")
-    elif not expected.get("base") == handoff.get("base_sha") == base_tip:
-        fail("base-moved", f"expected={expected.get('base')} handoff={handoff.get('base_sha')} "
-                           f"live={base_tip}")
-    else:
-        # The reviewed tree is the head tree, which stands for the squash merge
-        # only when the head already contains the live PR base.
+        fail("base-unreadable", f"cannot read the live {pr.get('baseRefName')} tip with git ls-remote")
+    elif (gated_base != handoff.get("base_sha")
+          or not all(isinstance(v, str) and SHA40_RE.fullmatch(v) for v in (gated_base, tree))):
+        fail("identity", f"expected base={gated_base} tree={tree}; "
+                         f"handoff base={handoff.get('base_sha')}")
+    elif live_head is not None:
+        # The reviewed tree is the head merged with the gated base; a base that
+        # moved since only has to merge cleanly (co-review Freeze).
         try:
-            context_git(worktree, "merge-base", "--is-ancestor",
-                        base_tip, str(live_head))
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            fail("identity", f"head {live_head} does not contain "
-                             f"live base {base_tip}: {exc}")
+            check = _gate_report_module()._load_sibling("branch_delta").base_check(
+                Path(worktree), live_head, gated_base, base_tip,
+                str(pr.get("baseRefName")), tree)
+        except Exception as exc:  # the gate fails closed
+            check = {"reasons": [{"code": "identity", "detail": f"base check failed: {exc}"}]}
+        for reason in check["reasons"]:
+            fail(reason["code"], reason["detail"])
     default = (repo.get("defaultBranchRef") or {}).get("name")
     if (expected.get("repository") != repo.get("nameWithOwner")
             or expected.get("pr_number") != pr.get("number")
-            or not expected.get("base_ref") == pr.get("baseRefName") == default
-            or expected.get("tree") != live_tree):
+            or not expected.get("base_ref") == pr.get("baseRefName") == default):
         fail("identity", f"expected {expected.get('repository')}#{expected.get('pr_number')} "
-                         f"{expected.get('base_ref')} tree {expected.get('tree')}; live "
+                         f"{expected.get('base_ref')}; live "
                          f"{repo.get('nameWithOwner')}#{pr.get('number')} {pr.get('baseRefName')} "
-                         f"(default {default}) tree {live_tree}")
+                         f"(default {default})")
     if pr.get("state") != "OPEN" or pr.get("isDraft") is not False:
         fail("pr-state", f"state={pr.get('state')} isDraft={pr.get('isDraft')}")
     if pr.get("mergeable") != "MERGEABLE":

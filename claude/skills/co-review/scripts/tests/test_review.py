@@ -1043,6 +1043,10 @@ class ReviewHelperTests(unittest.TestCase):
         self.assertEqual(manifest["snapshot"]["codex_tree"], self.git("rev-parse", f"{head}^{{tree}}"))
         diff = self.git("diff", "--name-status", origin_tip, manifest["snapshot"]["snapshot_head"])
         self.assertEqual(diff, "A\tfeature.txt")
+        self.assertEqual(manifest["source"]["merge_base"], origin_tip)
+        self.assertEqual(manifest["source"]["behind_by"], 0)
+        snapshot_head = manifest["snapshot"]["snapshot_head"]
+        self.assertEqual(self.git("rev-parse", f"{snapshot_head}^@").split(), [head])
 
     def test_pr_base_must_equal_the_fetched_tip(self):
         origin_tip = self.make_origin_target("origin_only")
@@ -1128,19 +1132,92 @@ class ReviewHelperTests(unittest.TestCase):
         self.run_git("commit", "-qm", "feature: work")
         return origin_tip, self.git("rev-parse", "HEAD")
 
-    def test_pr_base_behind_is_refused_with_the_remedy(self):
-        origin_tip, _head = self.make_behind_feature()
+    def test_pr_base_behind_clean_merge_reviews_the_merge_result(self):
+        origin_tip, head = self.make_behind_feature()
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+        )
+        printed = json.loads(result.stdout)
+        manifest = json.loads(Path(printed["manifest"]).read_text())
+        merged = self.git("merge-tree", "--write-tree", head, origin_tip)
+        snapshot_head = manifest["snapshot"]["snapshot_head"]
+
+        self.assertEqual(manifest["source"]["base"], origin_tip)
+        self.assertEqual(manifest["source"]["merge_base"], self.base)
+        self.assertEqual(manifest["source"]["behind_by"], 1)
+        self.assertEqual(printed["behind_by"], 1)
+        self.assertEqual(manifest["source"]["source_tree"], merged)
+        self.assertEqual(manifest["snapshot"]["codex_tree"], merged)
+        self.assertEqual(manifest["snapshot"]["claude_tree"], merged)
+        self.assertNotEqual(merged, self.git("rev-parse", f"{head}^{{tree}}"))
+        self.assertEqual(self.git("rev-parse", f"{snapshot_head}^@").split(), [head, origin_tip])
+        diff = self.git("diff", "--name-status", origin_tip, snapshot_head)
+        self.assertEqual(diff, "A\tfeature.txt")
+        self.command("verify", "--manifest", printed["manifest"])
+
+    def test_pr_base_behind_conflict_is_refused(self):
+        origin_tip = self.make_origin_target("clash")
+        self.run_git("checkout", "-q", "-b", "feature", self.base)
+        (self.repo / "clash.txt").write_text("feature side\n")
+        self.run_git("add", "clash.txt")
+        self.run_git("commit", "-qm", "feature: clash")
         before = self.git("worktree", "list", "--porcelain")
         output = self.root / "review output"
         result = self.command(
             "prepare", "--repo", str(self.repo), "--base-ref", "target",
             "--pr-base", origin_tip, "--output-dir", str(output), expect=2,
         )
-        self.assertIn("behind", result.stderr)
+        self.assertIn("conflicts with the live origin/target tip", result.stderr)
         self.assertIn(origin_tip, result.stderr)
-        self.assertIn("merge target into the branch", result.stderr)
-        self.assertIn("carry-forward", result.stderr)
+        self.assertIn("clash.txt", result.stderr)
+        self.assertIn("merge target into the branch, resolve the conflict", result.stderr)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+
+    def test_pr_base_behind_shared_file_clean_merge_prepares(self):
+        lines = [f"line {n}\n" for n in range(1, 21)]
+        (self.repo / "shared.txt").write_text("".join(lines))
+        self.run_git("add", "shared.txt")
+        self.run_git("commit", "-qm", "fixture: shared")
+        fork = self.git("rev-parse", "HEAD")
+        origin = self.root / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True, capture_output=True)
+        self.run_git("remote", "add", "origin", str(origin))
+        self.run_git("checkout", "-q", "--detach", fork)
+        (self.repo / "shared.txt").write_text("".join(["origin edit\n", *lines[1:]]))
+        self.run_git("commit", "-qam", "origin: edit line 1")
+        origin_tip = self.git("rev-parse", "HEAD")
+        self.run_git("push", "-q", "origin", f"{origin_tip}:refs/heads/target")
+        self.run_git("checkout", "-q", "-b", "feature", fork)
+        (self.repo / "shared.txt").write_text("".join([*lines[:19], "feature edit\n"]))
+        self.run_git("commit", "-qam", "feature: edit line 20")
+
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+        shared = self.git("show", f"{manifest['snapshot']['snapshot_head']}:shared.txt")
+        self.assertTrue(shared.startswith("origin edit\n"), shared)
+        self.assertTrue(shared.endswith("feature edit"), shared)
+
+    def test_pr_base_behind_dirty_source_keeps_trees_apart(self):
+        origin_tip, head = self.make_behind_feature()
+        (self.repo / "feature.txt").write_text("feature, edited\n")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--pr-base", origin_tip, "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+        merged = self.git("merge-tree", "--write-tree", head, origin_tip)
+        self.assertEqual(manifest["source"]["source_tree"], merged)
+        self.assertNotEqual(manifest["snapshot"]["codex_tree"], merged)
+        snapshot_head = manifest["snapshot"]["snapshot_head"]
+        self.assertEqual(self.git("show", f"{snapshot_head}:feature.txt"), "feature, edited")
+        self.assertEqual(self.git("show", f"{snapshot_head}:origin_only.txt"), "origin_only")
 
 
 if __name__ == "__main__":

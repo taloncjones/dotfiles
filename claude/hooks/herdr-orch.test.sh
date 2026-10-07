@@ -3146,13 +3146,14 @@ sub = subprocess.run(["git", "-C", str(personal), "commit-tree", "-m", "newer ma
                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
 newer = sub.stdout.strip()
 git(personal, "push", "-q", "-f", "origin", f"{newer}:refs/heads/main")
-out = expect("base-moved")
-assert any(newer in r["detail"] for r in out["reasons"] if r["code"] == "base-moved"), out
+# A live base rewritten to an unrelated history no longer merges with the head.
+out = expect("base-conflict")
+assert any(newer in r["detail"] for r in out["reasons"] if r["code"] == "base-conflict"), out
 git(personal, "push", "-q", "-f", "origin", f"{live_base}:refs/heads/main")
 # An unreadable live base fails closed.
 gone = sb / "origin-p.git.gone"
 (sb / f"origin-{personal.name}.git").rename(gone)
-expect("base-moved")
+expect("base-unreadable")
 gone.rename(sb / f"origin-{personal.name}.git")
 expect("identity", rp_edit=lambda r: r.update(defaultBranchRef={"name": "dev"}))
 expect("identity", rp_edit=lambda r: r.update(nameWithOwner="x/y"))
@@ -3212,7 +3213,7 @@ assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], o
 import shutil; shutil.rmtree(sb)
 PY
 
-check "merge-ready: only a head that contains the live PR base is ready" <<'PY'
+check "merge-ready: a behind head is ready when it merges cleanly with the live base" <<'PY'
 import contextlib, hashlib, io, json, os, subprocess, sys, tempfile
 from pathlib import Path
 for k in ("CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
@@ -3248,25 +3249,20 @@ git(repo, "push", "-q", "origin", f"{pr_base}:refs/heads/main")
 git(repo, "checkout", "-q", "-b", "topic", fork)
 commit_file(repo, "feature.txt", "f\n", "feature")
 head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
-merged = git(repo, "merge-tree", "--write-tree", pr_base, head)
+merged = git(repo, "merge-tree", "--write-tree", head, pr_base)
 assert merged != tree
 
 slug = c._context_slug(w.repository_context(str(repo)))
 c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
                                   "runtime": "claude", "personal": False})())
 rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
-tid, launch = "td-merge-tree", "ship-m1"
+tid, launch = "td-merge-result", "ship-m1"
 ld = rd / "artifacts" / tid / f"ship-{launch}"; ld.mkdir(parents=True)
 t = tg.GateReportTests(); t.setUp(); t.root = ld
 rep = t._report(); exp = dict(t.expected)
 ci = json.loads((ld / "ci.json").read_text()); ci["head"] = head
 (ld / "ci.json").write_text(json.dumps(ci))
 rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
-for obj in (rep, exp):
-    obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base=pr_base, base_ref="main")
-exp["merge_tree"] = merged
-rep["reviewed_tree"] = merged
-rep["preconditions"].update(head=head, tree=tree)
 (rd / "tasks").mkdir(parents=True, exist_ok=True)
 task = {"task_id": tid, "status": "reviewed", "review_head_sha": head,
         "ship_launch_id": launch, "worktree": str(repo), "branch": "topic",
@@ -3278,11 +3274,16 @@ pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
                              "status": "COMPLETED", "conclusion": "SUCCESS"}]}
 rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
 
-def write_gate(expected):
+def write_gate(gate_tree):
+    for obj in (rep, exp):
+        obj.update(head=head, tree=gate_tree, repository="o/r", pr_number=7,
+                   base=pr_base, base_ref="main")
+    rep["reviewed_tree"] = gate_tree
+    rep["preconditions"].update(head=head, tree=gate_tree)
     (ld / "report.json").write_text(json.dumps(rep))
-    (ld / "expected.json").write_text(json.dumps(expected))
+    (ld / "expected.json").write_text(json.dumps(exp))
     hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
-            "base_ref": "main", "base_sha": pr_base, "tree_sha": tree,
+            "base_ref": "main", "base_sha": pr_base, "tree_sha": gate_tree,
             "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
             "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
             "verdict": "APPROVE", "written_at": "t"}
@@ -3297,52 +3298,50 @@ def run():
                      "--task-id", tid, "--pr-json", str(pf), "--repo-json", str(rf)])
     return rc, json.loads(buf.getvalue())
 
-# A head behind the live PR base is never ready, even when the handoff carries a
-# stray merge_tree that matches git's merge of the two.
-rep["reviewed_tree"] = merged
-write_gate(dict(exp, merge_tree=merged))
+# A behind head gated on git's merge with the live base is ready.
+write_gate(merged)
 rc, out = run()
-codes = [r["code"] for r in out["reasons"]]
-assert rc == 1 and out["ready"] is False and "identity" in codes, out
+assert rc == 0 and out["ready"] is True, out
 
-# Same head, no merge_tree: still behind, still not ready.
-rep["reviewed_tree"] = tree
-bare = {k: v for k, v in exp.items() if k != "merge_tree"}
-write_gate(bare)
+# The same behind head gated on its own tree did not review the merge result.
+write_gate(tree)
 rc, out = run()
-codes = [r["code"] for r in out["reasons"]]
-assert rc == 1 and out["ready"] is False and "identity" in codes, out
+assert rc == 1 and "identity" in [r["code"] for r in out["reasons"]], out
 
-# Main moved: base-moved alone, so section 6 rule (c) re-gates.
-# baseRefOid still equals the handoff base (it lags); only origin's live tip shows the move.
+# Main moves cleanly after the gate: still ready, no re-gate.
+write_gate(merged)
 git(repo, "checkout", "-q", "upstream")
 commit_file(repo, "origin_newer.txt", "n\n", "main moves again")
 git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
 git(repo, "checkout", "-q", "topic")
 rc, out = run()
-assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
-# An unreadable live base fails closed.
+assert rc == 0 and out["ready"] is True, out
+
+# Main moves onto a conflicting change: base-conflict alone.
+git(repo, "checkout", "-q", "upstream")
+commit_file(repo, "feature.txt", "upstream version\n", "main clashes")
+git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+git(repo, "checkout", "-q", "topic")
+rc, out = run()
+assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-conflict"], out
+
+# An unreadable live base fails closed with base-unreadable alone.
 git(repo, "push", "-q", "-f", "origin", f"{pr_base}:refs/heads/main")
 origin.rename(sb / "origin-p.git.gone")
 rc, out = run()
-assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-moved"], out
+assert rc == 1 and [r["code"] for r in out["reasons"]] == ["base-unreadable"], out
 (sb / "origin-p.git.gone").rename(origin)
 
-# A head that contains the live PR base stays ready.
+# A head that contains the live base, gated on its own tree, stays ready.
 git(repo, "checkout", "-q", "-b", "uptodate", pr_base)
 commit_file(repo, "feature2.txt", "f2\n", "feature on top of base")
-head2 = git(repo, "rev-parse", "HEAD"); tree2 = git(repo, "rev-parse", "HEAD^{tree}")
-ci["head"] = head2
+head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+ci["head"] = head
 (ld / "ci.json").write_text(json.dumps(ci))
 rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
-for obj in (rep, bare):
-    obj.update(head=head2, tree=tree2)
-rep["reviewed_tree"] = tree2
-rep["preconditions"].update(head=head2, tree=tree2)
-head, tree = head2, tree2
-pr["headRefOid"] = head2
-(rd / "tasks" / f"{tid}.json").write_text(json.dumps(dict(task, review_head_sha=head2, branch="uptodate")))
-write_gate(bare)
+pr["headRefOid"] = head
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(dict(task, review_head_sha=head, branch="uptodate")))
+write_gate(tree)
 rc, out = run()
 assert rc == 0 and out["ready"] is True, out
 PY
@@ -3371,7 +3370,7 @@ grep -Fq 'handoff_state' "$S"
 grep -Fq '"result": "fail"' "$S"
 grep -Fq 'ship_launch_id: null' "$S"
 grep -Fq 'merge-refused' "$S"
-grep -Fq 'base-moved' "$S"
+grep -Fq 'base-conflict' "$S"
 grep -Fq 'changes-requested' "$S"
 grep -Fq 'Workers never carry merge authority' "$S"
 grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$S"
@@ -3404,14 +3403,14 @@ check "docs pin delta dispatch, forced full, and relaunch-is-full" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"
 L="claude/skills/herdr-orchestration/references/state-layout.md"
 grep -Fq 'the handoff report has `class` `delta`' "$S"
-grep -Fq '(section 6a step 0 owns it), except rule (d)' "$S"
+grep -Fq '(section 6a step 0 owns it), except rule (c)' "$S"
 grep -Fq 'every such relaunch brief carries `herdr-ship-brief: tier=full`' "$S"
 grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$S"
 grep -Fq 'herdr-ship-brief: tier=delta' "$S"
 grep -Fq 'herdr-ship-prior-handoff:' "$S"
 grep -Fq 'herdr-ship-delta-head:' "$S"
 grep -Fq 'herdr-ship-delta-caps:' "$S"
-grep -Fq 'section 6 rule (d) dispatches a full gate' "$S"
+grep -Fq 'section 6 rule (c) dispatches a full gate' "$S"
 grep -Fq '"delta": {"max_files": 5, "max_lines": 150}' "$L"
 SH
 
