@@ -29,11 +29,11 @@ sys.path.insert(0, str(HERE.parents[1] / "lib"))
 import herdr_orch_core as core
 from workflow_context import account_scope, repository_context
 from workflow_context import git as context_git
-from todos_prd import NOTE_SECTIONS, URL_RE, esc, render_body, safe_href
+from todos_prd import NOTE_SECTIONS, URL_RE, esc, is_fence, render_body, safe_href, split_sections
 
 TODOS_SH = Path(os.environ.get("TODOS_DASHBOARD_TODOS_SH") or HERE / "todos.sh")
 TODOS_DIRNAME = ".todos"
-SUMMARY_LEN = 140
+SUMMARY_MAX = 220
 RESEARCH_SUMMARY_LEN = 200
 MAX_LINKS = 5
 DEFAULT_COMPLETED = 10
@@ -47,9 +47,9 @@ PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
 # herdr) always wins over the manual `status:` field, since it reflects
 # ground truth the field can go stale against. `status: waiting` / `someday`
 # only sort a todo that is neither blocked nor in-flight.
-BUCKET_ORDER = ("ready", "in-flight", "blocked", "waiting", "someday")
-BUCKET_LABELS = {"ready": "Ready", "in-flight": "In flight", "blocked": "Blocked",
-                  "waiting": "Waiting", "someday": "Someday"}
+BUCKET_ORDER = ("in-flight", "ready", "blocked", "waiting", "someday")
+BUCKET_LABELS = {"in-flight": "In flight", "ready": "Ready", "blocked": "Blocked",
+                 "waiting": "Waiting", "someday": "Someday", "done": "Recently done"}
 
 
 def die(msg):
@@ -116,17 +116,45 @@ def frontmatter(text):
     return scalars, lists, "\n".join(lines[body_start:])
 
 
-def problem_summary(body):
-    in_problem = False
-    for line in body.split("\n"):
-        if line.startswith("## Problem"):
-            in_problem = True
+# A sentence ends at . ! or ? before whitespace and a capital, digit,
+# backtick, ( or quote, or at the end of the paragraph.
+SENTENCE_END_RE = re.compile(r"[.!?](?=\s+[A-Z0-9`(\"']|\s*$)")
+LIST_LINE_RE = re.compile(r"^\s*([-*+]|\d+\.)\s")
+
+
+def strip_inline(text):
+    text = re.sub(r"\[([^\]\n]+)\]\([^)\s]+\)", r"\1", text)
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    return text.replace("`", "")
+
+
+def card_summary(text):
+    """The first sentence of the first paragraph of the first ## Problem."""
+    problem = next((s for s in split_sections(text)[1] if s[0] == "Problem"), None)
+    if problem is None:
+        return ""
+    para, fenced = [], False
+    for line in text[problem[2]:problem[3]].split("\n"):
+        if is_fence(line):
+            if para:
+                break
+            fenced = not fenced
+        elif fenced:
             continue
-        if in_problem and line.startswith("## "):
-            return ""
-        if in_problem and line.strip():
-            return line.strip()[:SUMMARY_LEN]
-    return ""
+        elif not line.strip():
+            if para:
+                break
+        elif para and LIST_LINE_RE.match(line):
+            break
+        else:
+            para.append(line.strip())
+    summary = strip_inline(" ".join(para))
+    end = SENTENCE_END_RE.search(summary)
+    if end:
+        summary = summary[:end.end()]
+    if len(summary) > SUMMARY_MAX:
+        summary = summary[:SUMMARY_MAX - 3].rsplit(" ", 1)[0].rstrip(",;:") + "..."
+    return summary
 
 
 def first_body_line(body):
@@ -248,7 +276,10 @@ def field(d, key):
 
 
 def herdr_status(tasks_dir, basename, *, confined=False):
-    """Read-only view of tasks/td-<basename>.{json,review.json,done.json}.
+    """Read-only view of tasks/<task>.{json,review.json,done.json}.
+
+    herdr names a todo's task by the bare todo id; older records used
+    td-<basename>, read when no bare-id record exists.
 
     The task record is authoritative for status and the live worker. The
     review record is shown as-is only when its reviewed_head_sha equals the
@@ -256,7 +287,7 @@ def herdr_status(tasks_dir, basename, *, confined=False):
     its phase and agent both equal the live worker's (herdr reuses one
     workspace across phases, so workspace_id proves nothing), else stale.
     """
-    task_id = f"td-{basename}"
+    task_id = basename if (tasks_dir / f"{basename}.json").exists() else f"td-{basename}"
     rec, bad = read_json(tasks_dir / f"{task_id}.json", confined=confined)
     if rec is None and not bad:
         return None
@@ -337,7 +368,7 @@ def load_todo(path, resolver, tasks_dir, pending, confined_state):
         "tier": scalars.get("tier", ""),
         "status": scalars.get("status", ""),
         "files": lists.get("files", []),
-        "summary": problem_summary(body),
+        "summary": card_summary(text),
         "links": body_links(body),
         "deps": resolver.resolve_all(path, basename) if pending else [],
         "herdr": herdr_status(tasks_dir, basename, confined=confined_state),
@@ -357,6 +388,10 @@ def load_dir(d, resolver, tasks_dir, pending, confined_state):
         if t is not None:
             out.append(t)
     return out
+
+
+def today():
+    return os.environ.get("TODOS_TODAY") or datetime.date.today().isoformat()
 
 
 def open_sort_key(t):
@@ -423,387 +458,357 @@ def load_research(research_dir, known_basenames):
 
 # --- rendering -------------------------------------------------------------
 
+DARK_VARS = """\
+  color-scheme: dark;
+  --ground: #1d2125;
+  --surface: #22272b;
+  --surface-soft: #282e33;
+  --ink: #b6c2cf;
+  --muted: #8c9bab;
+  --accent: #579dff;
+  --rule: #38414a;
+  --chip: #2c333a;
+  --idle: #738496;
+  --blocked: #f87168;
+  --blocked-soft: #3a2022;
+  --blocked-rule: #6e3a38;
+  --waiting: #f0a64b;
+  --waiting-soft: #36291a;
+  --waiting-rule: #70522a;
+  --inflight: #579dff;
+  --inflight-soft: #1c2b41;
+  --inflight-rule: #2b4a7a;
+  --done: #4bce97;
+  --done-soft: #1b3028;
+  --done-rule: #2d6b52;
+  --scrim: rgb(0 0 0 / 0.6);
+  --shadow: 0 1px 1px rgb(0 0 0 / 0.3);
+  --lift: 0 18px 48px rgb(0 0 0 / 0.5);
+"""
+
+# The dark tokens apply twice, to the OS preference and to an explicit
+# choice; DARK_VARS is the one copy, substituted for @@DARK@@ below.
 CSS = r"""
 :root {
   color-scheme: light;
-  --ground: #f4f6f3;
+  --ground: #f4f5f7;
   --surface: #ffffff;
-  --surface-soft: #eef2ee;
-  --ink: #243128;
-  --muted: #5f6d63;
-  --accent: #285f4b;
-  --rule: #d5ddd5;
-  --chip: #edf1ec;
-  --blocked: #913e1c;
-  --blocked-soft: #fff3eb;
-  --blocked-rule: #e9b99e;
-  --merged: #285e8a;
-  --merged-soft: #eaf2fa;
-  --merged-rule: #b9cfdf;
-  --inflight: #745813;
-  --inflight-soft: #faf3db;
-  --inflight-rule: #ddca8d;
-  --shadow: 0 2px 6px rgb(22 38 28 / 0.04);
+  --surface-soft: #f1f2f4;
+  --ink: #172b4d;
+  --muted: #5e6c84;
+  --accent: #0c66e4;
+  --rule: #dcdfe4;
+  --chip: #f1f2f4;
+  --idle: #8590a2;
+  --blocked: #c9372c;
+  --blocked-soft: #ffedeb;
+  --blocked-rule: #f5a9a2;
+  --waiting: #b65c02;
+  --waiting-soft: #fffcf7;
+  --waiting-rule: #f2c98a;
+  --inflight: #0c66e4;
+  --inflight-soft: #e9f2ff;
+  --inflight-rule: #b3d4ff;
+  --done: #1f845a;
+  --done-soft: #f7fefb;
+  --done-rule: #9ddcc0;
+  --scrim: rgb(9 30 66 / 0.5);
+  --shadow: 0 1px 1px rgb(9 30 66 / 0.12);
+  --lift: 0 18px 48px rgb(9 30 66 / 0.3);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --ground: #171d19;
-    --surface: #202823;
-    --surface-soft: #26302a;
-    --ink: #e8eee9;
-    --muted: #aab6ad;
-    --accent: #92ceb0;
-    --rule: #3b493f;
-    --chip: #2c362f;
-    --blocked: #f2b38e;
-    --blocked-soft: #332820;
-    --blocked-rule: #74503c;
-    --merged: #a6c9eb;
-    --merged-soft: #223140;
-    --merged-rule: #45617c;
-    --inflight: #e4cb84;
-    --inflight-soft: #332f20;
-    --inflight-rule: #6d5d34;
-    --shadow: 0 2px 6px rgb(0 0 0 / 0.12);
-  }
+@@DARK@@  }
 }
 
 :root[data-theme="dark"] {
-  color-scheme: dark;
-  --ground: #171d19;
-  --surface: #202823;
-  --surface-soft: #26302a;
-  --ink: #e8eee9;
-  --muted: #aab6ad;
-  --accent: #92ceb0;
-  --rule: #3b493f;
-  --chip: #2c362f;
-  --blocked: #f2b38e;
-  --blocked-soft: #332820;
-  --blocked-rule: #74503c;
-  --merged: #a6c9eb;
-  --merged-soft: #223140;
-  --merged-rule: #45617c;
-  --inflight: #e4cb84;
-  --inflight-soft: #332f20;
-  --inflight-rule: #6d5d34;
-  --shadow: 0 2px 6px rgb(0 0 0 / 0.12);
-}
+@@DARK@@}
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
   background: var(--ground);
   color: var(--ink);
-  font: 15px/1.55 "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  font: 14px/1.5 "Avenir Next", "Segoe UI", system-ui, sans-serif;
 }
 
-main {
-  max-width: 1200px;
+body:has(.modal:target) { overflow: hidden; }
+
+a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+a:focus-visible, .card:focus-visible, .sheet:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mono { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--ground);
+  border-bottom: 1px solid var(--rule);
+}
+
+.top-inner {
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 40px 24px 72px;
+  padding: 14px 24px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.top-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
 }
 
 h1 {
-  margin: 0 0 8px;
-  font-size: clamp(26px, 3vw, 34px);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.025em;
-  overflow-wrap: anywhere;
-  text-wrap: balance;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
 }
 
-h2 {
-  margin: 36px 0 12px;
-  color: var(--ink);
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1.3;
-  letter-spacing: -0.01em;
-}
-
-.meta {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.6;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-main > .meta {
-  max-width: 80ch;
-}
-
-/* One compact summary panel. */
 .counts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  max-width: 760px;
-  margin: 24px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.counts a, .counts span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.counts b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.counts b[data-count="in-flight"] { color: var(--inflight); }
+.counts b[data-count="blocked"] { color: var(--blocked); }
+.counts b[data-count="waiting"] { color: var(--waiting); }
+
+form.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+form.filters input, form.filters select, form.filters button, form.note button, form.note textarea {
+  font: inherit;
+  color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--rule);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
+  border-radius: 6px;
+  padding: 4px 8px;
 }
 
-.counts > div {
-  min-width: 0;
-  padding: 18px 22px;
+button.theme { font: inherit; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--rule); border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+form.filters input[type="search"] { flex: 1 1 18em; }
+form.filters .meta { margin: 0 0 0 auto; }
+
+main {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px 24px 64px;
 }
 
-.counts > div + div {
-  border-left: 1px solid var(--rule);
-}
+.lane { margin: 0 0 22px; scroll-margin-top: 120px; }
+#lane-in-flight { --lane: var(--inflight); }
+#lane-ready { --lane: var(--idle); }
+#lane-blocked { --lane: var(--blocked); }
+#lane-waiting { --lane: var(--waiting); }
+#lane-someday { --lane: var(--idle); }
+#lane-done { --lane: var(--done); }
 
-.counts b {
-  display: block;
-  font-size: 32px;
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: -0.035em;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-.counts b[data-count="open"] {
-  color: var(--accent);
-}
-
-.counts b[data-count="blocked"] {
-  color: var(--blocked);
-}
-
-.counts b[data-count="in-flight"] {
-  color: var(--inflight);
-}
-
-.counts b[data-count="waiting"] {
-  color: var(--merged);
-}
-
-.counts b[data-count="someday"] {
-  color: var(--muted);
-}
-
-.counts span {
-  display: block;
-  margin-top: 7px;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.3;
-}
-
-/* Open-section grouping: one heading + table per bucket (Ready, In flight,
-   Blocked, Waiting, Someday). Someday collapses via native <details>. */
-.bucket + .bucket,
-.bucket + details.bucket,
-details.bucket + .bucket,
-details.bucket + details.bucket {
-  margin-top: 28px;
-}
-
-.bucket h3,
-details.bucket summary {
+.lane h2 {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 10px;
-  font-size: 14px;
-  font-weight: 600;
+  margin: 0 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--lane, var(--rule));
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
   color: var(--ink);
 }
 
-details.bucket summary {
-  cursor: pointer;
-  list-style: none;
-}
-
-details.bucket summary::-webkit-details-marker {
-  display: none;
-}
-
-details.bucket summary::before {
-  content: "\25B8";
-  color: var(--muted);
-  transition: transform 0.15s ease;
-}
-
-details.bucket[open] summary::before {
-  transform: rotate(90deg);
-}
-
-details.bucket summary h3 {
-  margin: 0;
-}
+details.lane > summary { cursor: pointer; list-style: none; width: fit-content; }
+details.lane > summary::-webkit-details-marker { display: none; }
+details.lane > summary h2::before { content: "\25B8"; transition: transform 0.15s ease; }
+details.lane[open] > summary h2::before { transform: rotate(90deg); }
 
 .bucket-count {
   display: inline-flex;
   min-width: 20px;
-  height: 20px;
+  height: 18px;
   padding: 0 6px;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
 }
 
-/* Preserve the table layout and contain horizontal scrolling. */
-.wrap {
-  max-width: 100%;
-  overflow-x: auto;
+ul.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+a.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  padding: 10px 12px 10px 13px;
   background: var(--surface);
   border: 1px solid var(--rule);
-  border-radius: 12px;
+  border-left: 3px solid var(--lane, var(--idle));
+  border-radius: 8px;
   box-shadow: var(--shadow);
+  color: var(--ink);
+  text-decoration: none;
 }
 
-table {
-  width: 100%;
-  min-width: 960px;
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
+a.card[data-state="blocked"] { background: var(--blocked-soft); }
+
+@media (hover: hover) {
+  a.card:hover { border-color: var(--lane, var(--accent)); }
 }
 
-th {
-  padding: 12px 16px;
-  background: var(--surface-soft);
-  color: var(--muted);
-  border-bottom: 1px solid var(--rule);
-  text-align: left;
-  font-size: 12px;
+.card-title {
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
-th:first-child {
-  width: 38%;
-}
-
-th:nth-child(2) {
-  width: 14%;
-}
-
-th:last-child {
-  width: 12%;
-}
-
-/* Completed has four columns; give its title more room. */
-th:first-child:nth-last-child(4) {
-  width: 48%;
-}
-
-td {
-  padding: 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--rule);
-  vertical-align: top;
-  overflow-wrap: anywhere;
-}
-
-tbody > tr:last-child > td {
-  border-bottom: 0;
-}
-
-tr[id] {
-  scroll-margin-top: 24px;
-}
-
-tr[data-state="blocked"] > td {
-  background: var(--blocked-soft);
-}
-
-tr[data-state="blocked"] > td:first-child {
-  box-shadow: inset 4px 0 0 var(--blocked);
-}
-
-/* Make research-to-todo anchor destinations easy to locate. */
-tr:target > td:first-child .name {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: 2px;
-}
-
-.name {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.sub {
+.card-summary {
   color: var(--muted);
   font-size: 13px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
-.mono {
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-td > .name + .sub,
-td > .sub + .sub,
-td > .pill + .sub {
-  margin-top: 4px;
-}
-
-.chips {
+.badges {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 4px;
+  margin-top: auto;
+  padding-top: 2px;
 }
 
-.chip,
-.pill {
+.badge {
   display: inline-block;
   max-width: 100%;
-  padding: 2px 8px;
+  padding: 0 7px;
   border: 1px solid var(--rule);
-  font-size: 12px;
-  line-height: 1.5;
-  vertical-align: middle;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.chip {
-  border-radius: 5px;
+  border-radius: 999px;
   background: var(--chip);
   color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.chip.prio-high {
+.badge.prio-high, .badge.blocked, .badge.overdue, .badge.unreadable {
   background: var(--blocked-soft);
   border-color: var(--blocked-rule);
   color: var(--blocked);
   font-weight: 600;
 }
 
-.pill {
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--muted);
-  font-weight: 600;
+.badge.prio-med {
+  background: var(--waiting-soft);
+  border-color: var(--waiting-rule);
+  color: var(--waiting);
 }
 
+.badge.in-flight {
+  background: var(--inflight-soft);
+  border-color: var(--inflight-rule);
+  color: var(--inflight);
+}
+
+.badge.in-flight { font-weight: 600; }
+
+.badge.merged {
+  background: var(--done-soft);
+  border-color: var(--done-rule);
+  color: var(--done);
+}
+
+.empty {
+  margin: 0;
+  padding: 16px;
+  border: 1px dashed var(--rule);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+ul.research { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+
+ul.research > li {
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+ul.research .name { font-weight: 600; }
+
+.sub { color: var(--muted); font-size: 12px; }
+
+.chip, .pill {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0 7px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.pill { font-weight: 600; }
+
 .pill.merged {
-  background: var(--merged-soft);
-  border-color: var(--merged-rule);
-  color: var(--merged);
+  background: var(--done-soft);
+  border-color: var(--done-rule);
+  color: var(--done);
 }
 
 .pill.in-flight {
@@ -818,233 +823,122 @@ td > .pill + .sub {
   color: var(--blocked);
 }
 
-.dep {
-  display: block;
-  white-space: normal;
-  overflow-wrap: anywhere;
+/* The modal is shown by :target alone, so the static page needs no script.
+   No ancestor of .modal may set transform, filter or contain: that would
+   re-anchor position: fixed to the ancestor instead of the viewport. */
+.modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  padding: 5vh 16px;
+  overflow-y: auto;
 }
 
-.dep + .dep {
-  margin-top: 8px;
+.modal:target { display: block; }
+
+.modal > .backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
 }
 
-.dep.ok {
-  color: var(--muted);
-}
-
-.dep.bad {
-  color: var(--blocked);
-  font-weight: 600;
-}
-
-.dates {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.7;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-a {
-  color: var(--accent);
-  text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
-  text-decoration-skip-ink: auto;
-  overflow-wrap: anywhere;
-}
-
-a:focus-visible,
-.wrap:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-
-td:last-child > a {
-  display: block;
-  width: fit-content;
-  max-width: 100%;
-  font-size: 13px;
-}
-
-td:last-child > a + a {
-  margin-top: 8px;
-}
-
-.empty {
-  margin: 0;
-  padding: 20px;
-  background: var(--surface);
-  color: var(--muted);
-  border: 1px dashed var(--rule);
-  border-radius: 10px;
-  font-size: 14px;
-  font-style: normal;
-  overflow-wrap: anywhere;
-}
-
-/* Existing research children become title, metadata, and summary rows. */
-ul.research {
-  display: grid;
-  gap: 12px;
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-ul.research > li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px 12px;
-  min-width: 0;
-  padding: 18px 20px;
+.sheet {
+  position: relative;
+  max-width: 1040px;
+  margin: 0 auto;
   background: var(--surface);
   border: 1px solid var(--rule);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: var(--lift);
 }
 
-ul.research > li > * {
+.sheet-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 16px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.sheet-head h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.sheet-head .badges { grid-column: 1 / -1; margin: 0; }
+
+a.close {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: start;
+  padding: 0 8px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 28px;
+  text-decoration: none;
+}
+
+.prd, .facts { overflow-wrap: anywhere; }
+
+.sheet-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+}
+
+.prd {
   min-width: 0;
-  max-width: 100%;
-}
-
-ul.research > li > .name {
-  flex: 0 0 100%;
-  color: var(--ink);
-  font-size: 16px;
-  text-decoration-color: var(--rule);
-}
-
-ul.research > li > div.sub {
-  flex: 0 0 100%;
-  max-width: 80ch;
-  margin-top: 2px;
+  padding: 6px 22px 22px;
   font-size: 14px;
+  line-height: 1.6;
 }
 
-ul.research > li > a:not(.name):not(.mono) {
-  font-size: 13px;
-}
+.prd h4 { margin: 18px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
+.prd h5 { margin: 12px 0 4px; font-size: 13px; }
+.prd p, .prd ul.md { margin: 0 0 10px; }
+.prd pre { overflow-x: auto; padding: 10px 12px; background: var(--surface-soft); border-radius: 6px; font-size: 12px; }
+.prd code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 
-ul.research > li:focus-within {
-  border-color: var(--accent);
-}
-
-/* The PRD row under each todo: a full-width native <details>. */
-tr:has(+ tr.prd-row) > td {
-  border-bottom: 0;
-}
-
-tr.prd-row > td {
-  padding: 0 16px 14px;
-}
-
-details.prd > summary {
-  width: fit-content;
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.prd-body {
-  max-width: 90ch;
-  padding: 4px 0 0 18px;
-  font-size: 14px;
-}
-
-.prd-body h4 {
-  margin: 16px 0 6px;
-  font-size: 14px;
-}
-
-.prd-body h5 {
-  margin: 12px 0 4px;
-  font-size: 13px;
-}
-
-.prd-body p,
-.prd-body ul.md {
-  margin: 0 0 8px;
-}
-
-ul.md {
-  padding-left: 18px;
-}
-
+ul.md { padding-left: 18px; }
 ul.md li.d1 { margin-left: 18px; }
 ul.md li.d2 { margin-left: 36px; }
 ul.md li.d3 { margin-left: 54px; }
 
-.prd-body pre {
-  overflow-x: auto;
-  padding: 10px 12px;
+form.note { display: grid; gap: 6px; margin: 4px 0 14px; color: var(--muted); font-size: 12px; }
+form.note textarea { width: 100%; }
+form.note button { width: fit-content; }
+
+.facts {
+  min-width: 0;
+  padding: 16px 18px 20px;
+  border-left: 1px solid var(--rule);
   background: var(--surface-soft);
-  border-radius: 6px;
-  font-size: 12px;
-}
-
-.prd-body code {
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  font-size: 12px;
-}
-
-form.note {
-  display: grid;
-  gap: 6px;
-  margin: 4px 0 12px;
-  color: var(--muted);
+  border-bottom-right-radius: 12px;
   font-size: 13px;
 }
 
-form.note textarea {
-  width: 100%;
-  font: inherit;
-  color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  padding: 6px 8px;
+.facts h3 {
+  margin: 14px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-form.note button {
-  width: fit-content;
-}
+.facts h3:first-child { margin-top: 0; }
+.facts ul { margin: 0; padding: 0; list-style: none; }
+.facts li + li { margin-top: 3px; }
+.facts .dep.bad { color: var(--blocked); font-weight: 600; }
+.facts .sub { color: var(--muted); }
 
-form.filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin: 8px 0 16px;
-}
-
-form.filters input,
-form.filters select {
-  font: inherit;
-  color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  padding: 4px 8px;
-}
-
-form.filters input[type="search"] {
-  flex: 1 1 16em;
-}
-
-form.filters .meta {
-  flex-basis: 100%;
-  margin: 0;
-}
-
-.copy-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
+.copy-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 button.copy {
   font: 12px/1.5 "SF Mono", Menlo, Consolas, monospace;
@@ -1054,42 +948,25 @@ button.copy {
   border-radius: 5px;
   padding: 1px 6px;
   cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
-@media (hover: hover) {
-  a:hover {
-    color: var(--ink);
-    text-decoration-thickness: 2px;
-  }
-
-  ul.research > li > .name:hover {
-    color: var(--accent);
-    text-decoration-color: currentColor;
-  }
+@media (max-width: 860px) {
+  .sheet-body { grid-template-columns: minmax(0, 1fr); }
+  .facts { border-left: 0; border-top: 1px solid var(--rule); border-radius: 0 0 12px 12px; }
 }
 
 @media (max-width: 640px) {
-  main {
-    padding: 24px 16px 48px;
-  }
-
-  h2 {
-    margin-top: 28px;
-  }
-
-  .counts > div {
-    padding: 16px 12px;
-  }
-
-  .counts b {
-    font-size: 28px;
-  }
-
-  ul.research > li {
-    padding: 16px;
-  }
+  .top-inner, main { padding-left: 16px; padding-right: 16px; }
+  .counts { margin-left: 0; }
+  .modal { padding: 0; }
+  .sheet { border-radius: 0; min-height: 100%; }
 }
 """
+
+CSS = CSS.replace("@@DARK@@", DARK_VARS)
 
 
 # Served pages only. todos_serve.py allows exactly this text by its hash in
@@ -1109,25 +986,99 @@ document.addEventListener("click", function (event) {
     function () { show("copy failed"); });
 });
 
-function openFromHash() {
-  var match = /^#(?:todo|prd)-(.+)$/.exec(location.hash);
-  if (!match) return;
-  var id;
-  try { id = decodeURIComponent(match[1]); } catch (e) { return; }
-  var details = document.getElementById("prd-" + id);
-  if (!details || details.tagName !== "DETAILS") return;
-  details.open = true;
-  (document.getElementById("todo-" + id) || details).scrollIntoView();
+// Theme: System follows the OS; Light and Dark set data-theme on <html>.
+var THEMES = ["system", "light", "dark"];
+var THEME_KEY = "todos-board-theme";
+
+function applyTheme(name) {
+  var root = document.documentElement;
+  if (name === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", name);
+  var toggle = document.querySelector("button.theme");
+  if (toggle) toggle.textContent = "Theme: " + name.charAt(0).toUpperCase() + name.slice(1);
 }
-window.addEventListener("hashchange", openFromHash);
-openFromHash();
+
+function savedTheme() {
+  try {
+    var name = localStorage.getItem(THEME_KEY);
+    return THEMES.indexOf(name) >= 0 ? name : "system";
+  } catch (e) { return "system"; }
+}
+
+document.addEventListener("click", function (event) {
+  if (!event.target.closest("button.theme")) return;
+  var current = document.documentElement.getAttribute("data-theme") || "system";
+  var next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
+  applyTheme(next);
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* not remembered */ }
+});
+
+applyTheme(savedTheme());
+
+// The todo id whose modal is open, so closing can return focus to its card
+// even when the modal was opened by a link or a reload, not a card click.
+var openId = null;
+
+function openModal() {
+  var match = /^#todo-(.+)$/.exec(location.hash);
+  if (!match) return null;
+  var id;
+  try { id = decodeURIComponent(match[1]); } catch (e) { return null; }
+  var modal = document.getElementById("todo-" + id);
+  return modal && modal.classList.contains("modal") ? modal : null;
+}
+
+function syncFocus() {
+  var modal = openModal();
+  if (modal) {
+    openId = modal.dataset.modal;
+    modal.querySelector(".sheet").focus({ preventScroll: true });
+    return;
+  }
+  if (openId === null) return;
+  var cards = document.querySelectorAll("a.card");
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].dataset.todo === openId) {
+      var lane = cards[i].closest("details");
+      if (lane) lane.open = true;
+      cards[i].focus();
+      break;
+    }
+  }
+  openId = null;
+}
+
+document.addEventListener("click", function (event) {
+  if (event.target.closest("a.close, a.backdrop")) {
+    event.preventDefault();
+    location.replace("#board");
+  }
+});
+
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape" && openModal()) {
+    event.preventDefault();
+    location.replace("#board");
+  } else if (event.key === "/" && !openModal() &&
+             !event.target.closest("input, textarea, select")) {
+    var search = document.querySelector("form.filters input[name=q]");
+    if (search) {
+      event.preventDefault();
+      search.focus();
+    }
+  }
+});
+
+// On load, not at parse time: a fragment target is only styled once the
+// document has loaded, and focusing a hidden sheet does nothing.
+window.addEventListener("hashchange", syncFocus);
+window.addEventListener("load", syncFocus);
 """
 
 
 def chip(text, cls=""):
     # cls is always a literal from this file, never user data; escaped anyway.
     return f'<span class="chip {esc(cls)}">{esc(text)}</span>' if text else ""
-
 
 def render_herdr(h):
     if h is None:
@@ -1156,11 +1107,6 @@ def render_herdr(h):
         parts.append(f'<div class="sub">done {esc(h["done_outcome"])} {esc(h["done_phase"])}{stale}</div>')
     return "".join(parts)
 
-
-def render_links(links):
-    return " ".join(f'<a href="{esc(u)}">{esc(label)}</a>' for label, u in links)
-
-
 def note_form(t, section, token):
     """Served pages only: append a note to one section (todos.sh note)."""
     return ('<form class="note" method="post" action="/note">'
@@ -1171,22 +1117,6 @@ def note_form(t, section, token):
             f'<label for="note-{esc(t["basename"])}-{esc(section)}">Add a note to {esc(section)}</label>'
             f'<textarea id="note-{esc(t["basename"])}-{esc(section)}" name="note" rows="3" required></textarea>'
             '<button type="submit">Add note</button></form>')
-
-
-def render_prd_row(t, ncols, edit=None):
-    """The full-width row under a todo: its rendered body in a <details>.
-
-    edit is None for the static page and for completed todos; on a served
-    page it is {"token", "open"} and each note section gets a form.
-    """
-    def forms(name):
-        return note_form(t, name, edit["token"]) if name in NOTE_SECTIONS else ""
-
-    is_open = " open" if edit and edit["open"] == t["basename"] else ""
-    body = render_body(t["text"], forms if edit else None)
-    return (f'<tr class="prd-row" data-prd="{esc(t["basename"])}"><td colspan="{ncols}">'
-            f'<details class="prd" id="prd-{esc(t["basename"])}"{is_open}><summary>PRD</summary>'
-            f'<div class="prd-body">{body}</div></details></td></tr>')
 
 
 # Same rule as TODO_ID_RE in todos.sh; \Z so a trailing newline cannot pass.
@@ -1203,21 +1133,6 @@ def copy_chips(basename):
         f'<button type="button" class="copy" data-copy="{esc(cmd)}" title="Copy: {esc(cmd)}">{esc(label)}</button>'
         for label, cmd in items)
     return f'<div class="copy-chips">{buttons}</div>'
-
-
-def render_todo_cell(t, served=False):
-    prio_cls = f"prio-{t['priority']}" if t["priority"] in PRIORITY_WEIGHT else ""
-    chips = [chip(t["area"]), chip(t["priority"], prio_cls),
-             chip(t["maturity"]), chip(t["tier"])]
-    chips = "".join(c for c in chips if c)
-    id_line = (copy_chips(t["basename"]) if served
-               else f'<div class="sub mono">{esc(t["basename"])}</div>')
-    out = [f'<div class="name">{esc(t["title"])}</div>', id_line]
-    if t["summary"]:
-        out.append(f'<div class="sub">{esc(t["summary"])}</div>')
-    if chips:
-        out.append(f'<div class="chips">{chips}</div>')
-    return "".join(out)
 
 
 def open_bucket(t):
@@ -1238,65 +1153,153 @@ def open_bucket(t):
     return "ready"
 
 
-def render_open_table(todos, edit=None):
-    rows = []
-    for t in todos:
-        state = "blocked" if t["blocked"] else "open"
-        status = t["herdr"]["status"] if t["herdr"] else ""
-        deps = "".join(
-            f'<span class="dep {"ok" if s in SATISFIED else "bad"} mono">{esc(r)} ({esc(s)})</span>'
-            for r, s in t["deps"])
-        dates = esc(t["created"]) + (f'<br>due {esc(t["due"])}' if t["due"] else "")
-        rows.append(
-            f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
-            f'data-state="{state}" data-task-status="{esc(status)}">'
-            f'<td>{render_todo_cell(t, edit is not None)}</td><td class="dates">{dates}</td>'
-            f'<td>{deps}</td><td>{render_herdr(t["herdr"])}</td>'
-            f'<td>{render_links(t["links"])}</td></tr>'
-            + render_prd_row(t, 5, edit))
-    return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created / due</th>'
-            '<th>Depends on</th><th>Herdr</th><th>Links</th></tr></thead><tbody>'
-            + "".join(rows) + "</tbody></table></div>")
+def badge(text, cls):
+    # cls is always a literal from this file, never user data; escaped anyway.
+    return f'<span class="badge {esc(cls)}">{esc(text)}</span>'
 
 
-def render_open(todos, edit=None):
-    if not todos:
-        return '<p class="empty">No open todos.</p>'
-    grouped = {b: [] for b in BUCKET_ORDER}
-    for t in todos:
+def herdr_badge(t, pending):
+    h = t["herdr"]
+    if h is None:
+        return ""
+    if pending and h["status"] in IN_FLIGHT_STATUSES:
+        return badge("in flight" + (f" - {h['phase']}" if h["phase"] else ""), "in-flight")
+    if h["status"] == "merged":
+        return badge("merged", "merged")
+    if h["status"] == "unreadable":
+        return badge("herdr unreadable", "unreadable")
+    return ""
+
+
+def deps_badge(t, pending):
+    if not pending or not t["deps"]:
+        return ""
+    unmet = sum(1 for _, state in t["deps"] if state not in SATISFIED)
+    if unmet:
+        return badge(f"blocked by {unmet}", "blocked")
+    return badge(f"{len(t['deps'])} deps met", "deps-ok")
+
+
+def date_badge(t):
+    if t["due"]:
+        return badge(f"due {t['due']}", "overdue" if t["due"] < today() else "due")
+    if t["surface"] and t["surface"] > today():
+        return badge(f"surfaces {t['surface']}", "surface")
+    return ""
+
+
+def card_badges(t, pending):
+    prio = t["priority"]
+    parts = [herdr_badge(t, pending), deps_badge(t, pending),
+             badge(prio, f"prio-{prio}" if prio in PRIORITY_WEIGHT else "prio-other") if prio else "",
+             badge(t["area"], "area") if t["area"] else "",
+             date_badge(t)]
+    return f'<span class="badges">{"".join(parts)}</span>'
+
+
+def render_card(t, pending):
+    status = t["herdr"]["status"] if t["herdr"] else ""
+    state = f' data-state="{"blocked" if t["blocked"] else "open"}"' if pending else ""
+    prio = f' data-priority="{t["priority"]}"' if t["priority"] in PRIORITY_WEIGHT else ""
+    summary = f'<span class="card-summary">{esc(t["summary"])}</span>' if t["summary"] else ""
+    return (f'<li><a class="card" href="#todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}"'
+            f'{state} data-task-status="{esc(status)}"{prio}>'
+            f'<span class="card-title">{esc(t["title"])}</span>{summary}'
+            f'{card_badges(t, pending)}</a></li>')
+
+
+def render_lane(key, todos, pending, collapsed, opened=False):
+    heading = (f'<h2 data-bucket="{key}">{esc(BUCKET_LABELS[key])} '
+               f'<span class="bucket-count">{len(todos)}</span></h2>')
+    cards = '<ul class="cards">' + "".join(render_card(t, pending) for t in todos) + "</ul>"
+    if collapsed:
+        is_open = " open" if opened else ""
+        return f'<details class="lane" id="lane-{key}"{is_open}><summary>{heading}</summary>{cards}</details>'
+    return f'<section class="lane" id="lane-{key}">{heading}{cards}</section>'
+
+
+def render_counts(open_todos):
+    # Each todo counts once, in the bucket open_bucket gives it.
+    buckets = [open_bucket(t) for t in open_todos]
+    pills = [f'<span><b data-count="open">{len(open_todos)}</b> open</span>']
+    for key in BUCKET_ORDER:
+        pills.append(f'<a href="#lane-{key}"><b data-count="{key}">{buckets.count(key)}</b> '
+                     f'{esc(BUCKET_LABELS[key].lower())}</a>')
+    return f'<nav class="counts" aria-label="Lanes">{"".join(pills)}</nav>'
+
+
+def render_deps(t, on_page):
+    items = []
+    for ref, state in t["deps"]:
+        label = f"{esc(ref)} ({esc(state)})"
+        target = ref[len("todo:"):] if ref.startswith("todo:") else ""
+        if target in on_page:
+            label = f'<a href="#todo-{esc(target)}">{label}</a>'
+        items.append(f'<li class="dep {"ok" if state in SATISFIED else "bad"} mono">{label}</li>')
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def render_facts(t, pending, edit, on_page):
+    out = []
+    chips = copy_chips(t["basename"]) if edit is not None and pending else ""
+    if chips:
+        out.append("<h3>Copy</h3>" + chips)
+    else:
+        out.append(f'<h3>Id</h3><div class="mono">{esc(t["basename"])}</div>')
+    dates = [f"{label} {t[key]}" for label, key in (("created", "created"), ("due", "due"),
+                                                     ("surfaces", "surface")) if t[key]]
+    if dates:
+        out.append("<h3>Dates</h3><ul>" + "".join(f"<li>{esc(d)}</li>" for d in dates) + "</ul>")
+    level = " / ".join(x for x in (t["maturity"], t["tier"]) if x)
+    if level:
+        out.append(f"<h3>Maturity / tier</h3><div>{esc(level)}</div>")
+    if t["deps"]:
+        out.append("<h3>Depends on</h3>" + render_deps(t, on_page))
+    if t["herdr"]:
+        out.append("<h3>Herdr</h3>" + render_herdr(t["herdr"]))
+    if t["files"]:
+        out.append("<h3>Files</h3><ul>" + "".join(f'<li class="mono">{esc(f)}</li>' for f in t["files"]) + "</ul>")
+    if t["links"]:
+        out.append("<h3>Links</h3><ul>" + "".join(
+            f'<li><a href="{esc(u)}">{esc(label)}</a></li>' for label, u in t["links"]) + "</ul>")
+    return "".join(out)
+
+
+def render_modal(t, pending, edit, on_page):
+    """One todo's details, shown by CSS :target when the URL is #todo-<id>.
+
+    edit is None on the static page; on a served page it is {"token", ...}
+    and a pending todo gets a note form after each note section.
+    """
+    def forms(name):
+        return note_form(t, name, edit["token"]) if name in NOTE_SECTIONS else ""
+
+    bid = esc(t["basename"])
+    body = render_body(t["text"], forms if edit is not None and pending else None)
+    return (f'<div class="modal" id="todo-{bid}" data-modal="{bid}" role="dialog" aria-labelledby="title-{bid}">'
+            '<a class="backdrop" href="#board" tabindex="-1" aria-hidden="true"></a>'
+            '<article class="sheet" tabindex="-1"><header class="sheet-head">'
+            f'<h2 id="title-{bid}">{esc(t["title"])}</h2>'
+            '<a class="close" href="#board" aria-label="Close">&times;</a>'
+            f'{card_badges(t, pending)}</header>'
+            f'<div class="sheet-body"><div class="prd">{body}</div>'
+            f'<aside class="facts">{render_facts(t, pending, edit, on_page)}</aside></div>'
+            "</article></div>")
+
+
+def render_lanes(open_todos, completed, show_completed, edit):
+    grouped = {key: [] for key in BUCKET_ORDER}
+    for t in open_todos:
         grouped[open_bucket(t)].append(t)
-    sections = []
-    for bucket in BUCKET_ORDER:
-        items = grouped[bucket]
-        if not items:
-            continue
-        heading = (f'<h3 data-bucket="{bucket}">{esc(BUCKET_LABELS[bucket])} '
-                   f'<span class="bucket-count">{len(items)}</span></h3>')
-        table = render_open_table(items, edit)
-        if bucket == "someday":
-            # A native, JS-free collapse -- someday items are real but not
-            # meant to compete for attention with what is actionable now.
-            sections.append(f'<details class="bucket"><summary>{heading}</summary>{table}</details>')
-        else:
-            sections.append(f'<div class="bucket">{heading}{table}</div>')
-    return "".join(sections)
-
-
-def render_completed(todos):
-    if not todos:
-        return '<p class="empty">Nothing completed yet.</p>'
-    rows = []
-    for t in todos:
-        status = t["herdr"]["status"] if t["herdr"] else ""
-        rows.append(
-            f'<tr id="todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}" '
-            f'data-task-status="{esc(status)}">'
-            f'<td>{render_todo_cell(t)}</td><td class="dates">{esc(t["created"])}</td>'
-            f'<td>{render_herdr(t["herdr"])}</td><td>{render_links(t["links"])}</td></tr>'
-            + render_prd_row(t, 4))
-    return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created</th>'
-            '<th>Herdr</th><th>Links</th></tr></thead><tbody>'
-            + "".join(rows) + "</tbody></table></div>")
+    lanes = [render_lane(key, grouped[key], True, key == "someday")
+             for key in BUCKET_ORDER if grouped[key]]
+    if not open_todos:
+        lanes.append('<p class="empty">No open todos.</p>')
+    if show_completed and completed:
+        view = edit["view"] if edit else {}
+        searching = any(view.get(k) for k in ("q", "area", "priority"))
+        lanes.append(render_lane("done", completed, False, True, searching))
+    return "".join(lanes)
 
 
 def render_research(entries):
@@ -1363,24 +1366,17 @@ def render_filters(view, todos, token, shown, total):
 
 def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed,
                 edit=None, filters=""):
-    # Every tile derives from open_bucket, which is mutually exclusive per
-    # todo (blocked wins over in-flight): a todo that is both dependency-
-    # blocked and herdr-in-flight must count once, in Blocked, not in both
-    # tiles.
-    n_open = len(open_todos)
-    n_blocked = sum(1 for t in open_todos if open_bucket(t) == "blocked")
-    n_flight = sum(1 for t in open_todos if open_bucket(t) == "in-flight")
-    n_waiting = sum(1 for t in open_todos if open_bucket(t) == "waiting")
-    n_someday = sum(1 for t in open_todos if open_bucket(t) == "someday")
     if edit is None:
         how = "Static page: rerun <span class=\"mono\">todos.sh dashboard</span> and reload to refresh."
     else:
         how = ("Served by <span class=\"mono\">todos.sh serve</span>: reload to refresh; "
                "notes are appended to the todo file.")
+    shown_completed = completed if show_completed else []
+    on_page = {t["basename"] for t in open_todos} | {t["basename"] for t in shown_completed}
+    modals = ("".join(render_modal(t, True, edit, on_page) for t in open_todos)
+              + "".join(render_modal(t, False, edit, on_page) for t in shown_completed))
     script = f"<script>{BOARD_JS}</script>" if edit is not None else ""
-    completed_html = ""
-    if show_completed:
-        completed_html = "<h2>Completed</h2>" + render_completed(completed)
+    theme_toggle = '<button type="button" class="theme">Theme: System</button>' if edit is not None else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1390,25 +1386,19 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
 <style>{CSS}</style>
 </head>
 <body>
-<main>
-<h1>{esc(repo_name)} board</h1>
-<div class="meta">generated {esc(stamp)} on <span class="mono">{esc(branch)}</span>.
-{how}</div>
-<div class="counts">
-<div><b data-count="open">{n_open}</b><span>open</span></div>
-<div><b data-count="blocked">{n_blocked}</b><span>blocked</span></div>
-<div><b data-count="in-flight">{n_flight}</b><span>in-flight</span></div>
-<div><b data-count="waiting">{n_waiting}</b><span>waiting</span></div>
-<div><b data-count="someday">{n_someday}</b><span>someday</span></div>
-</div>
-<h2>Open</h2>
+<header class="top"><div class="top-inner">
+<div class="top-row"><h1>{esc(repo_name)} board</h1>
+<span class="meta">generated {esc(stamp)} on <span class="mono">{esc(branch)}</span>. {how}</span>
+{render_counts(open_todos)}{theme_toggle}</div>
 {filters}
-{render_open(open_todos, edit)}
-{completed_html}
-<h2>Research</h2>
-{render_research(research)}
-{script}
+</div></header>
+<main>
+{render_lanes(open_todos, completed, show_completed, edit)}
+<section class="lane" id="research"><h2>Research <span class="bucket-count">{len(research)}</span></h2>
+{render_research(research)}</section>
 </main>
+<div class="modals">{modals}</div>
+{script}
 </body>
 </html>
 """
@@ -1576,7 +1566,7 @@ def board_context(args):
 
 
 def build_page(ctx, args, edit=None):
-    """Read the board fresh and render it; edit as in render_prd_row, plus,
+    """Read the board fresh and render it; edit as in render_modal, plus,
     on a served page, edit["view"]: the filter form's q, area, priority, sort."""
     root, todos_dir = ctx["root"], ctx["todos_dir"]
     _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)

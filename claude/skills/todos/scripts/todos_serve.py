@@ -121,10 +121,9 @@ class Handler(BaseHTTPRequestHandler):
                 TITLES[403], "Open the URL that todos.sh serve printed; it carries the run token."))
         if url.path != "/":
             return self.send_page(404, message_page("Not found", url.path))
-        open_id = query.get("open", [""])[0]
         view = {k: query.get(k, [""])[0] for k in ("q", "area", "priority", "sort")}
         view["q"] = view["q"].strip()
-        edit = {"token": self.server.token, "open": open_id, "view": view}
+        edit = {"token": self.server.token, "view": view}
         self.send_page(200, board.build_page(self.server.ctx, self.server.args, edit))
 
     def do_POST(self):
@@ -153,8 +152,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_page(403, message_page(
                 TITLES[403], "This page is from an earlier server run; reopen the URL "
                 "that todos.sh serve printed.", note))
-        back = (f"/?t={self.server.token}&open={urllib.parse.quote(note_id)}"
-                f"#prd-{urllib.parse.quote(note_id)}")
+        back = f"/?t={self.server.token}#todo-{urllib.parse.quote(note_id)}"
         if "\0" in note_id + section + sha:
             return self.send_page(400, message_page(
                 TITLES[400], "The form fields contain a NUL byte.", note, back))
