@@ -45,7 +45,8 @@ FIXTURE_TOKEN="ops_$(printf 'q%.0s' $(seq 1 32))"
 LITERAL="lit$(printf 'z%.0s' $(seq 1 20))"
 
 # Fake op: `run` resolves every NAME=op://... in --env-file to
-# "resolved-NAME" and execs the command; `read` serves FAKE_OP_KEY.
+# "resolved-NAME" (except FAKE_OP_SKIP) and execs the command; `read` serves
+# FAKE_OP_KEY.
 # It logs argv and whether the token reached it, never the token itself.
 cat >"$TMP/fakebin/op" <<'EOF'
 #!/bin/sh
@@ -63,6 +64,7 @@ case "$1" in
         done
         shift
         for name in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$envfile"); do
+            [ "$name" = "${FAKE_OP_SKIP:-}" ] && continue
             export "$name=${FAKE_OP_VALUE:-resolved-$name}"
         done
         exec "$@"
@@ -136,6 +138,19 @@ check "project.env bare padded token is refused without its content" '[ -z "$out
 out="$("$OP_ENV" status --cwd "$REPO" 2>&1)"
 check "status never prints the bare padded token" '! printf "%s" "$out" | grep -qF "${PADDED%%=*}"'
 
+: >"$OP_LOG"
+for name in OP_SERVICE_ACCOUNT_TOKEN PATH BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM PWD; do
+    printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
+    out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+    check "project.env reserved name $name is refused" '[ -z "$out" ] && grep -q "project.env line 2 names a reserved variable" "$TMP/err" && ! grep -qF "$name" "$TMP/err"'
+done
+check "reserved-name refusal calls no op" '[ ! -s "$OP_LOG" ]'
+out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
+check "status reports a reserved project.env name as [X]" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*names a reserved variable"'
+printf 'GITHUB_TOKEN=op://V/gh/token\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "GITHUB_TOKEN is not a reserved name" 'printf "%s\n" "$out" | grep -qx "export GITHUB_TOKEN='"'"'resolved-GITHUB_TOKEN'"'"'"'
+
 # --- 4. resolution ---
 printf 'GH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN="op://V/cf/credential"\n' >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
@@ -154,6 +169,15 @@ check "a linked worktree resolves the main checkout's files" 'printf "%s\n" "$ou
 
 out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "$GH_TOKEN"')"
 check "exec runs the command with resolved values" '[ "$out" = resolved-GH_TOKEN ]'
+INHERITED="inherited-$(printf 'v%.0s' $(seq 1 8))"
+out="$(CLOUDFLARE_API_TOKEN="$INHERITED" FAKE_OP_SKIP=CLOUDFLARE_API_TOKEN "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "a name op did not set is never emitted from the inherited environment" '! printf "%s" "$out" | grep -q CLOUDFLARE_API_TOKEN && ! printf "%s" "$out" | grep -qF "$INHERITED" && printf "%s\n" "$out" | grep -q "^export GH_TOKEN="'
+# bash defines HOSTNAME itself; only a value op set may be emitted.
+cp -p "$REPO/project.env" "$TMP/project.env.before-hostname"
+printf 'GH_TOKEN=op://V/gh/token\nHOSTNAME=op://V/host/name\n' >"$REPO/project.env"
+out="$(FAKE_OP_SKIP=HOSTNAME "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "a name the emitting shell defines is never emitted unless op set it" '! printf "%s" "$out" | grep -q "^export HOSTNAME=" && printf "%s\n" "$out" | grep -q "^export GH_TOKEN="'
+cp -p "$TMP/project.env.before-hostname" "$REPO/project.env"
 
 printf 'CLOUDFLARE_API_TOKEN=op://V/cf/credential\n' >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"

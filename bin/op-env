@@ -21,7 +21,6 @@ while [ -L "$src" ]; do
     case "$src" in /*) ;; *) src="$dir/$src" ;; esac
 done
 DOTFILES="$(cd -P "$(dirname "$src")/.." && pwd)"
-OP_ENV_BIN="$DOTFILES/bin/op-env"
 HTTPS_GITCONFIG="$DOTFILES/git/agent-https.gitconfig"
 SIGN_PROGRAM="$DOTFILES/bin/op-env-sign"
 SIGNING_SOCK="${OP_ENV_SIGNING_SOCK:-$HOME/.local/state/dotfiles/op-env-signing.sock}"
@@ -111,6 +110,17 @@ read_op_env() {
     return 0
 }
 
+# Names that steer op, git, the shell, the loader or account routing, or
+# that the shell maintains itself.
+is_reserved_name() {
+    case "$1" in
+        OP_*|GIT_*|LD_*|DYLD_*) return 0 ;;
+        PATH|HOME|SHELL|IFS|ENV|BASH_ENV|ZDOTDIR|SSH_AUTH_SOCK|CLAUDE_CONFIG_DIR) return 0 ;;
+        PWD|OLDPWD|SHLVL|_) return 0 ;;
+    esac
+    return 1
+}
+
 # Sets PE_NAMES to the variable names project.env assigns.
 read_project_env() {
     local f="$1" line name value n=0
@@ -122,6 +132,10 @@ read_project_env() {
         name="${line%%=*}"
         if [ "$name" = "$line" ] || [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             fail_rule "project.env line $n is not NAME=op://..."
+            return 1
+        fi
+        if is_reserved_name "$name"; then
+            fail_rule "project.env line $n names a reserved variable"
             return 1
         fi
         value="$(unquote "${line#*=}")"
@@ -157,14 +171,17 @@ sq() {
     printf "'%s'" "${s//$q/$r}"
 }
 
-# Runs under `op run`: print the resolved names as shell exports.
-cmd_emit() {
-    local name
-    for name in "$@"; do
-        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 2
-        [ -n "${!name+x}" ] || continue
-        printf 'export %s=%s\n' "$name" "$(sq "${!name}")"
+# Reads `env -0` run under `op run` and prints the listed names as exports.
+# env is no shell, so nothing but op can have set a listed name.
+emit_resolved() {
+    local entry name
+    while IFS= read -r -d '' entry; do
+        name="${entry%%=*}"
+        if has_name "$name" "${PE_NAMES[@]}"; then
+            printf 'export %s=%s\n' "$name" "$(sq "${entry#*=}")"
+        fi
     done
+    return 0
 }
 
 has_name() {
@@ -175,7 +192,8 @@ has_name() {
 }
 
 cmd_shell_exports() {
-    local cwd="$1" opfile penv resolved count resolved_ok=1
+    local cwd="$1" opfile penv resolved count name resolved_ok=1
+    local -a unset_args
     opfile="$(locate_op_env "$cwd")"
     [ -n "$opfile" ] || return 0
     read_op_env "$opfile" || return 0
@@ -185,8 +203,13 @@ cmd_shell_exports() {
         read_project_env "$penv" || return 0
     fi
     if [ "${#PE_NAMES[@]}" -gt 0 ]; then
+        # op starts without the listed names, so every listed name env -0
+        # reports is one op run set, never one inherited from the caller.
+        unset_args=()
+        for name in "${PE_NAMES[@]}"; do unset_args+=(-u "$name"); done
         if resolved="$(OP_SERVICE_ACCOUNT_TOKEN="$OPE_TOKEN" bounded "$OP_TIMEOUT" \
-            op run --no-masking --env-file "$penv" -- "$OP_ENV_BIN" _emit "${PE_NAMES[@]}")"; then
+            env "${unset_args[@]}" op run --no-masking --env-file "$penv" -- env -0 | emit_resolved
+            exit "${PIPESTATUS[0]}")"; then
             printf '%s\n' "$resolved"
             if has_name GH_TOKEN "${PE_NAMES[@]}"; then
                 printf 'export GIT_CONFIG_SYSTEM=%s\n' "$(sq "$HTTPS_GITCONFIG")"
@@ -375,7 +398,6 @@ verb="$1"
 shift
 case "$verb" in
     sign) cmd_sign "$@"; exit ;;
-    _emit) cmd_emit "$@"; exit ;;
 esac
 cwd="$PWD"
 if [ "${1:-}" = --cwd ]; then
