@@ -644,6 +644,47 @@ def agent_name(prefix: str, task_id: str, existing=()) -> str:
     return name
 
 
+BRIEF_TEMPLATE_PATH = (Path(__file__).resolve().parents[1] / "skills" / "herdr-orchestration"
+                       / "references" / "brief-template.md")
+BRIEF_BLOCK_RE = re.compile(r"^```brief:([a-z0-9-]+)\n(.*?)\n```$", re.M | re.S)
+BRIEF_TOKEN_RE = re.compile(r"<[A-Za-z][^<>\s]{0,40}>")
+# Left for the worker; the adapter's attempt context supplies the first three.
+BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>",
+                                 "<outcome>", "<n>", "<artifact-list-json>"})
+BRIEF_OPTIONS = ("focus_file", "findings", "artifact_class", "prd_cap", "no_workflow", "tier",
+                 "prior_handoff")
+_BRIEF_WORK_BLOCKS = ("workspace", "routing", "ground-rules")
+BRIEF_PHASES = {
+    "plan": {"prefix": "plan", "emit": "plan", "lessons": "lessons-open-worker", "todo": True,
+             "requires": ("artifact_class",), "allows": ("focus_file", "prd_cap", "no_workflow"),
+             "blocks": ("intro-plan", "task", "plan-produce", *_BRIEF_WORK_BLOCKS, "close-plan")},
+    "implement": {"prefix": "impl", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
+                  "requires": (), "allows": ("focus_file", "no_workflow"),
+                  "blocks": ("intro-work", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "close-implement")},
+    "repair": {"prefix": "repair", "emit": "implement", "lessons": "lessons-open-worker", "todo": False,
+               "requires": ("focus_file", "findings"), "allows": ("no_workflow",),
+               "blocks": ("intro-repair", "task", "repair-findings", "artifacts", *_BRIEF_WORK_BLOCKS,
+                          "close-implement")},
+    "review": {"prefix": "rev", "emit": "review", "lessons": "lessons-open-review", "todo": False,
+               "requires": ("focus_file",), "allows": ("no_workflow",),
+               "blocks": ("intro-review", "task", "review-task", "artifacts", *_BRIEF_WORK_BLOCKS,
+                          "close-review")},
+    "ship": {"prefix": "ship", "emit": "ship", "lessons": "lessons-open-ship", "todo": False,
+             "requires": ("focus_file",), "allows": ("tier", "prior_handoff"),
+             "blocks": ("intro-ship", "task", "ship")},
+}
+
+
+def brief_blocks(text):
+    """The template's `brief:<name>` fenced blocks, by name."""
+    blocks = {}
+    for name, body in BRIEF_BLOCK_RE.findall(text):
+        if name in blocks:
+            raise ValueError(f"duplicate brief block: {name}")
+        blocks[name] = body
+    return blocks
+
+
 def branch_name(user: str, task_id: str, slug: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", slug.lower()).strip("-")[:32]
     return f"{user}/{task_id}/{s}"

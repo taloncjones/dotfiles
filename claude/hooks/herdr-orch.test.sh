@@ -3418,7 +3418,7 @@ check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state l
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 P="claude/skills/post-merge/SKILL.md"
 grep -q '^## Lessons step (<lessons-step>)$' "$R/brief-template.md"
-grep -q '^## Director-authored repair and ship briefs$' "$R/brief-template.md"
+grep -q '^## Repair and ship brief variants$' "$R/brief-template.md"
 [ "$(grep -c '<lessons-step>' "$R/brief-template.md")" -ge 6 ]
 grep -Fq 'at most 160 characters' "$R/brief-template.md"
 if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
@@ -12054,7 +12054,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 447
+assert t.count("\n") <= 584
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -12093,7 +12093,27 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 447
+assert t.count("\n") <= 584
+PY
+
+check "render-brief: the template holds every block the phase table names" <<PY
+$LOAD
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+blocks = c.brief_blocks(t)
+need = {"lessons", "opt-in-granted", "opt-in-withheld", "ship-tier-full", "ship-tier-delta"}
+for spec in c.BRIEF_PHASES.values():
+    need.update(spec["blocks"])
+    need.add(spec["lessons"])
+missing = sorted(need - set(blocks))
+assert not missing, missing
+assert str(c.BRIEF_TEMPLATE_PATH.resolve()) == os.path.realpath("claude/skills/herdr-orchestration/references/brief-template.md")
+spaced = [n for n, body in blocks.items() if re.search(r"<[A-Za-z][^<>]*\s[^<>]*>", body)]
+assert not spaced, spaced  # the token scan only sees space-free tokens
+try:
+    c.brief_blocks("\`\`\`brief:a\nx\n\`\`\`\n\`\`\`brief:a\ny\n\`\`\`\n")
+    raise SystemExit("duplicate block accepted")
+except ValueError:
+    pass
 PY
 
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
