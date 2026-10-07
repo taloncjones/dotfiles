@@ -28,7 +28,6 @@ scan_added_lines() {
   local name="$2"
   local regex="$3"
   local added_lines
-  local hits
 
   added_lines="$(git diff --cached -U0 -- "$file" | awk '/^\+\+\+ /{next} /^\+/{print substr($0,2)}')"
   if [[ -z "$added_lines" ]]; then
@@ -38,14 +37,12 @@ scan_added_lines() {
   # `--` is load-bearing: the private-key regex starts with dashes and rg
   # would otherwise parse it as flags, erroring out and silently skipping the
   # check (found by pre-commit.test.sh; divergence from upstream ECC).
-  if hits="$(printf '%s\n' "$added_lines" | rg -n --pcre2 -- "$regex" 2>/dev/null)"; then
+  # No -q: rg must read all input, or under pipefail a SIGPIPE in printf on
+  # a large diff would hide the match.
+  if printf '%s\n' "$added_lines" | rg --pcre2 -- "$regex" >/dev/null 2>&1; then
     printf '\n[ECC pre-commit] Potential secret detected (%s) in %s\n' "$name" "$file" >&2
-    # project.env lines can only be secrets or references: never echo them.
-    if [[ "${file##*/}" == project.env ]]; then
-      printf '(matching lines withheld)\n' >&2
-    else
-      printf '%s\n' "$hits" | head -n 3 >&2
-    fi
+    # Never echo a match: in an agent session stderr lands in the transcript.
+    printf '(matching lines withheld)\n' >&2
     has_findings=1
   fi
 }
