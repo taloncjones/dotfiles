@@ -292,6 +292,14 @@ def named_paths(paths: set[str] | list[str]) -> str:
     return shown + (f" (+{len(ordered) - 5} more)" if len(ordered) > 5 else "")
 
 
+def behind_conflict(base_ref: str, tip: str, conflicted: list[str]) -> ReviewError:
+    return ReviewError(
+        f"head conflicts with the live origin/{base_ref} tip {tip} on "
+        f"{named_paths(conflicted)}; merge {base_ref} into the branch, resolve "
+        "the conflict, then re-run"
+    )
+
+
 def no_untracked_or_unstaged(
     repo: Path, *, expected_tree: str, expected_head: str
 ) -> None:
@@ -435,13 +443,15 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 f"PR base {pr_base} is not the live origin/{base_ref} tip {live} "
                 "from git ls-remote; read the base from git, not baseRefOid"
             )
-    # Behind: the PR base is not an ancestor of head, so the merge-base is older.
+    # Behind: the PR base is not an ancestor of head. Review git's merge of
+    # head with the live base, which is what the squash merge lands.
+    merge_base, behind_by, merged_tree = base, 0, None
     if pr_base is not None and base != pr_base:
-        raise ReviewError(
-            f"branch is behind the live origin/{base_ref} tip {pr_base}; merge "
-            f"{base_ref} into the branch, then re-run (the carry-forward rule "
-            "keeps an APPROVE across a clean merge of the base)"
-        )
+        base = pr_base
+        behind_by = int(text_git(repo, "rev-list", "--count", f"{merge_base}..{pr_base}"))
+        merged_tree, conflicted = merge_tree(repo, head, base)
+        if conflicted:
+            raise behind_conflict(base_ref, base, conflicted)
     before = status_porcelain(repo)
     original_index_tree = text_git(repo, "write-tree")
     staged = git(
@@ -515,22 +525,26 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         for path in available - selected_paths:
             if tree_contains(repo, tree, path):
                 raise ReviewError("unselected untracked input entered the snapshot")
+        snapshot_env = {
+            **index_env,
+            "GIT_AUTHOR_NAME": "review",
+            "GIT_AUTHOR_EMAIL": "review@example.invalid",
+            "GIT_COMMITTER_NAME": "review",
+            "GIT_COMMITTER_EMAIL": "review@example.invalid",
+        }
         snapshot_head = text_git(
-            repo,
-            "commit-tree",
-            tree,
-            "-p",
-            head,
-            "-m",
-            "co-review snapshot",
-            env={
-                **index_env,
-                "GIT_AUTHOR_NAME": "review",
-                "GIT_AUTHOR_EMAIL": "review@example.invalid",
-                "GIT_COMMITTER_NAME": "review",
-                "GIT_COMMITTER_EMAIL": "review@example.invalid",
-            },
+            repo, "commit-tree", tree, "-p", head, "-m", "co-review snapshot", env=snapshot_env
         )
+        if behind_by:
+            # Merge the frozen snapshot, not the committed head, so a dirty
+            # source still yields a reviewed tree that differs from source_tree.
+            tree, conflicted = merge_tree(repo, snapshot_head, base)
+            if conflicted:
+                raise behind_conflict(base_ref, base, conflicted)
+            snapshot_head = text_git(
+                repo, "commit-tree", tree, "-p", head, "-p", base,
+                "-m", "co-review snapshot", env=snapshot_env,
+            )
         patch.write_bytes(
             git(
                 repo,
@@ -622,11 +636,13 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "root": str(repo),
                 "repo_id": context["repo_id"],
                 "base": base,
+                "merge_base": merge_base,
+                "behind_by": behind_by,
                 "base_ref": base_ref,
                 "base_ref_tip": base_ref_tip,
                 "pr_base": pr_base,
                 "head": head,
-                "source_tree": text_git(repo, "rev-parse", f"{head}^{{tree}}"),
+                "source_tree": merged_tree or text_git(repo, "rev-parse", f"{head}^{{tree}}"),
             },
             "snapshot": {
                 "snapshot_head": snapshot_head,
@@ -646,6 +662,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "manifest": str(manifest_path),
             "snapshot_head": snapshot_head,
             "tree": tree,
+            "behind_by": behind_by,
         }
     finally:
         index.unlink(missing_ok=True)
