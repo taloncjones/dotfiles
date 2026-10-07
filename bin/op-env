@@ -132,11 +132,13 @@ is_allowed_name() {
     case "$name" in
         *_TOKEN|*_KEY|*_SECRET|*_PASSWORD|*_PAT) return 0 ;;
     esac
-    local IFS=,
+    local IFS=, rc=1
+    set -f
     for item in $OPE_ALLOW; do
-        [ "$item" = "$name" ] && return 0
+        [ "$item" = "$name" ] && rc=0
     done
-    return 1
+    set +f
+    return "$rc"
 }
 
 # Sets PE_NAMES to the variable names project.env assigns.

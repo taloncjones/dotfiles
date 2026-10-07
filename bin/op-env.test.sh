@@ -171,6 +171,12 @@ for name in PATH PS1 GIT_DIR OP_FOO HOME path BASH_ENV LD_PRELOAD CLAUDE_X IFS S
     out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
     check "allowed floor name $name is still refused" '[ -z "$out" ] && grep -q "name is not allowed" "$TMP/err"'
 done
+write_op_env "OP_ENV_ALLOW=*"
+touch "$REPO/GLOB_NAME"
+printf 'GLOB_NAME=op://V/x/y\n' >"$REPO/project.env"
+out="$(cd "$REPO" && "$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+check "OP_ENV_ALLOW glob is not expanded against the cwd" '[ -z "$out" ] && grep -q "name is not allowed" "$TMP/err"'
+rm -f "$REPO/GLOB_NAME"
 write_op_env
 
 # --- 4. resolution ---
