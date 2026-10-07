@@ -356,6 +356,8 @@ exports="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
 out="$( (eval "$exports"; "$OP_ENV" status --cwd "$REPO") 2>&1)"
 check "status active: three active lines" '[ "$(printf "%s\n" "$out" | grep -c "^\[OK\] .*active in this shell")" = 3 ]'
 check "status never calls op or prints the token" '[ ! -s "$OP_LOG" ] && ! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
+out="$( (eval "$exports"; unset GIT_CONFIG_COUNT; export GIT_CONFIG_SYSTEM="$ROOT/git/agent-https.gitconfig"; "$OP_ENV" status --cwd "$REPO") 2>&1)"
+check "status flags a pre-change session with no command-scope helper" 'printf "%s\n" "$out" | grep -q "push:.*relaunch"'
 chmod 644 "$REPO/op.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
 check "status reports a bad mode as [X] and exits 1" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*mode is 644"'

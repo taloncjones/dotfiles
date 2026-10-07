@@ -337,15 +337,18 @@ cmd_sign() {
 
 report() { printf '%-10s%s\n' "$1" "$2"; }
 
-signing_active() {
+# True when the command-scope git config holds key $1 with value $2.
+has_command_config() {
     local i=0
     while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
         local k="GIT_CONFIG_KEY_$i" v="GIT_CONFIG_VALUE_$i"
-        [ "${!k:-}" = gpg.ssh.program ] && [ "${!v:-}" = "$SIGN_PROGRAM" ] && return 0
+        [ "${!k:-}" = "$1" ] && [ "${!v:-}" = "$2" ] && return 0
         i=$((i + 1))
     done
     return 1
 }
+
+signing_active() { has_command_config gpg.ssh.program "$SIGN_PROGRAM"; }
 
 cmd_status() {
     local cwd="$1" opfile penv active=0
@@ -376,6 +379,8 @@ cmd_status() {
     fi
     if ! has_name GH_TOKEN ${PE_NAMES[@]+"${PE_NAMES[@]}"}; then
         report "[INFO]" "push: not configured (project.env has no GH_TOKEN)"
+    elif [ "${GIT_CONFIG_SYSTEM:-}" = "$HTTPS_GITCONFIG" ] && ! has_command_config credential.https://github.com.helper "$GH_HELPER"; then
+        report "[X]" "push: this session predates the credential helper change; relaunch it"
     elif [ "${GIT_CONFIG_SYSTEM:-}" = "$HTTPS_GITCONFIG" ]; then
         report "[OK]" "push: HTTPS with GH_TOKEN, active in this shell"
     else
