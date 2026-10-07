@@ -134,27 +134,44 @@ check "literal refusal calls no op" '[ ! -s "$OP_LOG" ]'
 PADDED="ops_$(printf 'padded%s' token | base64 | tr -d '\n')"
 printf 'GH_TOKEN=op://V/gh/token\n%s\n' "$PADDED" >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
-check "project.env bare padded token is refused without its content" '[ -z "$out" ] && grep -q "project.env line 2 is not NAME=op://" "$TMP/err" && ! grep -qF "${PADDED%%=*}" "$TMP/err"'
+check "project.env bare padded token is refused without its content" '[ -z "$out" ] && grep -q "project.env line 2 name is not allowed" "$TMP/err" && ! grep -qF "${PADDED%%=*}" "$TMP/err"'
 out="$("$OP_ENV" status --cwd "$REPO" 2>&1)"
 check "status never prints the bare padded token" '! printf "%s" "$out" | grep -qF "${PADDED%%=*}"'
 
+RULE="project.env line 2 name is not allowed"
 : >"$OP_LOG"
-for name in OP_SERVICE_ACCOUNT_TOKEN PATH BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM PWD \
-    SHELLOPTS BASHOPTS BASH_XTRACEFD BASH_COMPAT LC_ALL LANG PS4 PROMPT_COMMAND CDPATH NODE_OPTIONS NODE_PATH \
+for name in OP_SERVICE_ACCOUNT_TOKEN PATH path fpath BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM PWD \
+    SHELLOPTS BASHOPTS BASH_XTRACEFD LC_ALL LANG PS1 PS4 PROMPT PROMPT_COMMAND CDPATH NODE_OPTIONS NODE_PATH ADAPTER \
     PYTHONPATH PERL5LIB RUBYOPT HTTPS_PROXY https_proxy NO_PROXY XDG_CONFIG_HOME GH_CONFIG_DIR LD_PRELOAD DYLD_INSERT_LIBRARIES; do
     printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
     out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
-    check "project.env reserved name $name is refused" '[ -z "$out" ] && grep -q "project.env line 2 names a reserved variable" "$TMP/err" && ! grep -qF "$name" "$TMP/err"'
+    check "shell-exports refuses project.env name $name" '[ -z "$out" ] && grep -q "$RULE" "$TMP/err" && ! grep -qF "$name" "$TMP/err"'
+    out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "${GH_TOKEN-unset}"' 2>"$TMP/err")"
+    check "exec refuses project.env name $name" '[ "$out" = unset ] && grep -q "$RULE" "$TMP/err"'
 done
-check "reserved-name refusal calls no op" '[ ! -s "$OP_LOG" ]'
-printf 'GH_TOKEN=op://V/gh/token\nBASH_COMPAT=op://V/x/y\nNODE_OPTIONS=op://V/x/y\n' >"$REPO/project.env"
-out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf "%s|%s" "${BASH_COMPAT-unset}" "${NODE_OPTIONS-unset}"' 2>/dev/null)"
-check "exec does not pass a reserved shell-steering name to the child" '[ "$out" = "unset|unset" ]'
+check "name refusal calls no op" '[ ! -s "$OP_LOG" ]'
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
-check "status reports a reserved project.env name as [X]" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*names a reserved variable"'
-printf 'GITHUB_TOKEN=op://V/gh/token\n' >"$REPO/project.env"
+check "status reports a refused project.env name as [X]" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*name is not allowed"'
+
+printf 'GH_TOKEN=op://V/gh/token\nOPENAI_API_KEY=op://V/x/y\nNPM_TOKEN=op://V/x/y\nDB_PASSWORD=op://V/x/y\nSIGN_PAT=op://V/x/y\nWEBHOOK_SECRET=op://V/x/y\n' >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
-check "GITHUB_TOKEN is not a reserved name" 'printf "%s\n" "$out" | grep -qx "export GITHUB_TOKEN='"'"'resolved-GITHUB_TOKEN'"'"'"'
+check "suffix names GH_TOKEN and a _KEY name resolve" 'printf "%s\n" "$out" | grep -qx "export GH_TOKEN='"'"'resolved-GH_TOKEN'"'"'" && printf "%s\n" "$out" | grep -qx "export OPENAI_API_KEY='"'"'resolved-OPENAI_API_KEY'"'"'"'
+check "suffix names _TOKEN _PASSWORD _PAT _SECRET resolve" '[ "$(printf "%s\n" "$out" | grep -cE "^export (GH_TOKEN|OPENAI_API_KEY|NPM_TOKEN|DB_PASSWORD|SIGN_PAT|WEBHOOK_SECRET)=")" = 6 ]'
+
+write_op_env "OP_ENV_ALLOW=ADAPTER_REF,CUSTOM_NAME"
+printf 'CUSTOM_NAME=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "op.env OP_ENV_ALLOW admits a listed name" 'printf "%s\n" "$out" | grep -qx "export CUSTOM_NAME='"'"'resolved-CUSTOM_NAME'"'"'"'
+printf 'OTHER_NAME=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+check "OP_ENV_ALLOW does not admit an unlisted name" '[ -z "$out" ] && grep -q "project.env line 1 name is not allowed" "$TMP/err"'
+write_op_env "OP_ENV_ALLOW=PATH,PS1,GIT_DIR,OP_FOO,HOME,path,BASH_ENV,LD_PRELOAD,CLAUDE_X,IFS,SHELL,ENV"
+for name in PATH PS1 GIT_DIR OP_FOO HOME path BASH_ENV LD_PRELOAD CLAUDE_X IFS SHELL ENV; do
+    printf '%s=op://V/x/y\n' "$name" >"$REPO/project.env"
+    out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+    check "allowed floor name $name is still refused" '[ -z "$out" ] && grep -q "name is not allowed" "$TMP/err"'
+done
+write_op_env
 
 # --- 4. resolution ---
 printf 'GH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN="op://V/cf/credential"\n' >"$REPO/project.env"
@@ -179,10 +196,12 @@ out="$(CLOUDFLARE_API_TOKEN="$INHERITED" FAKE_OP_SKIP=CLOUDFLARE_API_TOKEN "$OP_
 check "a name op did not set is never emitted from the inherited environment" '! printf "%s" "$out" | grep -q CLOUDFLARE_API_TOKEN && ! printf "%s" "$out" | grep -qF "$INHERITED" && printf "%s\n" "$out" | grep -q "^export GH_TOKEN="'
 # bash defines HOSTNAME itself; only a value op set may be emitted.
 cp -p "$REPO/project.env" "$TMP/project.env.before-hostname"
+write_op_env "OP_ENV_ALLOW=HOSTNAME"
 printf 'GH_TOKEN=op://V/gh/token\nHOSTNAME=op://V/host/name\n' >"$REPO/project.env"
 out="$(FAKE_OP_SKIP=HOSTNAME "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
 check "a name the emitting shell defines is never emitted unless op set it" '! printf "%s" "$out" | grep -q "^export HOSTNAME=" && printf "%s\n" "$out" | grep -q "^export GH_TOKEN="'
 cp -p "$TMP/project.env.before-hostname" "$REPO/project.env"
+write_op_env
 
 printf 'CLOUDFLARE_API_TOKEN=op://V/cf/credential\n' >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"

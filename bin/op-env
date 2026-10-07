@@ -79,10 +79,10 @@ unquote() {
     printf '%s' "$v"
 }
 
-# Sets OPE_TOKEN, OPE_SIGNING_KEY, OPE_SIGNING_PUBKEY, OPE_SIGNING_TTL.
+# Sets OPE_TOKEN, OPE_SIGNING_KEY, OPE_SIGNING_PUBKEY, OPE_SIGNING_TTL, OPE_ALLOW.
 read_op_env() {
     local f="$1" line key value n=0 mode
-    OPE_TOKEN="" OPE_SIGNING_KEY="" OPE_SIGNING_PUBKEY="" OPE_SIGNING_TTL=""
+    OPE_TOKEN="" OPE_SIGNING_KEY="" OPE_SIGNING_PUBKEY="" OPE_SIGNING_TTL="" OPE_ALLOW=""
     if [ -L "$f" ] || [ ! -f "$f" ]; then fail_rule "op.env is not a regular file: $f"; return 1; fi
     if [ ! -O "$f" ]; then fail_rule "op.env is not owned by $(id -un): $f"; return 1; fi
     mode="$(file_mode "$f")"
@@ -102,6 +102,7 @@ read_op_env() {
             OP_SIGNING_KEY) OPE_SIGNING_KEY="$value" ;;
             OP_SIGNING_PUBKEY) OPE_SIGNING_PUBKEY="$value" ;;
             OP_SIGNING_TTL) OPE_SIGNING_TTL="$value" ;;
+            OP_ENV_ALLOW) OPE_ALLOW="$value" ;;
             *) fail_rule "op.env line $n has unknown key $key"; return 1 ;;
         esac
     done <"$f"
@@ -113,19 +114,28 @@ read_op_env() {
     return 0
 }
 
-# Refused project.env names: the prefixes OP_ BASH_ LC_ LD_ DYLD_ GIT_ XDG_
-# PYTHON PERL5 RUBY, any *_PROXY or *_proxy, and the exact names PATH HOME
-# SHELL ENV IFS PS4 PROMPT_COMMAND CDPATH SHELLOPTS BASHOPTS ZDOTDIR LANG
-# NODE_OPTIONS NODE_PATH GH_CONFIG_DIR SSH_AUTH_SOCK CLAUDE_CONFIG_DIR PWD
-# OLDPWD SHLVL _. Other names, GH_TOKEN included, are allowed.
-is_reserved_name() {
+# A project.env name is accepted when it is an uppercase identifier ending in
+# _TOKEN, _KEY, _SECRET, _PASSWORD or _PAT, or when op.env lists it in
+# OP_ENV_ALLOW=NAME1,NAME2. The floor names below stay refused even then.
+is_floor_name() {
     case "$1" in
-        OP_*|BASH_*|LC_*|LD_*|DYLD_*|GIT_*|XDG_*|PYTHON*|PERL5*|RUBY*) return 0 ;;
-        *_PROXY|*_proxy) return 0 ;;
-        PATH|HOME|SHELL|ENV|IFS|PS4|PROMPT_COMMAND|CDPATH|SHELLOPTS|BASHOPTS) return 0 ;;
-        ZDOTDIR|LANG|NODE_OPTIONS|NODE_PATH|GH_CONFIG_DIR) return 0 ;;
-        SSH_AUTH_SOCK|CLAUDE_CONFIG_DIR|PWD|OLDPWD|SHLVL|_) return 0 ;;
+        PATH|HOME|SHELL|ENV|IFS|SHELLOPTS|BASHOPTS) return 0 ;;
+        BASH_*|PS*|PROMPT*|LD_*|DYLD_*|GIT_*|OP_*|CLAUDE_*) return 0 ;;
     esac
+    return 1
+}
+
+is_allowed_name() {
+    local name="$1" item
+    [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+    is_floor_name "$name" && return 1
+    case "$name" in
+        *_TOKEN|*_KEY|*_SECRET|*_PASSWORD|*_PAT) return 0 ;;
+    esac
+    local IFS=,
+    for item in $OPE_ALLOW; do
+        [ "$item" = "$name" ] && return 0
+    done
     return 1
 }
 
@@ -142,8 +152,8 @@ read_project_env() {
             fail_rule "project.env line $n is not NAME=op://..."
             return 1
         fi
-        if is_reserved_name "$name"; then
-            fail_rule "project.env line $n names a reserved variable"
+        if ! is_allowed_name "$name"; then
+            fail_rule "project.env line $n name is not allowed (uppercase NAME ending _TOKEN, _KEY, _SECRET, _PASSWORD or _PAT, or listed in OP_ENV_ALLOW)"
             return 1
         fi
         value="$(unquote "${line#*=}")"
