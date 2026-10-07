@@ -24,6 +24,8 @@ SHA_B = "b" * 40
 QUOTA_ATTEMPT = {"runtime": "codex", "status": "error", "result": None,
                  "errors": ["You've hit your usage limit."]}
 LIMIT_NOTICE = "You've hit your session limit \u00b7 resets 3pm"
+LESSONS_DIFF = ("diff --git a/claude/rules/personal/agent-lessons.md "
+                "b/claude/rules/personal/agent-lessons.md\n+x\n")
 AXES = (
     "ownership_authority",
     "dependency_boundaries",
@@ -155,6 +157,65 @@ class GateReportTests(unittest.TestCase):
                            "model": "unknown", "effort": "unknown"}
         self.report["seats"] = seats
         self.report["preconditions"]["diff"] = self._write("review.diff", diff_text)
+
+    def _lessons(self, diff_text: str, runtime: str = "claude"):
+        self.expected["class"] = "lessons"
+        self.report["class"] = "lessons"
+        seat = self._write("verifier.txt", "verifier evidence\n")
+        self.report["seats"] = {"verifier": {"status": "complete", **seat, "runtime": runtime,
+                                             "model": "unknown", "effort": "unknown"}}
+        self.report["preconditions"]["diff"] = self._write("review.diff", diff_text)
+
+    def test_lessons_report_with_one_verifier_approves(self):
+        self._lessons(LESSONS_DIFF)
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_lessons_class_over_mixed_diff_is_incomplete(self):
+        self._lessons(LESSONS_DIFF + "diff --git a/README.md b/README.md\n+x\n")
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(result["reasons"], ["class lessons does not match the frozen diff"])
+
+    def test_lessons_verifier_must_run_on_claude(self):
+        self._lessons(LESSONS_DIFF, runtime="codex")
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(result["reasons"], ["lessons seat verifier must run on claude"])
+
+    def test_lessons_needs_ci_checks(self):
+        self._lessons(LESSONS_DIFF)
+        self.report["preconditions"]["ci"] = self._write(
+            "ci.json", json.dumps({"head": SHA_A, "check_runs": [], "status_contexts": []}))
+        self.report["preconditions"]["no_ci"] = {"evidence": "repository has no workflows"}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(result["reasons"], ["class lessons needs CI check evidence"])
+
+    def test_lessons_seat_set_is_only_the_verifier(self):
+        self._lessons(LESSONS_DIFF)
+        seat = self._write("codex.txt", "codex evidence\n")
+        self.report["seats"]["codex"] = {"status": "complete", **seat, "runtime": "codex",
+                                         "model": "unknown", "effort": "unknown"}
+        self.assertIn("required seats are missing", self.verdict()["reasons"])
+
+    def test_light_report_over_lessons_only_diff_with_no_ci_approves(self):
+        self._light(LESSONS_DIFF)
+        self.report["preconditions"]["ci"] = self._write(
+            "ci.json", json.dumps({"head": SHA_A, "check_runs": [], "status_contexts": []}))
+        self.report["preconditions"]["no_ci"] = {"evidence": "repository has no workflows"}
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_non_string_class_is_incomplete(self):
+        self.report["class"] = self.expected["class"] = []
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("report class is invalid", result["reasons"])
+
+    def test_audit_comment_names_one_lessons_seat(self):
+        self._lessons(LESSONS_DIFF)
+        body = gate.audit_comment(self.report, self.expected, self.root / "report.json")
+        self.assertIn(f"<!-- co-review-audit head={SHA_A} run=run-1 tier=lessons -->", body)
+        self.assertIn("- Tier: lessons (1 seat)", body)
 
     def test_light_report_over_markdown_diff_approves(self):
         self._light("diff --git a/README.md b/README.md\n+x\n")
@@ -581,8 +642,9 @@ class GateReportTests(unittest.TestCase):
         self.assertNotIn("required_seats", shape)
         self.assertEqual(
             shape["codex_substitute"]["seats"],
-            {"light": ["codex"], "full": ["codex", "breaker"], "delta": []},
+            {"light": ["codex"], "full": ["codex", "breaker"], "delta": [], "lessons": []},
         )
+        self.assertEqual(shape["lessons_seats"], ["verifier"])
         self.assertEqual(
             shape["codex_substitute"]["reasons"], ["quota", "auth", "unavailable"]
         )
@@ -677,6 +739,32 @@ class GateReportTests(unittest.TestCase):
         result = self.verdict()
         self.assertEqual(result["verdict"], "APPROVE")
         self.assertTrue(result["approve_allowed"])
+
+    def test_schema_lists_structure_finding_fields(self):
+        fields = gate.schema()["finding_fields"]
+        self.assertIn("structure", fields["category"])
+        self.assertIn("what moves where", fields["proposed_layout"])
+
+    def test_confirmed_advisory_structure_finding_approves(self):
+        self.report["findings"] = [{
+            "id": "s1", "severity": "advisory", "disposition": "confirmed",
+            "scenario": "fault rows keep landing in one test file",
+            "evidence": "four PRs append to the same file",
+            "category": "structure",
+            "proposed_layout": "move voltage rows to test_voltage_faults.py",
+        }]
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_confirmed_major_structure_finding_with_impact_changes(self):
+        self.report["findings"] = [{
+            "id": "s1", "severity": "major", "disposition": "confirmed",
+            "scenario": "a new test file is not matched by the suite selector",
+            "evidence": "the selector lists files by name",
+            "impact": "new tests silently drop out of the CI configuration",
+            "category": "structure",
+            "proposed_layout": "select by directory glob in the suite config",
+        }]
+        self.assertEqual(self.verdict()["verdict"], "CHANGES")
 
     def test_missing_failed_or_empty_seat_is_incomplete(self):
         for mutation in (

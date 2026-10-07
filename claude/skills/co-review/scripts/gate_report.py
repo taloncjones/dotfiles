@@ -15,8 +15,13 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 LIGHT_SEATS = ("codex", "verifier")
 FULL_SEATS = ("claude", "codex", "breaker", "verifier")
 DELTA_SEATS = ("claude", "verifier")
-_TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS, "delta": DELTA_SEATS}
-_CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker"), "delta": ()}
+LESSONS_SEATS = ("verifier",)
+_TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS, "delta": DELTA_SEATS,
+               "lessons": LESSONS_SEATS}
+_CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker"), "delta": (),
+                "lessons": ()}
+# A light gate may review a lessons-only diff; it is the stronger gate.
+_DIFF_CLASSES = {"light": ("light", "lessons"), "lessons": ("lessons",)}
 DELTA_MAX_FILES = 5
 DELTA_MAX_LINES = 150
 _BLAST_RADIUS = ("bounded", "unbounded")
@@ -214,8 +219,8 @@ def _substitutes(
     return substituted
 
 
-def _light_diff_ok(preconditions: object, root: Path) -> bool:
-    """True when the digest-bound frozen diff still classifies as light."""
+def _diff_class_ok(preconditions: object, root: Path, tier: str) -> bool:
+    """True when the digest-bound frozen diff classifies as one the tier may gate."""
     entry = preconditions.get("diff") if isinstance(preconditions, dict) else None
     if not isinstance(entry, dict):
         return False
@@ -229,7 +234,52 @@ def _light_diff_ok(preconditions: object, root: Path) -> bool:
         return False
     change_class = _load_change_class()
     paths = change_class.paths_from_diff(content.decode("utf-8", "replace"))
-    return paths is not None and change_class.classify(paths) == "light"
+    return paths is not None and change_class.classify(paths) in _DIFF_CLASSES[tier]
+
+
+def _lessons_ci_ok(preconditions: object, root: Path) -> bool:
+    """True when the digest-bound CI artifact holds at least one check; CI is
+    where the lessons contract check runs."""
+    entry = preconditions.get("ci") if isinstance(preconditions, dict) else None
+    path, errors = _load_preconditions()._artifact(entry, root, "CI")
+    if errors:
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return isinstance(payload, dict) and any(
+        isinstance(payload.get(key), list) and payload[key]
+        for key in ("check_runs", "status_contexts"))
+
+
+_ROLLUP_FIELDS = {"CheckRun": ("name", "status", "conclusion"),
+                  "StatusContext": ("context", "state")}
+
+
+def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
+    """(envelope, reasons) from `gh pr view --json headRefOid,statusCheckRollup`;
+    envelope is None when the input is unusable."""
+    if (not isinstance(pr, dict) or not _sha(pr.get("headRefOid"))
+            or not isinstance(pr.get("statusCheckRollup"), list)):
+        return None, ["PR JSON needs a headRefOid SHA and a statusCheckRollup list"]
+    envelope = {"head": pr["headRefOid"], "check_runs": [], "status_contexts": []}
+    reasons = []
+    for node in pr["statusCheckRollup"]:
+        kind = node.get("__typename") if isinstance(node, dict) else None
+        fields = _ROLLUP_FIELDS.get(kind)
+        if fields is None:
+            reasons.append(f"CI rollup node type {kind!r} is unknown")
+            continue
+        if not all(key in node for key in fields):
+            reasons.append(f"CI rollup {kind} node is missing a field")
+            continue
+        target = "check_runs" if kind == "CheckRun" else "status_contexts"
+        envelope[target].append({key: node[key] for key in fields})
+    reasons.extend(_load_preconditions()._ci_reasons(envelope, None))
+    if envelope["head"] != head:
+        reasons.append(f"PR head moved: {envelope['head']} is not {head}")
+    return envelope, reasons
 
 
 def _coverage(report: dict, reasons: list[str], visible: list[str]) -> None:
@@ -471,8 +521,14 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
             for name in required:
                 if isinstance(seats[name], dict) and seats[name].get("runtime") != "claude":
                     reasons.append(f"delta seat {name} must run on claude")
-    if tier == "light" and not _light_diff_ok(report.get("preconditions"), artifact_root):
-        reasons.append("class light does not match the frozen diff")
+        if (tier == "lessons" and isinstance(seats["verifier"], dict)
+                and seats["verifier"].get("runtime") != "claude"):
+            reasons.append("lessons seat verifier must run on claude")
+    if (isinstance(tier, str) and tier in _DIFF_CLASSES
+            and not _diff_class_ok(report.get("preconditions"), artifact_root, tier)):
+        reasons.append(f"class {tier} does not match the frozen diff")
+    if tier == "lessons" and not _lessons_ci_ok(report.get("preconditions"), artifact_root):
+        reasons.append("class lessons needs CI check evidence")
     if tier == "delta":
         _delta(report, expected, artifact_root, reasons)
     elif "delta" in report or "delta" in expected:
@@ -529,6 +585,7 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
         for name in _TIER_SEATS[tier]
         if isinstance(seats.get(name), dict) and "codex_substitute" in seats[name]
     )
+    seat_count = len(_TIER_SEATS[tier])
     lines = (
         f"<!-- co-review-audit head={report['head']} run={report['run_id']} "
         f"tier={tier}{prior_fields} -->",
@@ -536,7 +593,7 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
         "",
         f"- Run: {report['run_id']}",
         f"- Head: {report['head']}",
-        f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
+        f"- Tier: {tier} ({seat_count} seat{'' if seat_count == 1 else 's'})",
         *prior_lines,
         *substitute_lines,
         f"- CI: {ci_line}",
@@ -766,6 +823,7 @@ def schema() -> dict:
         "light_seats": list(LIGHT_SEATS),
         "full_seats": list(FULL_SEATS),
         "delta_seats": list(DELTA_SEATS),
+        "lessons_seats": list(LESSONS_SEATS),
         "delta": {
             "expected_fields": {
                 "prior_run": "run_id of the full APPROVE this delta builds on",
@@ -791,7 +849,7 @@ def schema() -> dict:
             "reasons": "list of strings",
             "escalate": "present as full only on a non-APPROVE delta result",
         },
-        "class": "light or full; the evaluator recomputes light from the frozen diff",
+        "class": "light, full, delta or lessons; the evaluator recomputes light and lessons from the frozen diff",
         "finding_fields": {
             "id": "nonempty unique identifier",
             "severity": "critical, high, major, minor, low, nit, or advisory",
@@ -799,6 +857,8 @@ def schema() -> dict:
             "scenario": "nonempty reproduction or review scenario",
             "evidence": "nonempty supporting evidence",
             "impact": "nonempty for confirmed or unresolved critical, high, and major findings",
+            "category": "optional; structure for a Structure fit finding",
+            "proposed_layout": "optional; for a structure finding, what moves where",
         },
         "coverage": {"architecture": list(_AXES), "checklist": list(_CHECKLIST)},
         "report_example": {
@@ -895,6 +955,11 @@ def main(argv: list[str] | None = None) -> int:
     policy_parser.add_argument("--section", required=True)
     classify_parser = sub.add_parser("classify")
     classify_parser.add_argument("--diff", required=True)
+    lessons_parser = sub.add_parser("lessons-check")
+    lessons_parser.add_argument("--file", required=True)
+    envelope_parser = sub.add_parser("ci-envelope")
+    for flag in ("--pr-json", "--head", "--out"):
+        envelope_parser.add_argument(flag, required=True)
     audit_parser = sub.add_parser("audit-comment")
     audit_parser.add_argument("--report", required=True)
     audit_parser.add_argument("--expected", required=True)
@@ -936,6 +1001,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "schema":
         print(json.dumps(schema(), sort_keys=True))
         return 0
+    if args.command == "lessons-check":
+        try:
+            text = Path(args.file).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            reasons = [f"cannot read {args.file}: {error}"]
+        else:
+            reasons = _load_sibling("lessons_contract").check(text)
+        print(json.dumps({"pass": not reasons, "reasons": reasons}, sort_keys=True))
+        return 0 if not reasons else 1
+    if args.command == "ci-envelope":
+        try:
+            pr = json.loads(Path(args.pr_json).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as error:
+            print(json.dumps({"error": str(error)}))
+            return 1
+        envelope, reasons = ci_envelope(pr, args.head)
+        if envelope is None:
+            print(json.dumps({"error": reasons[0]}))
+            return 1
+        out = Path(args.out)
+        out.write_text(json.dumps(envelope, sort_keys=True) + "\n", encoding="utf-8")
+        checks = len(envelope["check_runs"]) + len(envelope["status_contexts"])
+        print(json.dumps({"artifact": out.name, "sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+                          "checks": checks, "reasons": reasons}, sort_keys=True))
+        return 0 if not reasons else 1
     if args.command == "classify":
         try:
             text = Path(args.diff).read_text(encoding="utf-8", errors="replace")

@@ -33,6 +33,8 @@ assert "claude-plan-review uses the shared native runtime" \
     rg -q 'agent_runtime' codex/skills/claude-plan-review/SKILL.md
 assert "claude-spec-review selects the Claude runtime" \
     rg -q -- '--runtime claude' codex/skills/claude-spec-review/SKILL.md
+assert "claude-spec-review asks the PRD review questions" \
+    sh -c "rg -q 'acceptance criterion' codex/skills/claude-spec-review/SKILL.md && rg -q 'separable mechanisms' codex/skills/claude-spec-review/SKILL.md && rg -q 'existing tool' codex/skills/claude-spec-review/SKILL.md && rg -q 'before implementation' codex/skills/claude-spec-review/SKILL.md"
 assert "co-review extracts the canonical policy and schema" \
     sh -c 'rg -q "policy --section POLICY" claude/skills/co-review/SKILL.md && rg -q "policy --section POLICY" codex/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" claude/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" codex/skills/co-review/SKILL.md'
 assert "co-review requires four named independent seats" \
@@ -57,6 +59,75 @@ assert "review-change cannot approve a PR or recurse into partners" \
     sh -c 'rg -q "task-local readiness" codex/skills/review-change/SKILL.md && rg -q "unknown evidence" claude/skills/review-change/SKILL.md && rg -q "unknown evidence" codex/skills/review-change/SKILL.md && rg -q "co-review, partners" codex/skills/review-change/SKILL.md'
 assert "review-change blocks concrete major-or-higher defects" \
     sh -c 'rg -q "major, high, or critical" claude/skills/review-change/SKILL.md && rg -q "major, high, or critical" codex/skills/review-change/SKILL.md'
+
+review_change_appends_rubric() {
+    for f in claude/skills/review-change/SKILL.md codex/skills/review-change/SKILL.md; do
+        grep -q '^required = (.*"claude/skills/co-review/references/failure-classes.md"' "$f" || return 1
+        grep -qF 'RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"' "$f" || return 1
+    done
+    grep -qF "grep -q '^## Classes' \"\$RUBRIC\" || exit 2" claude/skills/review-change/SKILL.md &&
+        grep -qF "sed -n '/^## Classes/,\$p' \"\$RUBRIC\" >>\"\$PROMPT_FILE\"" claude/skills/review-change/SKILL.md &&
+        grep -qF 'Apply the appended review rubric' claude/skills/review-change/SKILL.md
+}
+codex_review_change_describes_rubric() {
+    flat=$(tr '\n' ' ' <codex/skills/review-change/SKILL.md | tr -s ' ')
+    printf '%s' "$flat" | grep -qF 'appends the complete `## Classes` section of `$RUBRIC`' &&
+        printf '%s' "$flat" | grep -qF 'report an `Architecture` section'
+}
+assert "review-change appends the shared rubric" \
+    review_change_appends_rubric
+assert "codex review-change prompt describes the shared rubric" \
+    codex_review_change_describes_rubric
+
+RUBRIC=claude/skills/co-review/references/failure-classes.md
+CORRECTNESS_LENS='You are the staff engineer who maintains this code after it merges. Trace each changed function to its callers and to the tests that exercise it. Is the logic correct for every input and state those callers can produce, including errors, retries and interrupted runs? Does each test fail when the behavior it names breaks? Does the change fit the structure readers expect (the Structure fit class)?'
+OPERATOR_LENS='You own every machine and session that loads this file, and you answer the support ticket when it breaks. What breaks on a machine that has not run `update` since the previous version, on a fresh cloud container, and under the work config directory (`CLAUDE_CONFIG_DIR` set)? What does a session already running the old version do when it next reads this text or runs this hook? Which hook, drift check or test should have caught a break here, and does it? What is the rollback, and does reverting the commit undo the machine state this change creates?'
+
+# The slice every reviewer receives, blockquote markers and wrapping removed.
+rubric_slice() {
+    sed -n '/^## Classes/,$p' "$RUBRIC" | sed 's/^> *//' | tr '\n' ' ' | tr -s ' '
+}
+slice_has() {
+    for needle in "$@"; do
+        rubric_slice | grep -qF -- "$needle" || return 1
+    done
+}
+structure_class_once() {
+    [ "$(sed -n '/^## Classes/,$p' "$RUBRIC" | grep -c '^- Structure fit:')" = 1 ] &&
+        slice_has 'submodules' 'what moves where'
+}
+md_files_with() {
+    n=0
+    for f in $(git ls-files '*.md'); do
+        if sed 's/^> *//' "$f" | tr '\n' ' ' | tr -s ' ' | grep -qF -- "$1"; then
+            n=$((n + 1))
+        fi
+    done
+    echo "$n"
+}
+lens_prompts_single_surface() {
+    [ "$(md_files_with "$CORRECTNESS_LENS")" = 1 ] &&
+        [ "$(md_files_with "$OPERATOR_LENS")" = 1 ]
+}
+
+assert "rubric has one Structure fit class under ## Classes" \
+    structure_class_once
+assert "rubric routes lenses by changed path" \
+    slice_has '### Lenses' 'mixed diff applies both' 'any other repository' \
+        '`claude/skills/**`' '`claude/hooks/**`' '`claude/rules/**`' \
+        '`claude/settings.json.tmpl`' '`codex/skills/**`' '`codex/hooks/**`' \
+        '`git/hooks/**`' '`install/**`' '`zsh/**`' '`bootstrap*.sh`' \
+        '`CLAUDE.md`' '`AGENTS.md`' '| Operator |' '| Correctness |'
+assert "rubric carries the verbatim correctness lens" \
+    slice_has "$CORRECTNESS_LENS"
+assert "rubric carries the verbatim operator lens" \
+    slice_has "$OPERATOR_LENS"
+assert "rubric states structure reporting and severity" \
+    slice_has '### Reporting structure and lenses' '`Architecture` section' \
+        'is `advisory` by default' 'cites the applicable required contract' \
+        'silently drop out of a configuration'
+assert "lens prompts live only in the rubric" \
+    lens_prompts_single_surface
 
 assert "installer links repo-managed codex skills" \
     rg -q 'codex/skills' install/common/codex-links.sh

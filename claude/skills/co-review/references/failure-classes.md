@@ -47,3 +47,58 @@ change.
   lease ownership).
 - Writer/reader parity: writers publishing payloads their own bounded
   readers refuse (size caps, shape, encoding limits).
+
+- Structure fit: new code lives where a reader would look for it; a file
+  or function that takes on a second responsibility, or keeps absorbing
+  sibling cases, is split (one file per family of cases, not one file for
+  all); no new helper, parser or module duplicates one the repository or
+  its submodules already has (search before reporting); a different module
+  boundary or file layout would read better; a simpler approach meets the
+  stated goal. A finding names a concrete proposed layout: what moves where.
+
+### Lenses
+
+Read the changed paths from the frozen diff's `diff --git` lines and apply
+every lens a changed path selects; a mixed diff applies both. Name the
+applied lenses in your `Architecture` section.
+
+| Changed path in the dotfiles repository                                                                                                                                                                             | Lens        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `claude/skills/**`, `claude/hooks/**`, `claude/rules/**`, `claude/settings.json.tmpl`, `codex/skills/**`, `codex/hooks/**`, `git/hooks/**`, `install/**`, `zsh/**`, `bootstrap*.sh`, any `CLAUDE.md` or `AGENTS.md` | Operator    |
+| every other path                                                                                                                                                                                                    | Correctness |
+
+In any other repository, apply the Operator lens to the files that
+repository ships as agent instructions, skills, hooks, settings templates,
+installers or shell startup, and the Correctness lens to everything else.
+
+Correctness lens:
+
+> You are the staff engineer who maintains this code after it merges.
+> Trace each changed function to its callers and to the tests that
+> exercise it. Is the logic correct for every input and state those
+> callers can produce, including errors, retries and interrupted runs?
+> Does each test fail when the behavior it names breaks? Does the change
+> fit the structure readers expect (the Structure fit class)?
+
+Operator lens:
+
+> You own every machine and session that loads this file, and you answer
+> the support ticket when it breaks. What breaks on a machine that has
+> not run `update` since the previous version, on a fresh cloud
+> container, and under the work config directory (`CLAUDE_CONFIG_DIR`
+> set)? What does a session already running the old version do when it
+> next reads this text or runs this hook? Which hook, drift check or
+> test should have caught a break here, and does it? What is the
+> rollback, and does reverting the commit undo the machine state this
+> change creates?
+
+### Reporting structure and lenses
+
+Every reviewer report has an `Architecture` section: the lenses applied
+and the changed paths that selected them, then each Structure fit finding
+with its proposed layout, or one line of evidence that none applies. A
+Structure fit finding is `advisory` by default. It is `major` or higher
+only when it cites the applicable required contract and a concrete
+material consequence under the policy's impact rule, for example a
+selection mechanism that lets new tests silently drop out of a
+configuration. Taste, naming and speculative extension never block.

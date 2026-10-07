@@ -1131,6 +1131,55 @@ $LOAD
 assert c.BACKSTOP_HEARTBEAT_SECS < c.WAKE_HEARTBEAT_STALE_SECS
 PY
 
+check "BACKSTOP_REFRESH_SECS leaves two refreshes inside WAKE_HEARTBEAT_STALE_SECS" <<PY
+$LOAD
+assert c.BACKSTOP_REFRESH_SECS == 300
+assert c.BACKSTOP_REFRESH_SECS * 2 < c.WAKE_HEARTBEAT_STALE_SECS
+PY
+
+check "keep_lease_warm: refreshes the holder lease, follows a same-pid re-claim, refuses a gone holder or a foreign lease" <<PY
+$LOAD
+import time
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-keep");rd.mkdir(parents=True)
+f1=claim_legacy_owner(rd,"A","h",4242)
+def hb():
+    return json.loads((rd/"owner.json").read_text())["heartbeat_ts"]
+def stale():
+    o=json.loads(c.coordination.owner_path(rd).read_text());o["heartbeat_ts"]=1.0
+    c.coordination.owner_path(rd).write_text(json.dumps(o))
+    m=json.loads((rd/"owner.json").read_text());m["heartbeat_ts"]=1.0
+    (rd/"owner.json").write_text(json.dumps(m))
+c._is_ancestor=lambda pid: False
+stale()
+assert c.keep_lease_warm(rd,4242)=="holder-gone"
+assert hb()==1.0                                    # guard runs before any write
+c._is_ancestor=lambda pid: True
+assert c.keep_lease_warm(rd,4242)=="ok"
+assert hb()>time.time()-60 and c.check_fence(rd,"A",f1)
+f2=claim_legacy_owner(rd,"A2","h",4242,stale_secs=0)  # /clear: same pid, new session
+assert f2==f1+1
+stale()
+assert c.keep_lease_warm(rd,4242)=="ok"               # follows the new session and fence
+assert hb()>time.time()-60 and c.check_fence(rd,"A2",f2)
+real=c.refresh_owner; calls=[]
+def racing(rd_, session, fence, messaging_socket=None):
+    if not calls:                                       # re-claim between read and write
+        calls.append(claim_legacy_owner(rd,"A3","h",4242,stale_secs=0))
+    return real(rd_, session, fence, messaging_socket)
+c.refresh_owner=racing
+stale()
+assert c.keep_lease_warm(rd,4242)=="ok"               # retry follows the racing re-claim
+c.refresh_owner=real
+assert calls==[f2+1] and c.check_fence(rd,"A3",f2+1) and hb()>time.time()-60
+assert c.keep_lease_warm(rd,5151)=="lost"             # lease names another pid
+f3=claim_legacy_owner(rd,"B","h",5151,stale_secs=0)
+stale()
+assert c.keep_lease_warm(rd,4242)=="lost"
+assert hb()==1.0 and c.check_fence(rd,"B",f3)          # the foreign lease is untouched
+sys.exit(0)
+PY
+
 check "delivered_records: v2 only, keyed by file name, unreadable markers ignored" <<PY
 $LOAD
 root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
@@ -1237,6 +1286,178 @@ W=$!
 i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
 if kill -0 "$W" 2>/dev/null; then kill "$W"; exit 1; fi
 test "$(cat "$root/out")" = signal
+SH
+
+check "backstop keepalive: CLI accepts a valid messaging socket and rejects a bad or misplaced one" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+S=github-com-org-watch-cafe0002
+if $CLI watch --repo-slug "$S" --messaging-socket /tmp/cc-socks/1.sock --exit-on-signal 2>/dev/null; then exit 1; fi
+set +e
+$CLI watch --repo-slug "$S" --undelivered-only --messaging-socket /var/tmp/1.sock 2>/dev/null; rc1=$?
+$CLI watch --repo-slug "$S" --undelivered-only --messaging-socket "" 2>/dev/null; rc2=$?
+$CLI watch --repo-slug "$S" --messaging-socket /tmp/cc-socks/1.sock --once --since-epoch 0 2>/dev/null; rc3=$?
+set -e
+test "$rc1" = 2 && test "$rc2" = 2 && test "$rc3" = 2
+$CLI watch --repo-slug "$S" --undelivered-only --interval 1 --messaging-socket "/tmp/cc-socks/$$.sock" > "$root/out" 2>&1 &
+W=$!; trap 'kill "$W" 2>/dev/null || :' EXIT
+sleep 2
+kill -0 "$W"                                           # a valid keepalive invocation is accepted
+SH
+
+check "backstop keepalive: refreshes only while a task is active and never exits for the cadence" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0003; SOCK="/tmp/cc-socks-9$$/$$.sock"
+$CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid $$ --messaging-socket "$SOCK" >/dev/null 2>&1
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/tasks"
+hb() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["heartbeat_ts"])' "$RD/owner.json"; }
+h0=$(hb)
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 --heartbeat-secs 2 --messaging-socket "$SOCK" > "$root/out" 2>&1 &
+W=$!; trap 'kill "$W" 2>/dev/null || :' EXIT
+sleep 4
+kill -0 "$W"
+test "$(hb)" = "$h0"                                   # no active task: no refresh
+printf '{"task_id":"PROJ-1","status":"in-progress"}' > "$RD/tasks/PROJ-1.json"
+sleep 5
+kill -0 "$W"                                           # still running past two cadences
+python3 -c 'import sys; assert float(sys.argv[2]) > float(sys.argv[1]), sys.argv' "$h0" "$(hb)"
+test ! -s "$root/out"                                  # no heartbeat line, nothing at all
+SH
+
+check "backstop keepalive: a killed director stops the refresh and the watch exits holder-gone" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"; export CLI
+SLUG=github-com-org-watch-cafe0004; export SLUG
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/tasks"
+printf '{"task_id":"PROJ-1","status":"in-progress"}' > "$RD/tasks/PROJ-1.json"
+sh -c '
+SOCK="/tmp/cc-socks-9$$/$$.sock"
+$CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid $$ --messaging-socket "$SOCK" >/dev/null 2>&1
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 --heartbeat-secs 2 --messaging-socket "$SOCK" > "$1/out" 2>&1 &
+echo $! > "$1/wpid"
+wait' _ "$root" &
+D=$!
+i=0; while [ ! -s "$root/wpid" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+W=$(cat "$root/wpid"); trap 'kill "$W" 2>/dev/null || :' EXIT
+sleep 3
+kill -9 "$D"
+i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+if kill -0 "$W" 2>/dev/null; then exit 1; fi
+test "$(cat "$root/out")" = "owner: holder-gone"
+hb() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["heartbeat_ts"])' "$RD/owner.json"; }
+h1=$(hb); sleep 4
+test "$(hb)" = "$h1"                                   # nothing refreshes after the exit
+SH
+
+check "backstop keepalive: a lease taken by another pid exits owner: lost" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0005; SOCK="/tmp/cc-socks-9$$/$$.sock"
+$CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid $$ --messaging-socket "$SOCK" >/dev/null 2>&1
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/tasks"
+printf '{"task_id":"PROJ-1","status":"in-progress"}' > "$RD/tasks/PROJ-1.json"
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 --heartbeat-secs 2 --messaging-socket "$SOCK" > "$root/out" 2>&1 &
+W=$!; trap 'kill "$W" 2>/dev/null || :' EXIT
+$CLI claim-owner --repo-slug "$SLUG" --session T --host h --pid 4242 --stale-secs 0 >/dev/null 2>&1
+i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+if kill -0 "$W" 2>/dev/null; then exit 1; fi              # deadline: the trap reaps it
+set +e; wait "$W"; rc=$?; set -e
+test "$rc" = 1
+test "$(cat "$root/out")" = "owner: lost"
+SH
+
+check "backstop keepalive: a same-pid re-claim under a new session keeps the watch refreshing" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0006; SOCK="/tmp/cc-socks-9$$/$$.sock"
+$CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid $$ --messaging-socket "$SOCK" >/dev/null 2>&1
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/tasks"
+printf '{"task_id":"PROJ-1","status":"in-progress"}' > "$RD/tasks/PROJ-1.json"
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 --heartbeat-secs 2 --messaging-socket "$SOCK" > "$root/out" 2>&1 &
+W=$!; trap 'kill "$W" 2>/dev/null || :' EXIT
+hb() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["heartbeat_ts"])' "$RD/owner.json"; }
+h0=$(hb)
+# Re-claim just after a refresh lands; a re-claim inside a refresh is
+# covered by keep_lease_warm's retry (its unit check pins that ordering).
+i=0; while [ "$(hb)" = "$h0" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+test "$(hb)" != "$h0"
+F2=$($CLI claim-owner --repo-slug "$SLUG" --session S2 --host h --pid $$ --messaging-socket "$SOCK" 2>/dev/null)
+h1=$(hb); sleep 5
+kill -0 "$W"
+python3 -c 'import sys; assert float(sys.argv[2]) > float(sys.argv[1]), sys.argv' "$h1" "$(hb)"
+$CLI check-fence --repo-slug "$SLUG" --session S2 --fence "$F2"
+test ! -s "$root/out"
+SH
+
+check "backstop keepalive: a worker push in an idle window is delivered, not stale-heartbeat" <<PY
+$LOAD
+import socket, threading, random, shutil, subprocess, time
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+slug="github-com-org-watch-cafe0007"
+rd=c.repo_dir(slug);rd.mkdir(parents=True);(rd/"tasks").mkdir()
+(rd/"tasks"/"PROJ-1.json").write_text(json.dumps({"task_id":"PROJ-1","status":"in-progress"}))
+sockdir="/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir,0o700)
+path=f"{sockdir}/{os.getpid()}.sock"
+got=[]; stop=threading.Event(); w=None
+try:
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(0.1)
+    def acc():
+        while not stop.is_set():
+            try: conn,_=srv.accept()
+            except socket.timeout: continue
+            except OSError: return
+            got.append(conn.recv(4096)); conn.close()
+    threading.Thread(target=acc,daemon=True).start()
+    claim_legacy_owner(rd,"S","h",os.getpid(),messaging_socket=path)
+    for p in (c.coordination.owner_path(rd), rd/"owner.json"):
+        o=json.loads(p.read_text()); o["heartbeat_ts"]=time.time()-1000; p.write_text(json.dumps(o))
+    assert c.post_wake(rd,"w1","stopped")=="stale-heartbeat"
+    w=subprocess.Popen([sys.executable,"claude/hooks/herdr_legacy_fixture.py","watch","--repo-slug",slug,
+                        "--undelivered-only","--exit-on-signal","--interval","1","--heartbeat-secs","2",
+                        "--messaging-socket",path],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    end=time.monotonic()+10
+    while time.monotonic()<end and json.loads((rd/"owner.json").read_text())["heartbeat_ts"]<time.time()-60:
+        time.sleep(0.2)
+    assert w.poll() is None, w.stdout.read()
+    assert c.post_wake(rd,"w1","stopped")=="sent"
+    end=time.monotonic()+3
+    while not got and time.monotonic()<end: time.sleep(0.05)
+    assert got
+finally:
+    stop.set()
+    if w is not None: w.kill(); w.wait()
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
+check "backstop keepalive: a dropped blocked wake still signals" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0008; SOCK="/tmp/cc-socks-9$$/$$.sock"
+$CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid $$ --messaging-socket "$SOCK" >/dev/null 2>&1
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/workspaces" "$RD/tasks"
+printf '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"blocked","reason":"stale-heartbeat","ts":%s}}' "$(( $(date +%s) - 5 ))" > "$RD/workspaces/w1.wake.json"
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 --messaging-socket "$SOCK" > "$root/out" 2>&1 &
+W=$!
+i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+if kill -0 "$W" 2>/dev/null; then kill "$W"; exit 1; fi
+test "$(cat "$root/out")" = signal
+SH
+
+check "backstop legacy: without a messaging socket --heartbeat-secs drives the heartbeat exit" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0009
+$CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 1 >/dev/null 2>&1
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/tasks"
+printf '{"task_id":"PROJ-1","status":"in-progress"}' > "$RD/tasks/PROJ-1.json"
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 --heartbeat-secs 2 > "$root/out" 2>&1 &
+W=$!
+i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+if kill -0 "$W" 2>/dev/null; then kill "$W"; exit 1; fi
+wait "$W"
+test "$(cat "$root/out")" = heartbeat
 SH
 
 check "checkin: acks the drops it read after its rows; stale-fence writes nothing" <<'SH'
@@ -11419,6 +11640,53 @@ account = coordination.account_id_for_root(Path(root))
 refs = []
 for kind in ("spec", "plan"):
     path = f"{launch}/{kind}.md"
+    digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    refs.append({"kind": kind, "path": path, "sha256": digest,
+                 "source": {"repo_id": "canon", "sha256": digest},
+                 "task": {"task_id": "PROJ-1", "repo_id": "canon", "account_id": account}})
+print(json.dumps(refs))
+PY
+)
+ROW='{"phase":"plan","workspace_id":"w5","runtime":"claude","launch_id":"L1","pane_id":"w5:p1","source_head_sha":"'"$HEAD"'"}'
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","repo_slug":"slug-x","status":"in-progress","base_sha":"'"$HEAD"'","worktree":"'"$WT"'","workers":['"$ROW"']}'
+cat > "$RD/tasks/PROJ-1.done.json" <<JSON
+{"phase":"plan","workspace_id":"w5","runtime":"claude","launch_id":"L1","pane_id":"w5:p1","source_head_sha":"$HEAD","task_id":"PROJ-1","outcome":"completed","head_sha":"$HEAD","base_sha":"$HEAD","plan_artifacts":$REFS}
+JSON
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+$CLI confirm-plan --repo-slug slug-x --task-id PROJ-1 --workspace w5 --head-sha "$HEAD"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q 'PROJ-1 .*action=confirm-plan'
+! printf '%s\n' "$out" | grep -q 'unverifiable-evidence'
+SH
+
+check "confirm-plan: a single PRD artifact confirms the plan" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+python3 - "$HERDR_COORDINATION_ROOT/bindings.json" <<'PY'
+import json, sys
+path = sys.argv[1]; registry = json.load(open(path)); registry["slug-x"]["repo_id"] = "canon"
+open(path, "w").write(json.dumps(registry))
+PY
+WT=$(mktemp -d)
+git -C "$WT" init -q
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+HEAD=$(git -C "$WT" rev-parse HEAD)
+LAUNCH="$root/herdr-orch/slug-x/artifacts/PROJ-1/L1"; mkdir -p "$LAUNCH"
+printf 'Reviewed PRD\n' > "$LAUNCH/prd.md"
+REFS=$(python3 - "$root" "$LAUNCH" <<'PY'
+import hashlib, json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+from pathlib import Path
+root, launch = sys.argv[1:]
+account = coordination.account_id_for_root(Path(root))
+refs = []
+for kind, name in (("spec", "prd.md"),):
+    path = f"{launch}/{name}"
     digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
     refs.append({"kind": kind, "path": path, "sha256": digest,
                  "source": {"repo_id": "canon", "sha256": digest},

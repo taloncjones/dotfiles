@@ -547,6 +547,58 @@ class ReviewRegressions(unittest.TestCase):
         (coordination.coordination_root() / "bindings.json").write_text("not json")
         self.assertIsNone(coordination.bound_repo_id("repo"))
 
+    def test_single_prd_artifact_confirms_the_plan(self):
+        self.claim()
+        account = self.root / "account"
+        launch = account / "herdr-orch/repo/artifacts/td-a/L1"
+        launch.mkdir(parents=True)
+        path = launch / "prd.md"
+        path.write_text("reviewed prd\n")
+        refs = [{"kind": "spec", "path": str(path),
+                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}]
+        head = "a" * 40
+        row = {"phase": "plan", "runtime": "claude", "launch_id": "L1",
+               "workspace_id": "w1", "pane_id": "w1:p1", "source_head_sha": head}
+        task = {"task_id": "td-a", "repo_slug": "repo", "base_sha": head, "workers": [row]}
+        done = dict(row, task_id="td-a", outcome="completed", head_sha=head,
+                    base_sha=head, plan_artifacts=refs)
+        self.assertTrue(core.is_plan_completed(task, done, head, "w1", account))
+        self.assertTrue(core.is_plan_completed(dict(task, plan_artifacts=refs), done, head, "w1", account))
+        path.write_text("unreviewed\n")
+        self.assertFalse(core.is_plan_completed(task, done, head, "w1", account))
+
+    def test_plan_artifact_kinds_refuse_bad_lists(self):
+        self.claim()
+        account = self.root / "account"
+        launch = account / "herdr-orch/repo/artifacts/td-a/L1"
+        launch.mkdir(parents=True)
+
+        def ref(kind, name):
+            path = launch / name
+            path.write_text(f"reviewed {name}\n")
+            return {"kind": kind, "path": str(path),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+        spec, plan = ref("spec", "prd.md"), ref("plan", "plan.md")
+        spec2, notes = ref("spec", "second.md"), ref("notes", "notes.md")
+        head = "a" * 40
+        row = {"phase": "plan", "runtime": "claude", "launch_id": "L1",
+               "workspace_id": "w1", "pane_id": "w1:p1", "source_head_sha": head}
+        task = {"task_id": "td-a", "repo_slug": "repo", "base_sha": head, "workers": [row]}
+        cases = {
+            "legacy pair": ([spec, plan], True),
+            "plan only": ([plan], False),
+            "two specs": ([spec, spec2], False),
+            "unknown kind": ([spec, notes], False),
+            "three refs": ([spec, plan, notes], False),
+            "empty": ([], False),
+        }
+        for label, (refs, expected) in cases.items():
+            with self.subTest(label):
+                done = dict(row, task_id="td-a", outcome="completed", head_sha=head,
+                            base_sha=head, plan_artifacts=refs)
+                self.assertEqual(core.is_plan_completed(task, done, head, "w1", account), expected)
+
     def test_plan_artifacts_fall_back_to_the_correlated_plan_completion(self):
         self.claim()
         account = self.root / "account"
@@ -601,7 +653,7 @@ class ReviewRegressions(unittest.TestCase):
         no_refs = {key: value for key, value in done.items() if key != "plan_artifacts"}
         self.assertFalse(core.is_plan_completed(task, no_refs, head, "w1", account))
         self.assertFalse(
-            core.is_plan_completed(task, dict(done, plan_artifacts=refs[:1]), head, "w1", account)
+            core.is_plan_completed(task, dict(done, plan_artifacts=refs[1:]), head, "w1", account)
         )
         self.assertFalse(
             core.is_plan_completed(task, dict(done, launch_id="L0"), head, "w1", account)

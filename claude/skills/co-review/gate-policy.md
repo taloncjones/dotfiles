@@ -175,7 +175,10 @@ result incomplete unless the committed expected tree equals the frozen reviewed
 tree. `manifest.source.source_tree` binds `expected.tree`; the verified
 `manifest.snapshot.codex_tree` binds `report.reviewed_tree`. Capture the exact
 frozen Git diff bytes without universal-newline normalization. Capture the CI
-payload for the expected head as a regular report artifact. Hash every artifact
+payload for the expected head as a regular report artifact. A PR gate captures
+it with `gate_report.py ci-envelope` after the head's checks finish and before
+any probe or seat runs, and every seat prompt names `ci.json`, its digest and
+its content. Hash every artifact
 after it is complete. Paths in the report are relative to the report file; artifacts must
 not be symlinks.
 
@@ -210,7 +213,13 @@ and one Claude runtime, unless the `codex` seat is an evidenced substitute
 (below), for a diff whose every path is Markdown or `.todos/`
 outside the gate skills. The delta tier runs `claude` and `verifier`, both Claude
 runtimes and never substituted, for a follow-up `co-review --delta` recommends
-(see Delta tier). Every seat is fresh, read-only, independently
+(see Delta tier). The lessons tier runs one `verifier`, a Claude runtime
+never substituted, for a diff whose only path is
+`claude/rules/personal/agent-lessons.md` and whose contract check
+(`gate_report.py lessons-check`) passes; it needs CI with at least one check,
+because CI runs that check on the PR's file, and the verifier fact-checks the
+changed rules without a finder report. A light gate may also review that diff.
+Every seat is fresh, read-only, independently
 completed runtime calls with a 600-second bound. Record requested and
 observed runtime/model/effort; an
 unknown observation remains `unknown`. Each seat artifact is nonempty,
@@ -224,7 +233,8 @@ controller opinion, or a current-session implementer does not fill a seat.
 3. `breaker`: fresh Codex skeptic route (or an evidenced Claude substitute),
    independent of both finder reports.
 4. `verifier`: fresh skeptic route after every finder report exists (three in
-   the full tier, the `codex` report in the light tier). It receives those
+   the full tier, the `codex` report in the light tier, none in the lessons
+   tier). It receives those
    reports and every known blocker, but performs its own frozen evidence
    check.
 
@@ -260,7 +270,8 @@ silent pass. All probes use disposable fixtures and never live hardware or
 production actions. Append the complete `## Classes` section from
 `references/failure-classes.md` verbatim to every seat prompt. The class IDs in
 the report record coverage; the appended class text supplies the required probe
-descriptions.
+descriptions. The Structure fit class has no checklist ID; seats report it in
+their `Architecture` section and as findings.
 
 ### Findings, blockers, and coverage
 

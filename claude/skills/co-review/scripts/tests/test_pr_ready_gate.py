@@ -35,6 +35,14 @@ class SelectMarkerTests(unittest.TestCase):
         body = "| x |\n" + marker()
         self.assertEqual(gate.select_marker([comment(body)], ME)["sha"], SHA_A)
 
+    def test_structure_line_after_blockers_keeps_the_marker(self):
+        plain = (marker(verdict="CHANGES") + "\nCo-review verdict: CHANGES\n"
+                 "f1: lost update\n| x |\n")
+        with_structure = plain + "Structure: s1: move voltage rows to test_voltage_faults.py\n"
+        selected = gate.select_marker([comment(with_structure)], ME)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected, gate.select_marker([comment(plain)], ME))
+
     def test_other_author_ignored(self):
         self.assertIsNone(gate.select_marker([comment(marker(), author="x")], ME))
 
@@ -168,6 +176,7 @@ class TierMarkerTests(unittest.TestCase):
             ("", None, None),
             (" tier=full", "full", None),
             (" tier=light", "light", None),
+            (" tier=lessons", "lessons", None),
             (" tier=delta" + prior, "delta", "run-1.a:b"),
             (" tier=carry-forward" + prior, "carry-forward", "run-1.a:b"),
             (f" tier=full target_tip={SHA_B}", "full", None),
@@ -178,7 +187,8 @@ class TierMarkerTests(unittest.TestCase):
 
     def test_inconsistent_tier_fields_are_malformed(self):
         prior = f" prior_run=r prior_sha={SHA_B}"
-        for suffix in (" tier=full" + prior, " tier=light" + prior, " tier=delta",
+        for suffix in (" tier=full" + prior, " tier=light" + prior, " tier=lessons" + prior,
+                       " tier=delta",
                        " tier=carry-forward", " tier=bogus", " tier=delta prior_run=r",
                        " tier=delta prior_run=r prior_sha=xyz"):
             line = marker()[: -len(" -->")] + suffix + " -->"
