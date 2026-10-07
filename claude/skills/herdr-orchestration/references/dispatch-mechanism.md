@@ -51,7 +51,7 @@ as `resolve_route` already treats overrides. Dispatch pipeline steps through
 Default for dispatched Herd work (not just `/goal`):
 
 - Brainstorm design-direction: HUMAN gate.
-- spec -> codex-spec-review -> writing-plans -> codex-plan-review -> implement ->
+- PRD -> codex-spec-review -> implement ->
   per-task/review-change: one fresh development reviewer reports blockers,
   advisories, and coverage. Only blockers require deliberate repair; task-local
   approval is not PR approval.
@@ -68,7 +68,7 @@ each gate rather than blocking.
 
 ## Same-worker review incorporation
 
-codex-spec-review / codex-plan-review findings return to the SAME still-alive
+codex-spec-review findings return to the SAME still-alive
 planning worker as an appended turn, never a fresh worker -- independence lives
 in the reviewer's different model family; incorporation needs the author's intent
 context.

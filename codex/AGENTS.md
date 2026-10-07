@@ -87,9 +87,8 @@ worktree creation would require an unsafe or destructive action.
 
 Use these skills by default when the task matches:
 
-- `brainstorming`, `writing-specs`, `claude-spec-review`, `writing-plans`,
-  `claude-plan-review`, then execute the plan inline, for substantial
-  implementation work.
+- `brainstorming`, `writing-specs` (one PRD), `claude-spec-review`,
+  then implement from the PRD inline, for substantial implementation work.
 - The operating principles (test first; reproduce, one variable per
   hypothesis) for new behavior, regression fixes, risky refactors, startup
   failures, flaky tests, tool failures, build failures, and confusing
@@ -117,13 +116,11 @@ Use these skills by default when the task matches:
 For substantial Codex-led work:
 
 1. `brainstorming`
-2. `writing-specs`
-3. `claude-spec-review` for the completed specification
-4. `writing-plans`
-5. `claude-plan-review` for the completed implementation plan
-6. execute the plan task by task
-7. `co-review` for Claude + Codex finished-PR review
-8. verify before claiming done (operating principles)
+2. `writing-specs` (the PRD)
+3. `claude-spec-review` for the completed PRD
+4. implement from the PRD
+5. `co-review` for Claude + Codex finished-PR review
+6. verify before claiming done (operating principles)
 
 Merge requires completed Claude and Codex code reviews and any required
 adversarial verification. Approval to merge preserves these gates.

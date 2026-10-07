@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Use when a reviewed spec or clear requirements exist for a multi-step change, before touching code.
+description: Use only when the owner asks for a task-by-task implementation plan from a reviewed PRD; the default pipeline implements straight from the PRD.
 ---
 
 # Writing Plans
@@ -58,7 +58,7 @@ Every plan starts with:
 
 **Tech Stack:** [key technologies]
 
-**Spec:** [path to the spec this plan implements]
+**Spec:** [path to the PRD this plan implements]
 
 ## Global Constraints
 
@@ -136,12 +136,9 @@ inline.
    tasks.
 4. Review Focus: every line has its pinning test in the owning task. An
    empty section means you checked and found none.
-5. Anchors and counts. Never cite a symbol, file:line, test name, or count from memory or from a prior draft.
-   Re-grep every anchor and re-run every baseline while writing. State each
-   expected count as arithmetic from the recorded baseline, and name the
-   cases added or removed.
-
-This is the anchor rule other planning skills refer to.
+5. Anchors and counts: follow the anchor rule in `writing-specs`. Re-run
+   every baseline while writing; state each expected count as arithmetic
+   from the recorded baseline.
 
 ## Plan review and handoff
 

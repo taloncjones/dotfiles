@@ -22,7 +22,7 @@ check() {
 has() { grep -qF -- "$2" "$D/$1/SKILL.md"; }
 
 ANCHOR='Never cite a symbol, file:line, test name, or count from memory or from a prior draft.'
-ANCHOR_REF='the anchor rule in `writing-plans`'
+ANCHOR_REF='the anchor rule in `writing-specs`'
 
 for s in brainstorming writing-specs writing-plans; do
     check "$s frontmatter name matches its directory" \
@@ -44,8 +44,8 @@ check "writing-plans requires a recorded test baseline" \
     has writing-plans '## Test Baseline'
 check "writing-plans requires the acceptance mapping table" \
     has writing-plans '## Acceptance Mapping'
-check "writing-plans states the anchor rule" \
-    has writing-plans "$ANCHOR"
+check "writing-plans runs only on request" \
+    sh -c "sed -n '3p' '$D/writing-plans/SKILL.md' | grep -q '^description: .*only when'"
 check "writing-plans names the plan review for both runtimes" \
     sh -c "grep -qF '\`codex-plan-review\`' '$D/writing-plans/SKILL.md' && grep -qF '\`claude-plan-review\`' '$D/writing-plans/SKILL.md'"
 check "writing-plans routes execution through this repo" \
@@ -57,7 +57,7 @@ check "writing-plans freezes against the MAIN checkout" \
 
 # writing-specs
 check "writing-specs saves to the review-gate specs path" \
-    has writing-specs 'docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md'
+    has writing-specs 'docs/superpowers/specs/YYYY-MM-DD-<topic>-prd.md'
 check "writing-specs resolves the MAIN checkout" \
     has writing-specs 'git rev-parse --path-format=absolute --git-common-dir'
 check "writing-specs freezes against the MAIN checkout" \
@@ -75,23 +75,32 @@ check "writing-specs keeps a SHA-256 revision history" \
 check "writing-specs names the spec review for both runtimes" \
     sh -c "grep -qF '\`codex-spec-review\`' '$D/writing-specs/SKILL.md' && grep -qF '\`claude-spec-review\`' '$D/writing-specs/SKILL.md'"
 
+check "writing-specs states the anchor rule" \
+    has writing-specs "$ANCHOR"
+check "writing-specs requires the PRD sections" \
+    sh -c "for f in '**Smallest version**' '**Approach**' '**File layout**' '**Test baseline**' '**Acceptance mapping**' '**Owner decisions**'; do grep -qF -- \"\$f\" '$D/writing-specs/SKILL.md' || exit 1; done"
+check "writing-specs asks the owner only when the repo cannot settle it" \
+    sh -c "grep -qF 'AskUserQuestion' '$D/writing-specs/SKILL.md' && grep -qF 'cannot settle' '$D/writing-specs/SKILL.md'"
+
 # brainstorming
 check "brainstorming classifies spike, bounded and architectural" \
     sh -c "grep -qF '**Spike**' '$D/brainstorming/SKILL.md' && grep -qF '**Bounded**' '$D/brainstorming/SKILL.md' && grep -qF '**Architectural**' '$D/brainstorming/SKILL.md'"
 check "brainstorming keeps the hard gate" \
     has brainstorming '<HARD-GATE>'
 check "brainstorming states each path's approval prerequisite" \
-    sh -c "grep -qF 'Spike: the human approves the question and the probe.' '$D/brainstorming/SKILL.md' && grep -qF 'Bounded: the human approves the short in-chat design.' '$D/brainstorming/SKILL.md' && grep -qF 'Architectural: the human approves the written spec' '$D/brainstorming/SKILL.md'"
+    sh -c "grep -qF 'Spike: the human approves the question and the probe.' '$D/brainstorming/SKILL.md' && grep -qF 'Bounded: the human approves the short in-chat design.' '$D/brainstorming/SKILL.md' && grep -qF 'Architectural: the human approves the reviewed PRD' '$D/brainstorming/SKILL.md'"
 check "brainstorming hands the design to writing-specs" \
     has brainstorming 'invoke the `writing-specs` skill'
 check "brainstorming defines autonomous mode" \
     has brainstorming '## Autonomous mode'
 check "brainstorming references the anchor rule" \
     has brainstorming "$ANCHOR_REF"
+check "brainstorming names one review" \
+    sh -c "! grep -qE 'codex-plan-review|claude-plan-review|written plan' '$D/brainstorming/SKILL.md'"
 
 # The anchor rule is stated once and referenced elsewhere.
-check "anchor rule is stated once and referenced by the other two skills" \
-    sh -c "[ \"\$(cat '$D/brainstorming/SKILL.md' '$D/writing-specs/SKILL.md' '$D/writing-plans/SKILL.md' | grep -cF '$ANCHOR')\" = 1 ] && grep -qF '$ANCHOR_REF' '$D/writing-specs/SKILL.md' && grep -qF '$ANCHOR_REF' '$D/brainstorming/SKILL.md'"
+check "anchor rule is stated once in writing-specs and referenced by the other two skills" \
+    sh -c "[ \"\$(cat '$D/brainstorming/SKILL.md' '$D/writing-specs/SKILL.md' '$D/writing-plans/SKILL.md' | grep -cF '$ANCHOR')\" = 1 ] && grep -qF '$ANCHOR' '$D/writing-specs/SKILL.md' && grep -qF '$ANCHOR_REF' '$D/writing-plans/SKILL.md' && grep -qF '$ANCHOR_REF' '$D/brainstorming/SKILL.md'"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

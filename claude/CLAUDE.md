@@ -149,19 +149,19 @@ orders below are deliberate policy, not hints.
 
 - Full pipeline for substantial implementation (standing order of operations):
   isolated worktree -> brainstorming -> writing-specs
-  (spec to `docs/superpowers/specs/` in the MAIN checkout, the path
-  codex-spec-review resolves first) -> `codex-spec-review` ->
-  writing-plans -> `codex-plan-review` -> implement (the `Workflow` tool,
-  or a herdr implement phase) -> `co-review` at the branch gate. Do NOT improvise
-  a build plan and jump to implementation; do NOT skip the brainstorm/spec steps
-  even when an architecture spec already exists -- treat the existing spec as input.
-- Codex review pipeline (thorough spec/plan/implement): run `codex-spec-review`
-  after brainstorming and `codex-plan-review` after writing-plans, each a HUMAN
-  gate in normal interactive work; implement via the `Workflow` tool or a herdr
-  implement phase; finish with `co-review` (Claude + Codex) at the branch gate --
-  the single second-model pass.
-- Diagram gate for reviewing changes (the interactive pipeline's plan->implement
-  and branch gates): before implementation, have the plan step emit a Mermaid
+  (one PRD to `docs/superpowers/specs/` in the MAIN checkout, the path
+  codex-spec-review resolves first) -> `codex-spec-review` (the one planning
+  review) -> implement (the `Workflow` tool, or a herdr implement phase) ->
+  `co-review` at the branch gate. Do NOT improvise a build plan and jump to
+  implementation; do NOT skip the brainstorm/PRD steps even when an
+  architecture spec already exists -- treat the existing spec as input.
+- Codex review pipeline (thorough PRD/implement): run `codex-spec-review` on
+  the PRD after writing-specs, a HUMAN gate in normal interactive work;
+  implement via the `Workflow` tool or a herdr implement phase; finish with
+  `co-review` (Claude + Codex) at the branch gate -- the single second-model
+  pass on code.
+- Diagram gate for reviewing changes (the interactive pipeline's PRD->implement
+  and branch gates): before implementation, have the PRD carry a Mermaid
   diagram matched to the open question -- an as-is/to-be comparison for a change
   to an existing system, an architecture plus data-flow view for new work, a
   sequence or state diagram for a component with a hard lifecycle. Draw it at
@@ -171,7 +171,7 @@ orders below are deliberate policy, not hints.
   here than after the misunderstanding spreads. Render it as an Artifact for that
   review. At the `co-review`/branch gate, emit a diagram of what was actually
   built and diff it against the approved one for final design sign-off. Mermaid
-  lives in the plan/spec Markdown and renders natively in GitHub; reach for an
+  lives in the PRD Markdown and renders natively in GitHub; reach for an
   HTML/SVG tool only when presentation or interaction matters. In autonomous
   mode, still produce both diagrams and surface them at the status gates, but do
   not block. When a diagram records an architectural decision future work depends
@@ -182,9 +182,9 @@ orders below are deliberate policy, not hints.
   artifact. The same persist-and-reference habit applies to any other
   documentation worth keeping current.
 - Autonomous mode (under `/goal`, or when told "be autonomous" / "don't rely on
-  me"): run the WHOLE pipeline end-to-end without pausing at the spec/plan gates.
-  Codex becomes the review gate -- run `codex-spec-review` / `codex-plan-review`,
-  resolve the findings autonomously (fold them back into the spec/plan), and
+  me"): run the WHOLE pipeline end-to-end without pausing at the PRD gate.
+  Codex becomes the review gate -- run `codex-spec-review`,
+  resolve the findings autonomously (fold them back into the PRD), and
   proceed. The HUMAN-gate wording above applies only to interactive work; in
   autonomous mode the human gate becomes the Codex gate. Surface a brief status at
   each gate for visibility, but do not block on approval.
