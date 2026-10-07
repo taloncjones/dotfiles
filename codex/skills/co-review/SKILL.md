@@ -207,7 +207,9 @@ verdict and stop, and the director dispatches the full gate.
 A PR gate waits for the head's CI to finish and freezes it as `ci.json`
 before any probe or seat runs. A Codex shell call is bounded, so start the
 watch under `nohup` and check for `$RUN_DIR/ci-watch.done` in short calls;
-`HEAD` is the manifest's `source.head`. A local no-PR review skips this
+`ci-capture` reads the PR number and head from the expected identity
+and runs `gh` from `$REPO` itself; never write `ci.json` from your own `gh`
+output. A local no-PR review skips this
 section; a `lessons` class there falls back to `CLASS=light`.
 
 ```bash
@@ -217,12 +219,10 @@ nohup sh -c 'gh pr checks "$1" --watch --interval 30 >"$2/ci-watch.txt" 2>&1; ec
 
 ```bash
 test -s "$RUN_DIR/ci-watch.done" || exit 3
-gh pr view "$PR" --json headRefOid,statusCheckRollup >"$RUN_DIR/pr-ci.json" || exit 2
-uv run --no-project python "$GATE_REPORT" ci-envelope --pr-json "$RUN_DIR/pr-ci.json" \
-  --head "$HEAD" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
+uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
 ```
 
-Exit 3 means the watch is still running; check again. The `ci-envelope`
+Exit 3 means the watch is still running; check again. The `ci-capture`
 exit rules match the Claude entrypoint: 0 continues; reasons exactly
 `["CI evidence is missing"]` take the no-CI path and a `lessons` class falls
 back to `CLASS=light`; any other nonzero exit stops `INCOMPLETE` before any

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import unittest
@@ -278,12 +279,13 @@ class CoReviewSkillText(unittest.TestCase):
             self.assertIn(needle, policy)
 
     def test_co_review_captures_ci_before_probes(self):
-        block = _extract_block(CO_REVIEW, '"$GATE_REPORT" ci-envelope')
+        block = _extract_block(CO_REVIEW, '"$GATE_REPORT" ci-capture')
         for needle in ('gh pr checks "$PR" --watch --interval 30', "|| true",
-                       'gh pr view "$PR" --json headRefOid,statusCheckRollup >"$RUN_DIR/pr-ci.json"',
-                       '--head "$HEAD" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"'):
+                       'ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" '
+                       '--out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"'):
             self.assertIn(needle, block)
-        self.assertLess(CO_REVIEW.index('"$GATE_REPORT" ci-envelope'),
+        self.assertNotIn("pr-ci.json", CO_REVIEW)
+        self.assertLess(CO_REVIEW.index('"$GATE_REPORT" ci-capture'),
                         CO_REVIEW.index('"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'))
         flat = " ".join(CO_REVIEW.split())
         self.assertIn('exactly `["CI evidence is missing"]`', flat)
@@ -347,7 +349,8 @@ class CoReviewSkillText(unittest.TestCase):
                         CO_REVIEW.index('"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'))
 
     def test_mirror_captures_ci_and_runs_the_lessons_tier(self):
-        for needle in ('"$GATE_REPORT" ci-envelope --pr-json "$RUN_DIR/pr-ci.json"',
+        for needle in ('ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" '
+                       '--out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"',
                        "ci-watch.done", "## CI evidence", "ci.json: $RUN_DIR/ci.json sha256=",
                        '"$GATE_REPORT" lessons-check',
                        "Lessons tier: only the Claude-runner verifier",
@@ -355,6 +358,7 @@ class CoReviewSkillText(unittest.TestCase):
                        'if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then'):
             self.assertIn(needle, MIRROR)
         self.assertNotIn('if [ "$CLASS" != "light" ]; then', MIRROR)
+        self.assertNotIn("pr-ci.json", MIRROR)
 
     def test_policy_describes_the_lessons_tier_and_ci_first(self):
         policy = subprocess.run(
@@ -365,7 +369,7 @@ class CoReviewSkillText(unittest.TestCase):
         flat = " ".join(policy.split())
         for needle in ("The lessons tier runs one `verifier`",
                        "`claude/rules/personal/agent-lessons.md`",
-                       "before any probe or seat runs", "`gate_report.py ci-envelope`",
+                       "before any probe or seat runs", "`gate_report.py ci-capture`", "never by hand",
                        "names `ci.json`, its digest and its content",
                        "none in the lessons tier"):
             self.assertIn(needle, flat)
@@ -422,6 +426,15 @@ class CodexReviewGatesSkillText(unittest.TestCase):
 
 
 class ShipSkillText(unittest.TestCase):
+    def test_ship_refreshes_ci_with_ci_capture(self):
+        start = SHIP.index("4. **Recheck gate evidence.**")
+        end = SHIP.index("5. **Audit comment.**")
+        step = " ".join(SHIP[start:end].split())
+        for needle in ("gate_report.py ci-capture", "preconditions.ci.sha256",
+                       "preconditions.no_ci", 'exactly `["CI evidence is missing"]`'):
+            self.assertIn(needle, step)
+        self.assertNotIn("Refresh its exact-head CI artifact and digest", step)
+
     def test_ship_has_the_audit_comment_step(self):
         for needle in ("audit-comment", "co-review-audit head=", "--paginate",
                        "gh pr comment", "self-classifies", "--full"):
@@ -451,6 +464,22 @@ class ShipSkillText(unittest.TestCase):
 
 
 class PrBasePinText(unittest.TestCase):
+    def test_pr_ready_refreshes_ci_with_ci_capture(self):
+        capture = PR_READY.index('"$GATE_REPORT" ci-capture --repo .')
+        digest = PR_READY.index("preconditions.ci.sha256", capture)
+        evaluate = PR_READY.index('"$GATE_REPORT" evaluate')
+        self.assertLess(capture, digest)
+        self.assertLess(digest, evaluate)
+        flat = " ".join(PR_READY.split())
+        for needle in ("preconditions.ci.sha256", "preconditions.no_ci"):
+            self.assertIn(needle, flat)
+        self.assertNotIn("Normalize statusCheckRollup", PR_READY)
+        self.assertNotIn("statusCheckRollup > live-pr.json", PR_READY)
+
+    def test_no_text_runs_ci_envelope(self):
+        for text in (CO_REVIEW, MIRROR, POLICY_FILE, SHIP, PR_READY):
+            self.assertIsNone(re.search(r'(gate_report\.py|GATE_REPORT"?) ci-envelope', text))
+
     def test_both_entrypoints_pin_the_pr_base(self):
         for text in (CO_REVIEW, MIRROR):
             for needle in ("baseRefOid", "--pr-base", "merge result", "behind_by", "carry-forward"):
