@@ -12289,6 +12289,61 @@ put(record)
 out, _ = rendered("--phase", "ship", "--focus-file", focus)
 PY
 
+HEADER_FIXTURE=$(mktemp); export HEADER_FIXTURE
+cat > "$HEADER_FIXTURE" <<'HELPER'
+header_fixture() {
+    LF_REPO=$(mktemp -d)
+    git -C "$LF_REPO" init -q
+    git -C "$LF_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+    git -C "$LF_REPO" remote add origin "$1"
+    LF_SLUG=$(python3 -c 'import sys; sys.path.insert(0, "claude/hooks"); import herdr_orch_core as c; print(c.repo_slug(sys.argv[1]))' "$1")
+    root=$(mktemp -d); CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+    f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session S --host h --pid 1)
+    SHA40=$(printf 'a%.0s' $(seq 1 40))
+    CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug "$LF_SLUG" --session S --fence "$f" --task-id td-h \
+      --json '{"task_id":"td-h","base_sha":"'"$SHA40"'","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'"}]}'
+    FR="$root/herdr-orch/$LF_SLUG/artifacts/td-h/review-L2/findings.md"
+    mkdir -p "$(dirname "$FR")"
+    REVIEW_JSON="$root/herdr-orch/$LF_SLUG/tasks/td-h.review.json"
+}
+header_emit() {   # $1 outcome, $2 blocking count
+    HERDR_ENV=1 HERDR_WORKSPACE_ID=w9 HERDR_PANE_ID=pane9 CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
+      --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --runtime claude --task-id td-h --workspace w9 \
+      --agent rev-td-h --outcome "$1" --reviewed-head-sha "$SHA40" --blocking-count "$2" \
+      --launch-id L2 --pane-id pane9 --source-head-sha "$SHA40" --findings-ref "$FR"
+}
+HELPER
+
+check "emit-review in herdr refuses findings without the summary header" <<'SH'
+. "$HEADER_FIXTURE"; header_fixture https://example.com/repo-hdr1.git
+printf 'No blocking findings. Inspected: fixture diff.\n' > "$FR"
+rc=0; header_emit approved 0 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+grep -q 'Verdict:' "$ERRFILE"
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit-review in herdr refuses a summary header that disagrees with the verdict" <<'SH'
+. "$HEADER_FIXTURE"; header_fixture https://example.com/repo-hdr2.git
+printf 'Verdict: approved\nBlocking: 0\nAdvisories: none\n\nInspected: fixture diff.\n' > "$FR"
+rc=0; header_emit changes-requested 0 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+rc=0; header_emit approved 1 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit-review in herdr accepts a matching summary header" <<'SH'
+. "$HEADER_FIXTURE"; header_fixture https://example.com/repo-hdr3.git
+printf '\nVerdict: changes-requested\nBlocking: 2\nAdvisories: tidy names; add a test\n\nBody.\n' > "$FR"
+header_emit changes-requested 2
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["outcome"] == "changes-requested" and rec["blocking_count"] == 2, rec
+' "$REVIEW_JSON"
+SH
+
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
 import importlib.util, json, os, sys, tempfile
 sys.path.insert(0, "claude/hooks")

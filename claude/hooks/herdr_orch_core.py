@@ -149,6 +149,26 @@ def findings_bytes(value, root):
     return content
 
 
+FINDINGS_HEADER = (re.compile(r"Verdict: (approved|changes-requested)\Z"),
+                   re.compile(r"Blocking: (\d+)\Z"),
+                   re.compile(r"Advisories: (\S.*)\Z"))
+FINDINGS_HEADER_HELP = ("findings report must open with three lines: 'Verdict: approved' or "
+                        "'Verdict: changes-requested', 'Blocking: <n>', and 'Advisories: none' or "
+                        "titles joined by '; ', agreeing with --outcome and --blocking-count")
+
+
+def findings_summary(content):
+    """The verdict header of a findings report, or None when it has none."""
+    lines = [line.strip() for line in content.decode("utf-8", "replace").splitlines() if line.strip()]
+    if len(lines) < 3:
+        return None
+    found = [rx.match(line) for rx, line in zip(FINDINGS_HEADER, lines)]
+    if not all(found):
+        return None
+    return {"verdict": found[0].group(1), "blocking": int(found[1].group(1)),
+            "advisories": found[2].group(1)}
+
+
 def findings_ref_error(value, root):
     """Reason a findings reference is unusable, else None."""
     try:
@@ -5931,6 +5951,11 @@ def _main(argv=None) -> int:
                         evidence = findings_bytes(ns.findings_ref, state_root())
                     except ValueError as exc:
                         _require(False, f"findings-ref {exc}")
+                    # Director-dispatched reviews only: lead reviews keep their own briefs.
+                    if os.environ.get("HERDR_ENV") == "1" and getattr(ns, "binding", None) is None:
+                        summary = findings_summary(evidence)
+                        _require(summary is not None and summary["verdict"] == ns.outcome
+                                 and summary["blocking"] == ns.blocking_count, FINDINGS_HEADER_HELP)
                     done["findings_sha256"] = hashlib.sha256(evidence).hexdigest()
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
