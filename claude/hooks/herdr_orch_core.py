@@ -685,6 +685,121 @@ def brief_blocks(text):
     return blocks
 
 
+BRIEF_ROUTES = (("plan", "planner"), ("impl", "implementation"), ("review", "reviewer"),
+                ("plan-review", "plan_reviewer"), ("mech", "mechanical"), ("think", "think"))
+
+
+def _brief_fill(text, values):
+    """One pass over `<name>` tokens; inserted values are never re-filled."""
+    return BRIEF_TOKEN_RE.sub(lambda m: values.get(m.group(0)[1:-1], m.group(0)), text)
+
+
+def _brief_git(worktree, *args):
+    try:
+        return context_git(worktree, *args)
+    except (subprocess.SubprocessError, OSError) as exc:
+        _require(False, f"git {' '.join(args[:2])} failed in the task worktree: {exc}")
+
+
+def _brief_routing(runtime, config):
+    routes = config.get("routes", {})
+    lines = []
+    for label, role in BRIEF_ROUTES:
+        try:
+            route = agent_runtime.resolve_route(runtime, role,
+                                                config={"routes": routes, "provisional": True})
+        except agent_runtime.RouteError:
+            route = {}
+        if route.get("ready") is True:
+            lines.append(f"- {label}: {route['model']} / {route.get('effort') or 'inherit'}")
+        else:
+            lines.append(f"- {label}: unavailable / -")
+    return "\n".join(lines)
+
+
+def _todo_body(repo_root, todo_id):
+    """The todo's text without frontmatter, from pending/ then completed/, or None."""
+    _require(valid_task_id(todo_id), "task record has an invalid todo_id")
+    for state in ("pending", "completed"):
+        path = Path(repo_root) / ".todos" / state / f"{todo_id}.md"
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            if text.startswith("---\n"):
+                end = text.find("\n---\n", 4)
+                text = text[end + 5:] if end != -1 else text
+            return text.strip()
+    return None
+
+
+def _brief_ship_values(rd, record, ns, head, blocks, config):
+    _require(False, "phase ship is not available yet")
+
+
+def render_brief(rd, record, ns, repo_root):
+    """(agent, brief text) for ns.phase; refuses through _require."""
+    spec = BRIEF_PHASES.get(ns.phase)
+    _require(spec is not None, f"unknown phase {ns.phase!r}; use one of {', '.join(BRIEF_PHASES)}")
+    for opt in BRIEF_OPTIONS:
+        flag = "--" + opt.replace("_", "-")
+        given = getattr(ns, opt) not in (None, False)
+        _require(not given or opt in spec["requires"] + spec["allows"],
+                 f"{flag} does not apply to phase {ns.phase}")
+        _require(given or opt not in spec["requires"], f"phase {ns.phase} requires {flag}")
+    _require(ns.prd_cap is None or ns.prd_cap >= 1, "--prd-cap must be at least 1")
+    for key in ("worktree", "branch", "base_ref", "base_sha", "title", "workspace_id"):
+        _require(_nonempty_str(record.get(key)), f"task record lacks {key}")
+    blocks = brief_blocks(BRIEF_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    needed = (*spec["blocks"], spec["lessons"], "lessons", "opt-in-granted", "opt-in-withheld")
+    missing = [name for name in needed if name not in blocks]
+    _require(not missing, f"brief template lacks blocks: {', '.join(missing)}")
+    worktree, task_id = record["worktree"], record["task_id"]
+    head = _brief_git(worktree, "rev-parse", "HEAD")
+    existing = {w.get("agent") for w in record.get("workers") or [] if isinstance(w, dict)}
+    agent = agent_name(spec["prefix"], record["branch"].rsplit("/", 1)[-1], existing)
+    _require(AGENT_NAME_RE.fullmatch(agent), f"agent name {agent!r} is not a valid herdr name")
+    focus = Path(ns.focus_file).read_text(encoding="utf-8").strip() if ns.focus_file else ""
+    todo = None
+    if spec["todo"] and record.get("todo_id") is not None:
+        todo = _todo_body(repo_root, record["todo_id"])
+    if spec["todo"]:
+        _require(bool(focus or todo), f"phase {ns.phase} needs the todo body or --focus-file")
+    artifacts = [a for a in record.get("plan_artifacts") or [] if isinstance(a, dict)]
+    config = read_config(rd)
+    values = {
+        "agent-name": agent, "task_id": task_id, "repo_slug": ns.repo_slug,
+        "title": record["title"], "branch": record["branch"], "worktree_path": worktree,
+        "base_ref": record["base_ref"], "base_sha": record["base_sha"], "head_sha": head,
+        "phase": ns.phase, "emit_phase": spec["emit"], "workspace_id": record["workspace_id"],
+        "core-command": f'python3 "{Path(__file__).resolve()}"',
+        "core-context": (f'--repo-path "{repo_root}" --runtime {ns.runtime}'
+                         + (" --personal" if ns.personal else "")),
+        "routing-lines": _brief_routing(ns.runtime, config),
+        "workflow-opt-in-line": blocks["opt-in-withheld" if ns.no_workflow else "opt-in-granted"],
+        "artifact-lines": "\n".join(f"- {a.get('kind')}: {a.get('path')} (sha256 {a.get('sha256')})"
+                                    for a in artifacts) or "- none recorded",
+        "contract_path": record.get("contract_path") or "none pinned",
+        "account_payload": str(rd),
+        "findings_path": str(rd / "artifacts" / task_id / "review-<launch_id>" / "findings.md"),
+        "fast-path-line": "",
+        "prd-cap": str(ns.prd_cap or 2),
+        "artifact-class": ns.artifact_class or "",
+    }
+    if ns.findings is not None:
+        try:
+            findings_bytes(ns.findings, state_root())
+        except ValueError as exc:
+            _require(False, f"--findings {exc}")
+        values["findings_ref"] = ns.findings
+    if ns.phase == "ship":
+        values.update(_brief_ship_values(rd, record, ns, head, blocks, config))
+    values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"], values)
+    text = "\n\n".join(_brief_fill(blocks[name], values) for name in spec["blocks"])
+    left = set(BRIEF_TOKEN_RE.findall(text)) - BRIEF_WORKER_FIELDS - {"<task-body>"}
+    _require(not left, f"brief template left unfilled tokens: {', '.join(sorted(left))}")
+    body = "\n\n".join(part for part in (focus, todo) if part)
+    return agent, text.replace("<task-body>", body, 1) + "\n"
+
+
 def branch_name(user: str, task_id: str, slug: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", slug.lower()).strip("-")[:32]
     return f"{user}/{task_id}/{s}"
@@ -5132,6 +5247,13 @@ def _main(argv=None) -> int:
     w.add_argument("--undelivered-only", action="store_true")
     w.add_argument("--grace-secs", type=int, default=None)
     w.add_argument("--messaging-socket", default=None)
+    rb = add("render-brief", "--task-id", "--phase")
+    for optional in ("--focus-file", "--findings", "--prior-handoff"):
+        rb.add_argument(optional, default=None)
+    rb.add_argument("--artifact-class", choices=("advisory", "behavior"), default=None)
+    rb.add_argument("--prd-cap", type=int, default=None)
+    rb.add_argument("--tier", choices=("full", "delta"), default=None)
+    rb.add_argument("--no-workflow", action="store_true")
     vc = add("verify-contract", "--task-id", "--worktree")
     vc.add_argument("--contract", default=None)
     vc.add_argument("--allow-unpinned", action="store_true")
@@ -7383,6 +7505,28 @@ def _main(argv=None) -> int:
             rd, ns.interval, ns.heartbeat_secs or 1800, ns.debounce_secs,
             ns.exit_on_signal, ns.since_epoch,
         )
+    if ns.cmd == "render-brief":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.repo_path is not None and ns.runtime is not None,
+                 "render-brief requires --repo-path and --runtime")
+        rd = repo_dir(ns.repo_slug)
+        record = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+        _require(isinstance(record, dict) and record.get("task_id") == ns.task_id,
+                 "task record does not match --task-id")
+        repo_root = _PAYLOAD_SELECTION.get()["context"]["root"]
+        agent, text = render_brief(rd, record, ns, repo_root)
+        data = text.encode("utf-8")
+        path = rd / "tasks" / f"{ns.task_id}.{agent}.brief.md"
+        parent, name = open_state_parent(coordination.payload_path(str(path)))
+        try:
+            atomic_bytes_at(parent, name, data)
+        finally:
+            os.close(parent)
+        print(json.dumps({"agent": agent, "brief_path": str(path), "bytes": len(data),
+                          "emit_phase": BRIEF_PHASES[ns.phase]["emit"], "phase": ns.phase,
+                          "sha256": hashlib.sha256(data).hexdigest()}, sort_keys=True))
+        return 0
     if ns.cmd == "verify-contract":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")

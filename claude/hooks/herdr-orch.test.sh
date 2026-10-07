@@ -12116,6 +12116,126 @@ except ValueError:
     pass
 PY
 
+BRIEF_FIXTURE=$(mktemp); export BRIEF_FIXTURE
+cat > "$BRIEF_FIXTURE" <<'PYFIX'
+import hashlib, importlib.util, json, os, re, subprocess, tempfile
+CORE = os.path.abspath("claude/hooks/herdr_orch_core.py")
+tmp = os.path.realpath(tempfile.mkdtemp())
+home = os.path.join(tmp, "home")
+repo = os.path.join(home, "Git", "personal", "project")
+os.environ.update(HOME=home, HERDR_COORDINATION_ROOT=os.path.join(tmp, "coord"),
+                  GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                  GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                  GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+os.environ.pop("CLAUDE_CONFIG_DIR", None)
+def git(cwd, *a):
+    return subprocess.run(["git", "-C", cwd, *a], check=True, capture_output=True, text=True).stdout.strip()
+def commit(cwd, name):
+    open(os.path.join(cwd, name), "w").write(name + "\n")
+    git(cwd, "add", name); git(cwd, "commit", "-q", "-m", name)
+    return git(cwd, "rev-parse", "HEAD")
+origin = os.path.join(tmp, "origin.git")
+subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+os.makedirs(repo); git(repo, "init", "-q", "-b", "main")
+A = commit(repo, "a.txt")
+gh_url = "https://github.com/acme/widget.git"
+git(repo, "remote", "add", "origin", gh_url)
+git(repo, "config", "url." + origin + ".insteadOf", gh_url)
+git(repo, "push", "-q", "origin", "main")
+other = os.path.join(tmp, "other")
+subprocess.run(["git", "clone", "-q", origin, other], check=True)
+C = commit(other, "c.txt"); git(other, "push", "-q", "origin", "main")
+suffix = "a-deliberately-long-branch-suffix-for-the-cap"
+branch = "talon/td-render-x/" + suffix
+git(repo, "checkout", "-q", "-b", branch)
+B = commit(repo, "b.txt")
+os.makedirs(os.path.join(repo, ".todos", "pending"))
+open(os.path.join(repo, ".todos", "pending", "td-render-x.md"), "w").write(
+    "---\ntitle: Render fixture\n---\n\n## Problem\n\nFIXTURE-TODO-BODY\n")
+spec = importlib.util.spec_from_file_location("core", CORE)
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+slug = c._context_slug(c.repository_context(repo))
+rd = os.path.join(home, ".claude", "herdr-orch", slug)
+art = os.path.join(rd, "artifacts", "td-render-x", "p1"); os.makedirs(art)
+open(os.path.join(art, "spec.md"), "w").write("spec\n")
+spec_sha = hashlib.sha256(b"spec\n").hexdigest()
+os.makedirs(os.path.join(rd, "tasks"))
+findings = os.path.join(rd, "artifacts", "td-render-x", "review-L1", "findings.md")
+os.makedirs(os.path.dirname(findings))
+open(findings, "w").write("Verdict: changes-requested\nBlocking: 1\nAdvisories: none\n\nFIXTURE-FINDING\n")
+taken = c.agent_name("impl", suffix)
+record = {"v": 1, "task_id": "td-render-x", "repo_slug": slug, "kind": "todo", "todo_id": "td-render-x",
+          "title": "Render fixture", "branch": branch, "worktree": repo, "workspace_id": "w9",
+          "base_ref": "origin/main", "base_sha": A, "status": "reviewed", "review_head_sha": B,
+          "pr_number": 77, "contract_path": "claude/contracts/td-render-x-contract.json",
+          "contract_sha256": "0" * 64,
+          "plan_artifacts": [{"kind": "spec", "path": os.path.join(art, "spec.md"), "sha256": spec_sha}],
+          "workers": [{"agent": taken, "phase": "implement", "launch_id": taken + "-000000000000"}]}
+task_file = os.path.join(rd, "tasks", "td-render-x.json")
+def put(rec):
+    open(task_file, "w").write(json.dumps(rec))
+put(record)
+focus_text = "FIXTURE-FOCUS-TEXT quotes <task-body> and <lessons-step> verbatim"
+focus = os.path.join(tmp, "focus.md"); open(focus, "w").write(focus_text + "\n")
+WORKER = {"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>", "<outcome>", "<n>", "<artifact-list-json>"}
+def render(*extra):
+    return subprocess.run(["python3", CORE, "render-brief", "--repo-slug", slug, "--repo-path", repo,
+                           "--runtime", "claude", "--task-id", "td-render-x", *extra],
+                          capture_output=True, text=True)
+def rendered(*extra):
+    p = render(*extra)
+    assert p.returncode == 0, (extra, p.stderr)
+    out = json.loads(p.stdout)
+    return out, open(out["brief_path"]).read()
+def common(phase, out, brief):
+    scanned = brief.replace(focus_text, "")
+    assert not (set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", scanned)) - WORKER), phase
+    assert "LESSON: [" not in scanned and "<task-body>" not in scanned, phase
+    assert len(out["agent"]) <= 32 and c.AGENT_NAME_RE.fullmatch(out["agent"]), out
+    assert out["agent"] != taken, out
+    assert os.path.dirname(out["brief_path"]) == os.path.join(rd, "tasks"), out
+    assert hashlib.sha256(brief.encode()).hexdigest() == out["sha256"], phase
+    for needle in (A, B, repo, branch):
+        assert needle in brief, (phase, needle)
+PYFIX
+
+check "render-brief: plan and implement briefs carry the record and keep focus text verbatim" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "plan", "--focus-file", focus, "--artifact-class", "advisory")
+common("plan", out, brief)
+assert f"`{out['agent']}`" in brief and focus_text in brief and "FIXTURE-TODO-BODY" in brief
+assert "ARTIFACT_CLASS=advisory" in brief and "[td-render-x plan]" in brief and "--phase plan" in brief
+assert "- impl: sonnet / medium" in brief and "- mech: unavailable / -" in brief
+assert "Workflow opt-in: granted by the user" in brief
+assert "Keep the turn alive while your own run finishes" in brief
+out, brief = rendered("--phase", "implement")
+common("implement", out, brief)
+assert "FIXTURE-TODO-BODY" in brief and spec_sha in brief and "td-render-x-contract.json" in brief
+assert "--phase implement" in brief and "[td-render-x implement]" in brief
+again, _ = rendered("--phase", "implement")
+assert again["sha256"] == out["sha256"], "not deterministic"
+_, withheld = rendered("--phase", "implement", "--no-workflow")
+assert "Workflow opt-in: withheld for this task" in withheld
+PY
+
+check "render-brief: refusals write nothing" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+def refused(*extra):
+    before = sorted(os.listdir(os.path.join(rd, "tasks")))
+    p = render(*extra)
+    assert p.returncode == 2, (extra, p.returncode, p.stderr)
+    assert sorted(os.listdir(os.path.join(rd, "tasks"))) == before, extra
+refused("--phase", "plan", "--focus-file", focus)
+refused("--phase", "implement", "--findings", findings)
+refused("--phase", "bogus")
+os.rename(os.path.join(repo, ".todos", "pending", "td-render-x.md"), os.path.join(tmp, "parked.md"))
+refused("--phase", "implement")
+out, brief = rendered("--phase", "implement", "--focus-file", focus)
+assert focus_text in brief
+PY
+
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
 import importlib.util, json, os, sys, tempfile
 sys.path.insert(0, "claude/hooks")

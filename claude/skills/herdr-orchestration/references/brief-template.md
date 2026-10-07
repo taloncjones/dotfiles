@@ -66,8 +66,8 @@ Use the supplied model and effort for each authorized helper; a role listed
 as unavailable may not be launched. Claude Workflow uses the supplied Claude
 model aliases and effort fields; omit `effort` only for an explicit inherit. Codex uses
 native child-agent model and reasoning-effort fields, never Claude aliases:
-`plan-review` is the plan-review seat, not `review`.
 <routing-lines>
+`plan-review` is the plan-review seat, not `review`.
 <workflow-opt-in-line>
 ```
 Render exactly one opt-in line from actual user authorization:
