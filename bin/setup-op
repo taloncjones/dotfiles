@@ -96,7 +96,9 @@ if [ -n "$signing_ref" ]; then
     keep+=("OP_SIGNING_KEY=$signing_ref" "OP_SIGNING_PUBKEY=$pub")
 fi
 
-tmp="$root/.op.env.$$"
+# mktemp creates the file exclusively under a random name, so nothing planted
+# in $root can redirect the token write.
+tmp="$(mktemp "$root/.op.env.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 (
     umask 077

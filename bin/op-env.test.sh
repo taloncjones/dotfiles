@@ -332,5 +332,15 @@ printf 'x\n' >"$REPO3/.op.env.keep"
 out="$(cd "$REPO3" && printf '%s\n' "$FIXTURE_TOKEN" | FAKE_OP_MODE=fail "$SETUP" --signing-key op://V/missing 2>&1)"; rc=$?
 check "setup-op failure leaves a foreign .op.env.* file and no own temp" '[ "$rc" != 0 ] && [ -f "$REPO3/.op.env.keep" ] && [ "$(find "$REPO3" -maxdepth 1 -name ".op.env.*" | wc -l | tr -d " ")" = 1 ]'
 
+# A symlink planted at the old pid-named temp path must not catch the token:
+# exec keeps the pid, so setup-op's $$ is the planting shell's.
+REPO4="$HOME/Git/personal/proj4"
+git init -q "$REPO4"
+: >"$TMP/victim"
+(cd "$REPO4" && printf '%s\n' "$FIXTURE_TOKEN" |
+    bash -c 'ln -s "$1" ".op.env.$$" && exec "$2"' _ "$TMP/victim" "$SETUP" >/dev/null 2>&1)
+check "setup-op never writes through a symlink at its old pid temp path" '[ ! -s "$TMP/victim" ]'
+check "setup-op writes a regular mode-600 op.env past a planted symlink" '[ -f "$REPO4/op.env" ] && [ ! -L "$REPO4/op.env" ] && [ "$(stat -c %a "$REPO4/op.env" 2>/dev/null || stat -f %Lp "$REPO4/op.env")" = 600 ] && grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$FIXTURE_TOKEN" "$REPO4/op.env"'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
