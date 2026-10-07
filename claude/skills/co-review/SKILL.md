@@ -89,11 +89,16 @@ uv run --no-project python "$REVIEW_HELPER" verify --manifest "$MANIFEST"
 
 For a PR gate, read the live base tip from `git ls-remote` (not `baseRefOid`, which can lag) into `PR_BASE` before
 `prepare` and write it as `expected.base`; the manifest's `source.base`
-must equal it. The gate needs an up-to-date branch: `prepare` refuses a head
-that does not contain the live base. When it refuses, merge the base into the
-branch and re-run; the carry-forward rule keeps an APPROVE across a clean
-merge of the base. The reviewed tree is the head tree, which a squash merge of
-an up-to-date branch reproduces exactly.
+must equal it. A head behind the live base is gated on its merge result: `prepare`
+freezes git's merge of the head with the live base (`git merge-tree
+--write-tree`), so `source.source_tree` and the reviewed tree are what the
+squash merge lands, and the frozen diff `base..codex_tree` holds only the
+PR's change. `prepare` refuses only a merge conflict: merge the base into
+the branch, resolve the conflict, and re-run. Merging the base cleanly
+needs no new round (carry-forward). When the `prepare` output's `behind_by`
+is nonzero, add one line to each seat prompt and the final summary:
+"Behind <base_ref> by <n> commits; the reviewed tree is git's merge of the
+head with the live base." It is never a finding.
 
 Read `source.base`, `source.head`, `source.repo_id`, `source.source_tree`,
 `snapshot.codex_root`, `snapshot.claude_root`, and `snapshot.codex_tree` from

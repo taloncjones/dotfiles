@@ -164,11 +164,14 @@ Prepare one immutable snapshot with `review.py prepare`, then run
 `review.py verify --manifest` before dispatch, before evaluation, and before
 cleanup.
 
-A PR gate passes the live base tip from `git ls-remote origin refs/heads/<base>` as `--pr-base`; `baseRefOid` can lag and is not the live base. The gate
-needs an up-to-date branch: `prepare` refuses a head that does not contain that
-base, and every live recheck (`merge-ready`, `/pr-ready`, ship step 4) refuses
-one too. Merge the base into the branch and re-run; carry-forward keeps an
-APPROVE across a clean merge of the base.
+A PR gate passes the live base tip from `git ls-remote origin refs/heads/<base>` as `--pr-base`; `baseRefOid` can lag and is not the live base. A head behind that base is gated on its merge result: `prepare`
+freezes git's merge of the head with the live base and refuses only a
+merge conflict. Every live recheck (`merge-ready`, `/pr-ready`, ship
+step 4) runs `gate_report.py base-check`, which re-derives the reviewed
+tree from the gated base and refuses a head that no longer merges
+cleanly with the live base. On a conflict, merge the base into the
+branch, resolve it, and re-run; carry-forward keeps an APPROVE across a
+clean merge of the base.
 
 Freeze a dirty source when requested, record its state, and make the
 result incomplete unless the committed expected tree equals the frozen reviewed

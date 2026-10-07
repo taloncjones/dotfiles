@@ -25,8 +25,9 @@ fails, so a cleanup-failed report is never active evidence for this command.
 
 Resolve the installed co-review helper root, then use its evaluator. Before
 evaluation, recheck the live PR's repository, number, full head, target branch,
-live base tip (`git ls-remote origin refs/heads/<baseRefName>`; `baseRefOid` can lag), and CI. Compare each to the independently retained expected
-identity. Refresh the active report's exact-head CI payload and digest, then
+live base tip (`git ls-remote origin refs/heads/<baseRefName>`; `baseRefOid` can lag), and CI. Compare the repository, number, full head and
+target branch to the independently retained expected identity; the live
+base tip is never compared for equality, it goes to `base-check` below. Refresh the active report's exact-head CI payload and digest, then
 evaluate the report against that expected file:
 
 ```bash
@@ -36,19 +37,20 @@ gh pr view --json number,headRefOid,baseRefName,baseRefOid,statusCheckRollup > l
 # Resolve BASE_REPO from pulls REST .base.repo.full_name, normalize and compare
 # it with origin's real fetch URL. Extract PR_NUMBER, HEAD, BASE_REF, and
 # BASE from `git ls-remote origin "refs/heads/$BASE_REF"` (exit 2 on failure), not baseRefOid.
-TREE=$(git rev-parse "$HEAD^{tree}")
-uv run --no-project python - "$EXPECTED_IDENTITY" "$BASE_REPO" "$PR_NUMBER" "$HEAD" "$BASE" "$BASE_REF" "$TREE" <<'PY' || exit 2
+uv run --no-project python - "$EXPECTED_IDENTITY" "$BASE_REPO" "$PR_NUMBER" "$HEAD" "$BASE_REF" <<'PY' || exit 2
 import json
 import sys
 
 expected = json.load(open(sys.argv[1]))
-actual = dict(zip(("repository", "pr_number", "head", "base", "base_ref", "tree"), sys.argv[2:]))
+actual = dict(zip(("repository", "pr_number", "head", "base_ref"), sys.argv[2:]))
 for key, value in actual.items():
     if expected.get(key) != (int(value) if key == "pr_number" else value):
         raise SystemExit(f"active identity changed: {key}")
 PY
-# The gate needs an up-to-date branch: the live base must be inside the head.
-git merge-base --is-ancestor "$BASE" "$HEAD" || exit 2
+# The reviewed tree is the head merged with the gated base; the head must
+# still merge cleanly with the live base.
+uv run --no-project python "$GATE_REPORT" base-check --repo . \
+  --expected "$EXPECTED_IDENTITY" --head "$HEAD" --live-base "$BASE" || exit 2
 # Normalize statusCheckRollup into the strict CI envelope with the actual
 # headRefOid, required check_runs/status_contexts arrays, and each returned
 # check identity/status/conclusion or context identity/state. Refresh the
@@ -57,7 +59,7 @@ uv run --no-project python "$GATE_REPORT" evaluate \
   --report "$ACTIVE_CO_REVIEW_REPORT" --expected "$EXPECTED_IDENTITY"
 ```
 
-A moved PR base fails the identity check (`active identity changed: base`), and a head that does not contain the live base stops the command: merge the base into the branch, then re-gate (carry-forward keeps an APPROVE across a clean merge of the base). Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
+`base-check` stops the command when the head no longer reproduces the reviewed tree or no longer merges cleanly with the live base; on a conflict, merge the base into the branch and re-gate. A base that moved cleanly needs no re-gate. Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
 missing active evidence, evaluator `CHANGES`/`INCOMPLETE`, or CI failure stops
 and returns control to the user. Preserve the calling workflow's stop; do not
 turn it into an automatic review request. Evaluator approval does not authorize a merge:

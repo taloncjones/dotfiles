@@ -1439,12 +1439,10 @@ that agent name, then close that exact pane if it
 remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
-`handoff_state` is `current` with verdict `APPROVE` and `merge-ready`
-failed with `base-moved` as its only non-`ci` reason, or (d)
 `handoff_state` is `current`, the handoff report has `class` `delta`, and
 its verdict is not `APPROVE`; that brief carries
 `herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
-(section 6a step 0 owns it), except rule (d). Rule (a) with a
+(section 6a step 0 owns it), except rule (c). Rule (a) with a
 `ship_launch_id` already set means that run stopped before writing
 `ship.json`: relaunch at most once per reviewed head, and
 every such relaunch brief carries `herdr-ship-brief: tier=full`. Relaunch
@@ -1467,9 +1465,10 @@ ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
 its launch directory, and no merge authority.
 The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
-gate under rule (c) gates the current PR base. The gate requires an
-up-to-date branch: when the head does not contain the live base, merge the
-base into the branch and rely on carry-forward.
+gate gates the current PR base. A head behind that base is gated on its
+merge result; the branch is merged with its base only when `prepare`
+reports a conflict. A base that moves cleanly after the gate needs no
+re-gate: `merge-ready` re-checks it with `base-check`.
 
 Once its `ship.json` is written, the idle ship agent settles as
 `handoff-recorded`: run
@@ -1517,7 +1516,7 @@ director-only; surfacing runs everywhere.
 check-in report while it holds, with no mutating retry.
 
 0. A handoff whose report `class` is `delta` is not handled here:
-   section 6 rule (d) dispatches a full gate. Current handoff verdict
+   section 6 rule (c) dispatches a full gate. Current handoff verdict
    `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
    report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff
    turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
@@ -1528,9 +1527,9 @@ check-in report while it holds, with no mutating retry.
    scratchpad, then
    `python3 "$CORE" merge-ready --repo-slug <slug> --repo-path <task worktree> --task-id <id> --pr-json <pr.json> --repo-json <repo.json>`.
    Exit 0 is the only ready. On exit 1 leave the task `reviewed` and act on
-   the reason codes: `base-moved` goes to section 6 ship dispatch (c); `ci`
-   pending and `not-mergeable` with `mergeable=UNKNOWN` wait for the next
-   check-in; every other code is surfaced. Any other exit or unparsable
+   the reason codes: `base-unreadable`, `ci` pending and `not-mergeable`
+   with `mergeable=UNKNOWN` wait for the next check-in; `base-conflict` and
+   every other code is surfaced. Any other exit or unparsable
    output is not ready.
 2. Audit comment, exactly as ship step 5 with the handoff's `report_path`
    and `expected_path`: dedupe on `co-review-audit head=<head>`; a failure
