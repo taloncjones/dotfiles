@@ -44,6 +44,7 @@ these are not aspirations, they are the acceptance standard:
 cd ~/dotfiles                    # suites assume repo root; the runner cds there itself
 bash bin/dotfiles-tests          # run everything, one verdict, non-zero exit on any failure
 bash bin/dotfiles-tests --list   # list suites without running
+bin/dotfiles-test-env sh <suite> # one suite or check, herdr pane env scrubbed
 ```
 
 Dependencies: `rg` (ripgrep) for several suites, `jq` + `git` for the skill
