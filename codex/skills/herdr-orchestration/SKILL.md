@@ -11,9 +11,10 @@ independent review. The Claude implementation worker retains task, commit, and
 lifecycle ownership.
 
 Read `claude/skills/herdr-orchestration/SKILL.md` in the same dotfiles checkout
-for the canonical Claude-led workflow and the bounded specialist dispatch
-recipe. Resolve that source through this installed skill rather than the user's
-project cwd:
+for the canonical Claude-led workflow, and
+`claude/skills/herdr-orchestration/references/codex-ui-specialist.md` for the
+bounded specialist dispatch recipe. Resolve that source through this
+installed skill rather than the user's project cwd:
 
 ```bash
 SKILL_FILE="${CODEX_HOME:-$HOME/.codex}/skills/herdr-orchestration/SKILL.md"
