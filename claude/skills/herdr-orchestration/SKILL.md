@@ -190,7 +190,10 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
    so pass the notes with `--carry` (at most 4000 characters, one note per
    line); the new director sees them as `carried:` lines. The same notes
    also land in `decisions.jsonl` and show in the decisions block until the
-   next rollover.
+   next rollover. If that log write fails, the verb prints `[WARNING]
+   rollover: carry notes not saved to decisions.jsonl` on stderr and
+   continues; a completed handover then delivers the notes only as
+   `carried:` lines.
 3. Run in the foreground, with a Bash timeout of 300000 ms:
    `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence> --carry '<notes>'`
    (add `--personal` when this director runs on an intentional personal

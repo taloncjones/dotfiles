@@ -185,5 +185,5 @@ function director() {    # director() launches the herdr director with inbound m
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done
-    claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":250000}' "${mode[@]}" "$@"
+    claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${mode[@]}" "$@"
 }

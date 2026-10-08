@@ -48,11 +48,13 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   an unusable value stores `null` with one `[WARNING]` and ownership still
   succeeds. Launch with the `director` shell function
   (`zsh/claude-account.zsh`), which runs `claude --agent director
---settings '{"crossSessionInbound":"accept"}' --permission-mode auto`
+--settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' --permission-mode auto`
   through the account-routing wrapper and refuses outside a herdr pane.
   Auto mode is the documented launch; an explicit `--permission-mode`
   argument overrides it. Nothing in the director flow assumes a
   permission mode; the rollover hook runs in every mode.
+  The 350000 `autoCompactWindow` is provisional, pending the measured
+  post-split director boot figure.
 
   Auto mode's server-side classifier intercepts two kinds of action.
   It refuses `gh pr merge`, `gh workflow run`, `gh pr comment` and
