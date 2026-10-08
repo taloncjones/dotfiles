@@ -15,7 +15,15 @@ update                      # Update dotfiles and dependencies (alias)
 update --ai                 # Refresh only the Claude/Codex layer (no sudo/brew/vscode)
 reload                      # Replace the shell with a fresh login zsh (alias; re-reads .zshenv)
 setup-claude                # Add CLAUDE.md/.claude to .git/info/exclude in any repo
+bin/dotfiles-test-env sh <suite>  # Run one suite or check with the herdr pane env scrubbed
 ```
+
+**Tests from a herdr pane:** run `bash bin/dotfiles-tests` for every suite,
+or `bin/dotfiles-test-env CMD...` for one suite or contract check (e.g.
+`bin/dotfiles-test-env sh zsh/codex-account.test.sh`). Both scrub the pane
+environment (`HERDR_*`, account selectors, `BASH_ENV`, gh tokens, the gh-shim
+`PATH` entry) and keep `HOME`, `TMPDIR` and the cwd. Never hand-write an
+`env -u` list.
 
 **Cloud sessions:** claude.ai/code containers are ephemeral. No plugin is
 declared or installed in a cloud session any more (Superpowers is retired,

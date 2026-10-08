@@ -11,6 +11,7 @@ trap 'rm -rf "$TMP"' EXIT
 SKEL="$TMP/skel"; HOMEDIR="$TMP/home"
 mkdir -p "$SKEL/bin" "$HOMEDIR/.claude/herdr-orch"
 cp "$REPO/bin/dotfiles-tests" "$SKEL/bin/dotfiles-tests"
+cp "$REPO/bin/dotfiles-test-env" "$SKEL/bin/dotfiles-test-env"
 chmod +x "$SKEL/bin/dotfiles-tests"
 git -C "$SKEL" init -q
 "$REPO/bin/dotfiles-tests" --list | while read -r interp path; do
@@ -47,5 +48,18 @@ else
     fail "an op-env session's git overrides never reach a suite"
 fi
 
+# An armed herdr pane never reaches a suite through the runner.
+printf '#!/bin/sh\n[ -z "${HERDR_ENV:-}${HERDR_SOCKET_PATH:-}${BASH_ENV:-}${GH_TOKEN:-}" ] || exit 1\ncase ":$PATH:" in *herdr-shims*) exit 1 ;; esac\n' >"$SKEL/$LEAKER"
+mkdir -p "$TMP/pane/bin/herdr-shims"
+printf '#!/bin/sh\nexit 0\n' >"$TMP/pane/bin/herdr-shims/gh"
+chmod +x "$TMP/pane/bin/herdr-shims/gh"
+if HOME="$HOMEDIR" CLAUDE_CONFIG_DIR= HERDR_ENV=1 HERDR_SOCKET_PATH=/nonexistent/sock GH_TOKEN=fixture \
+    BASH_ENV="$REPO/bin/herdr-shims/path.sh" PATH="$TMP/pane/bin/herdr-shims:$PATH" \
+    "$SKEL/bin/dotfiles-tests" >"$TMP/out" 2>&1 && grep -q '^=== dotfiles-tests: ' "$TMP/out"; then
+    pass "an armed herdr pane never reaches a suite through the runner"
+else
+    fail "an armed herdr pane never reaches a suite through the runner"
+    cat "$TMP/out" >&2
+fi
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
