@@ -33,7 +33,7 @@ evaluate the report against that expected file:
 ```bash
 test -f "$ACTIVE_CO_REVIEW_REPORT" && test -f "$EXPECTED_IDENTITY" || exit 2
 GATE_REPORT="$REVIEW_ROOT/claude/skills/co-review/scripts/gate_report.py"
-gh pr view --json number,headRefOid,baseRefName,baseRefOid,statusCheckRollup > live-pr.json
+gh pr view --json number,headRefOid,baseRefName,baseRefOid > live-pr.json
 # Resolve BASE_REPO from pulls REST .base.repo.full_name, normalize and compare
 # it with origin's real fetch URL. Extract PR_NUMBER, HEAD, BASE_REF, and
 # BASE from `git ls-remote origin "refs/heads/$BASE_REF"` (exit 2 on failure), not baseRefOid.
@@ -51,10 +51,19 @@ PY
 # still merge cleanly with the live base.
 uv run --no-project python "$GATE_REPORT" base-check --repo . \
   --expected "$EXPECTED_IDENTITY" --head "$HEAD" --live-base "$BASE" || exit 2
-# Normalize statusCheckRollup into the strict CI envelope with the actual
-# headRefOid, required check_runs/status_contexts arrays, and each returned
-# check identity/status/conclusion or context identity/state. Refresh the
-# report's exact-head CI artifact and recorded digest before evaluate.
+# Refresh the report's CI artifact from the live PR; never hand-build it.
+uv run --no-project python "$GATE_REPORT" ci-capture --repo . \
+  --expected "$EXPECTED_IDENTITY" --out "$CI_ARTIFACT" >ci-capture.json
+```
+
+`CI_ARTIFACT` is the report's `preconditions.ci` artifact path. `ci-capture`
+exit 0 continues; an exit 1 whose `reasons` is exactly
+`["CI evidence is missing"]` continues only when the report carries
+`preconditions.no_ci` evidence; any other nonzero exit stops. Before running
+`evaluate`, write `ci-capture.json`'s `sha256` into the report's
+`preconditions.ci.sha256`.
+
+```bash
 uv run --no-project python "$GATE_REPORT" evaluate \
   --report "$ACTIVE_CO_REVIEW_REPORT" --expected "$EXPECTED_IDENTITY"
 ```

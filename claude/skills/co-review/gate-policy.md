@@ -179,9 +179,10 @@ tree. `manifest.source.source_tree` binds `expected.tree`; the verified
 `manifest.snapshot.codex_tree` binds `report.reviewed_tree`. Capture the exact
 frozen Git diff bytes without universal-newline normalization. Capture the CI
 payload for the expected head as a regular report artifact. A PR gate captures
-it with `gate_report.py ci-envelope` after the head's checks finish and before
+it with `gate_report.py ci-capture` after the head's checks finish and before
 any probe or seat runs, and every seat prompt names `ci.json`, its digest and
-its content. Hash every artifact
+its content. The CI artifact is only ever written by `ci-capture`, never by
+hand from `gh` output. Hash every artifact
 after it is complete. Paths in the report are relative to the report file; artifacts must
 not be symlinks.
 
