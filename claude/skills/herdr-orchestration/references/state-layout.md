@@ -513,6 +513,7 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "review_head_sha": null,
   "review_outcome": null,
   "retired_review_launch_ids": [],
+  "stop_recorded": null,
   "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
@@ -545,6 +546,13 @@ prior list (append-only), and each new id must name a `phase: review` row.
 A write that changes a non-null `review_head_sha` retires the latest
 review launch on its own. The director adds the stopped launch at a
 sized-deadline stop. Bound `write-task` and `reset-task` refuse the key.
+
+`stop_recorded` (`{"launch_id", "ts"}`, or absent) names the done record of
+a paused or failed plan or implement attempt the director has recorded.
+While it equals the current done record's `launch_id` and `ts`, check-in
+reports no `paused` or `failed` action for that record, so the stopped
+row's idle agent surfaces as `exit-idle-worker`. `write-task` does not
+validate it: a value that matches nothing leaves the action firing.
 
 The examples above include legacy rows. Every new native dispatch has
 `launch_id`, `phase`, `runtime`, `workspace_id`, `pane_id`, and

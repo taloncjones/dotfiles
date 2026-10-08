@@ -3899,6 +3899,13 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                 continue
     hint = fold_status(events).get("last_hint") or "none"
 
+    stop = task.get("stop_recorded")
+    stop_recorded = bool(done and isinstance(stop, dict)
+                         and _nonempty_str(stop.get("launch_id"))
+                         and _nonempty_str(stop.get("ts"))
+                         and stop["launch_id"] == done.get("launch_id")
+                         and stop["ts"] == done.get("ts"))
+
     facts = {
         "task_id": tid, "status": status, "ws": ws, "live": live,
         "head": head, "ahead": ahead, "dirty": dirty,
@@ -3918,11 +3925,13 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # has no `paused` STATUS, so a status-based gate is vacuous and a
         # stale record from a superseded attempt would fire forever; nothing
         # in the core deletes done.json on relaunch.
+        # A stop the director recorded (stop_recorded names this record) is handled.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "idle_settled": idle_settled,
         "ship_pending": ship_pending(task),
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES
+                         and not stop_recorded
                          and attempt_matches(task, done, done_phase,
                                              phase_workspace(task, done_phase))
                          else None),

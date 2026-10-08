@@ -286,7 +286,15 @@ Each `action` names the transition still to be written: `confirm-completion`,
 `stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
 `mech-ledger`, `paused`, `failed`, `exit-idle-worker`. An action fires only
 while that transition is unrecorded, so a settled task reports `none`
-instead of re-reporting its evidence forever. Two non-task lines
+instead of re-reporting its evidence forever.
+`paused` and `failed` are recorded by a field, not a status: once a plan or
+implement attempt's stop is reported and that attempt will not be
+reprompted, `write-task --present` the full record with
+`stop_recorded: {"launch_id": <done launch_id>, "ts": <done ts>}` (a `failed`
+that ends the task writes `status: failed` instead). The next check-in
+reports `exit-idle-worker` for the stopped agent. If a reprompted attempt
+stops again, its new done record has a new `ts` and needs a new record.
+Two non-task lines
 also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
 and `rollover-due ...` (section 1a).
 

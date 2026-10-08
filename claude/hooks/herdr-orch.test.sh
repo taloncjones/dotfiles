@@ -12632,6 +12632,48 @@ assert c.checkin_action(dict(f, reviewed=True)) == "confirm-review"
 assert c.checkin_action(dict(f, status="merged")) == "none"
 PY
 
+check "checkin_facts: a recorded stop reports exit-idle-worker instead of paused or failed" <<PY
+$LOAD
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+row = {"phase": "implement", "runtime": "claude", "workspace_id": "w1", "pane_id": "w1:p1",
+       "launch_id": "i1", "source_head_sha": "a" * 40, "agent": "impl-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "b" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+idle = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": "idle"}]}}
+gone = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {}, "agents": {"w1": []}}
+payload = c.state_root().parent
+stamp = "2026-10-01T00:00:00Z"
+for outcome in ("paused", "failed"):
+    open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(
+        dict(row, task_id="PROJ-1", outcome=outcome, ts=stamp)))
+    act = lambda t, p: c.checkin_facts(rd, t, p, payload)["action"]
+    rec = lambda lid, ts: dict(task, stop_recorded={"launch_id": lid, "ts": ts})
+    assert act(task, idle) == outcome
+    assert act(rec("other", stamp), idle) == outcome
+    assert act(rec("i1", "2026-09-30T00:00:00Z"), idle) == outcome, "a reprompted stop needs a fresh record"
+    assert act(dict(task, stop_recorded="i1"), idle) == outcome
+    assert act(rec("i1", stamp), idle) == "exit-idle-worker", act(rec("i1", stamp), idle)
+    assert act(rec("i1", stamp), gone) == "none"
+for bad in (None, 7):
+    done = dict(row, task_id="PROJ-1", outcome="paused")
+    if bad is not None:
+        done["ts"] = bad
+    open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(done))
+    marker = {"launch_id": "i1"} if bad is None else {"launch_id": "i1", "ts": bad}
+    assert c.checkin_facts(rd, dict(task, stop_recorded=marker), idle, payload)["action"] == "paused", bad
+PY
+
+check "docs: section 4 records a stop with stop_recorded" <<'PY'
+import re
+flat = lambda p: re.sub(r"\s+", " ", open(p).read())
+skill = flat("claude/skills/herdr-orchestration/SKILL.md")
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+assert "stop_recorded" in sec4, "section 4 tells the director to record the stop"
+assert "stop_recorded" in flat("claude/skills/herdr-orchestration/references/state-layout.md")
+PY
+
 check "row_settlement: plan-confirmed and review-approved fire on their evidence" <<PY
 $LOAD
 import hashlib
