@@ -180,3 +180,29 @@ IDs, not labels, are the provenance keys. Pane metadata still shows
 role, runtime/model and status separately; presentation failure is
 visible but never changes completion state. Lead-scoped records are not
 labelled.
+
+## Director transitions (sections 2a and 5)
+
+`python3 "$DISPATCH" accept-review` and `python3 "$DISPATCH" advance` take
+`--repo-slug --repo-path --runtime [--personal] --session --fence --task-id`
+(`advance` also `--focus-file`) and print one JSON object. `next` prints
+both ready to run.
+
+- `accept-review` (action `confirm-review`): `confirm-review`, then
+  `append-lessons` on the findings file, `write-task` status `reviewed`, and
+  `settle` for the implement and review rows. Output: `status`, `head`,
+  `dirty`, `lessons`, `settle`. On a task already `reviewed` it re-reads the
+  lessons and settles only.
+- `advance` (action `confirm-plan`): `confirm-plan`, a clean worktree, the
+  contract pin, the implement route, `append-lessons` on the plan pane,
+  `write-task` with `plan_artifacts` and the pin, `render-brief --phase
+  implement`, `settle` of the plan row, then `launch` into the plan pane.
+  Output: `status`, `launch_id`, `agent`, `brief_path`, `contract_sha256`,
+  `lessons`, `warnings`.
+
+Exit 0 means done. Exit 2 means refused before any write, except a
+timed-out `append-lessons` (the first write), whose ledger append may have
+landed; a re-run dedupes it. Exit 3 means `incomplete` at
+the named `step` after a write, or a settle that did not settle. Re-run
+after any step but `launch`; after a launch attempt the implement row
+exists, so relaunch by hand (references/phase-advance.md).

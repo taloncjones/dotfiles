@@ -37,6 +37,11 @@ replays. Run `check-fence` before the first harvest write; on
    Lesson ledger, for the append grammar. Rule-shaped lines wait there for the
    `/post-merge` admission filter.
 
+The transition verbs `advance` and `accept-review` harvest through the core
+verb `append-lessons`, which writes every kept line to the ledger and
+returns the lines. Read the `lessons.lines` they print and file a line that
+names a fixable defect in its todo as well.
+
 A replay therefore adds only what is missing. The director records its own
 friction the same way, in the turn it happens, as a line tagged
 `[<task_id> director]`:
