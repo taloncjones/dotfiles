@@ -2,12 +2,11 @@
 # resolves GH_TOKEN. System scope is read first, and git breaks
 # equal-length url rewrite ties toward the first definition, so these rules
 # beat the SSH rewrites in ~/.gitconfig-personal and ~/.gitconfig-work.
+# The GH_TOKEN credential helper is not here: bin/op-env sets it at command
+# scope, which is read last, so global and repo-local helpers are cleared.
 [url "https://github.com/"]
 	insteadOf = git@github.com:
 	insteadOf = git@Git-Personal:
 	insteadOf = git@Git-work:
 	insteadOf = ssh://git@github.com/
 	pushInsteadOf = https://github.com/
-[credential "https://github.com"]
-	helper =
-	helper = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"; }; f"

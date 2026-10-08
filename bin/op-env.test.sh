@@ -45,7 +45,8 @@ FIXTURE_TOKEN="ops_$(printf 'q%.0s' $(seq 1 32))"
 LITERAL="lit$(printf 'z%.0s' $(seq 1 20))"
 
 # Fake op: `run` resolves every NAME=op://... in --env-file to
-# "resolved-NAME" and execs the command; `read` serves FAKE_OP_KEY.
+# "resolved-NAME" (except FAKE_OP_SKIP) and execs the command; `read` serves
+# FAKE_OP_KEY.
 # It logs argv and whether the token reached it, never the token itself.
 cat >"$TMP/fakebin/op" <<'EOF'
 #!/bin/sh
@@ -63,6 +64,7 @@ case "$1" in
         done
         shift
         for name in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$envfile"); do
+            [ "$name" = "${FAKE_OP_SKIP:-}" ] && continue
             export "$name=${FAKE_OP_VALUE:-resolved-$name}"
         done
         exec "$@"
@@ -132,9 +134,62 @@ check "literal refusal calls no op" '[ ! -s "$OP_LOG" ]'
 PADDED="ops_$(printf 'padded%s' token | base64 | tr -d '\n')"
 printf 'GH_TOKEN=op://V/gh/token\n%s\n' "$PADDED" >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
-check "project.env bare padded token is refused without its content" '[ -z "$out" ] && grep -q "project.env line 2 is not NAME=op://" "$TMP/err" && ! grep -qF "${PADDED%%=*}" "$TMP/err"'
+check "project.env bare padded token is refused without its content" '[ -z "$out" ] && grep -q "project.env line 2 name is not allowed" "$TMP/err" && ! grep -qF "${PADDED%%=*}" "$TMP/err"'
 out="$("$OP_ENV" status --cwd "$REPO" 2>&1)"
 check "status never prints the bare padded token" '! printf "%s" "$out" | grep -qF "${PADDED%%=*}"'
+
+RULE="project.env line 2 name is not allowed"
+: >"$OP_LOG"
+for name in path fpath PWD LC_ALL LANG CDPATH NODE_OPTIONS NODE_PATH ADAPTER \
+    PYTHONPATH PERL5LIB RUBYOPT HTTPS_PROXY https_proxy NO_PROXY XDG_CONFIG_HOME GH_CONFIG_DIR; do
+    printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
+    out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+    check "shell-exports refuses project.env name $name" '[ -z "$out" ] && grep -q "$RULE" "$TMP/err" && ! grep -qF "$name" "$TMP/err"'
+    out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "${GH_TOKEN-unset}"' 2>"$TMP/err")"
+    check "exec refuses project.env name $name" '[ "$out" = unset ] && grep -q "$RULE" "$TMP/err"'
+done
+RULE_FLOOR="project.env line 2 names a reserved variable"
+for name in OP_SERVICE_ACCOUNT_TOKEN PATH BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM SHELLOPTS BASHOPTS \
+    BASH_XTRACEFD PS1 PS4 PROMPT PROMPT_COMMAND LD_PRELOAD DYLD_INSERT_LIBRARIES; do
+    printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
+    out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+    check "shell-exports refuses reserved name $name" '[ -z "$out" ] && grep -q "$RULE_FLOOR" "$TMP/err" && ! grep -qF "$name" "$TMP/err" && ! grep -q "OP_ENV_ALLOW" "$TMP/err"'
+    out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "${GH_TOKEN-unset}"' 2>"$TMP/err")"
+    check "exec refuses reserved name $name" '[ "$out" = unset ] && grep -q "$RULE_FLOOR" "$TMP/err"'
+done
+check "name refusal calls no op" '[ ! -s "$OP_LOG" ]'
+printf 'GH_TOKEN=op://V/gh/token\nADAPTER=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
+check "status reports a refused project.env name as [X]" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*name is not allowed"'
+
+printf 'GH_TOKEN=op://V/gh/token\nOPENAI_API_KEY=op://V/x/y\nNPM_TOKEN=op://V/x/y\nDB_PASSWORD=op://V/x/y\nSIGN_PAT=op://V/x/y\nWEBHOOK_SECRET=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "suffix names GH_TOKEN and a _KEY name resolve" 'printf "%s\n" "$out" | grep -qx "export GH_TOKEN='"'"'resolved-GH_TOKEN'"'"'" && printf "%s\n" "$out" | grep -qx "export OPENAI_API_KEY='"'"'resolved-OPENAI_API_KEY'"'"'"'
+check "suffix names _TOKEN _PASSWORD _PAT _SECRET resolve" '[ "$(printf "%s\n" "$out" | grep -cE "^export (GH_TOKEN|OPENAI_API_KEY|NPM_TOKEN|DB_PASSWORD|SIGN_PAT|WEBHOOK_SECRET)=")" = 6 ]'
+printf 'GH_TOKEN=op://V/gh/token\nPSQL_PASSWORD=op://V/x/y\nPSCALE_TOKEN=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "PS-prefixed credential names PSQL_PASSWORD and PSCALE_TOKEN resolve" 'printf "%s\n" "$out" | grep -qx "export PSQL_PASSWORD='"'"'resolved-PSQL_PASSWORD'"'"'" && printf "%s\n" "$out" | grep -qx "export PSCALE_TOKEN='"'"'resolved-PSCALE_TOKEN'"'"'"'
+
+write_op_env "OP_ENV_ALLOW=ADAPTER_REF,CUSTOM_NAME"
+printf 'CUSTOM_NAME=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "op.env OP_ENV_ALLOW admits a listed name" 'printf "%s\n" "$out" | grep -qx "export CUSTOM_NAME='"'"'resolved-CUSTOM_NAME'"'"'"'
+printf 'OTHER_NAME=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+check "OP_ENV_ALLOW does not admit an unlisted name" '[ -z "$out" ] && grep -q "project.env line 1 name is not allowed" "$TMP/err"'
+write_op_env "OP_ENV_ALLOW=PATH,PS1,GIT_DIR,OP_FOO,HOME,path,BASH_ENV,LD_PRELOAD,CLAUDE_X,IFS,SHELL,ENV"
+for name in PATH PS1 GIT_DIR OP_FOO HOME path BASH_ENV LD_PRELOAD CLAUDE_X IFS SHELL ENV; do
+    printf '%s=op://V/x/y\n' "$name" >"$REPO/project.env"
+    out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+    check "allowed floor name $name is still refused" '[ -z "$out" ] && grep -qE "names a reserved variable|name is not allowed" "$TMP/err"'
+done
+write_op_env "OP_ENV_ALLOW=*"
+touch "$REPO/GLOB_NAME"
+printf 'GLOB_NAME=op://V/x/y\n' >"$REPO/project.env"
+out="$(cd "$REPO" && "$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+check "OP_ENV_ALLOW glob is not expanded against the cwd" '[ -z "$out" ] && grep -q "name is not allowed" "$TMP/err"'
+rm -f "$REPO/GLOB_NAME"
+write_op_env
 
 # --- 4. resolution ---
 printf 'GH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN="op://V/cf/credential"\n' >"$REPO/project.env"
@@ -154,6 +209,17 @@ check "a linked worktree resolves the main checkout's files" 'printf "%s\n" "$ou
 
 out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "$GH_TOKEN"')"
 check "exec runs the command with resolved values" '[ "$out" = resolved-GH_TOKEN ]'
+INHERITED="inherited-$(printf 'v%.0s' $(seq 1 8))"
+out="$(CLOUDFLARE_API_TOKEN="$INHERITED" FAKE_OP_SKIP=CLOUDFLARE_API_TOKEN "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "a name op did not set is never emitted from the inherited environment" '! printf "%s" "$out" | grep -q CLOUDFLARE_API_TOKEN && ! printf "%s" "$out" | grep -qF "$INHERITED" && printf "%s\n" "$out" | grep -q "^export GH_TOKEN="'
+# bash defines HOSTNAME itself; only a value op set may be emitted.
+cp -p "$REPO/project.env" "$TMP/project.env.before-hostname"
+write_op_env "OP_ENV_ALLOW=HOSTNAME"
+printf 'GH_TOKEN=op://V/gh/token\nHOSTNAME=op://V/host/name\n' >"$REPO/project.env"
+out="$(FAKE_OP_SKIP=HOSTNAME "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "a name the emitting shell defines is never emitted unless op set it" '! printf "%s" "$out" | grep -q "^export HOSTNAME=" && printf "%s\n" "$out" | grep -q "^export GH_TOKEN="'
+cp -p "$TMP/project.env.before-hostname" "$REPO/project.env"
+write_op_env
 
 printf 'CLOUDFLARE_API_TOKEN=op://V/cf/credential\n' >"$REPO/project.env"
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
@@ -225,6 +291,23 @@ done
 cred="$( (unset GIT_CONFIG_NOSYSTEM; eval "$exports"; printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git -C "$TMP/r-https" credential fill) )"
 check "credential helper answers from GH_TOKEN" 'printf "%s\n" "$cred" | grep -qx "username=x-access-token" && printf "%s\n" "$cred" | grep -qx "password=resolved-GH_TOKEN"'
 
+# No other helper may see GH_TOKEN, on get or on store.
+git config --global credential.helper "!f() { echo global-\$1 >>\"$TMP/helper.log\"; }; f"
+git -C "$TMP/r-https" config credential.helper "!f() { echo local-\$1 >>\"$TMP/helper.log\"; }; f"
+CRED_IN="$(printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=resolved-GH_TOKEN\n')"
+printf '%s\n\n' "$CRED_IN" | git -C "$TMP/r-https" credential approve
+check "fixture: credential recorders see a store without op-env" 'grep -qx global-store "$TMP/helper.log" && grep -qx local-store "$TMP/helper.log"'
+: >"$TMP/helper.log"
+(
+    unset GIT_CONFIG_NOSYSTEM
+    eval "$exports"
+    printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git -C "$TMP/r-https" credential fill >/dev/null
+    printf '%s\n\n' "$CRED_IN" | git -C "$TMP/r-https" credential approve
+    printf '%s\n\n' "$CRED_IN" | git -C "$TMP/r-https" credential reject
+)
+check "a GH_TOKEN session hands credentials to no global or repo-local helper" '[ ! -s "$TMP/helper.log" ]'
+git config --global --unset-all credential.helper
+
 # --- 7. signing through a plain ssh-agent ---
 ssh-keygen -q -t ed25519 -N '' -C op-env-test -f "$TMP/signkey"
 export FAKE_OP_KEY="$TMP/signkey"
@@ -250,6 +333,12 @@ check "an expired key (TTL) reloads on the next signature" '[ "$(grep -c "^read 
 out="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat "$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
 check "signing entries append after an existing GIT_CONFIG_COUNT" 'printf "%s\n" "$out" | grep -q "^export GIT_CONFIG_KEY_1=gpg.format " && printf "%s\n" "$out" | grep -qx "export GIT_CONFIG_COUNT=4"'
 
+printf 'GH_TOKEN=op://V/gh/token\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+got="$( (eval "$out"; git -C "$REPO" config --get gpg.ssh.program) )"
+check "credential and signing entries share one GIT_CONFIG_COUNT" 'printf "%s\n" "$out" | grep -qx "export GIT_CONFIG_COUNT=5" && [ "$(printf "%s\n" "$out" | grep -c "^export GIT_CONFIG_COUNT=")" = 1 ] && [ "$got" = "$ROOT/bin/op-env-sign" ]'
+rm -f "$REPO/project.env"
+
 # --- 8. concurrent first signatures and a stale lock ---
 export OP_ENV_SIGNING_SOCK="$TMP/s2/op-env-signing.sock"
 write_op_env "OP_SIGNING_KEY=op://V/sign" "OP_SIGNING_PUBKEY=$PUB"
@@ -273,6 +362,24 @@ OP_ENV_FILE="$REPO/op.env" "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signk
 rc=$?
 check "a stale lock does not block signing" '[ "$rc" = 0 ] && [ $((SECONDS - start)) -lt 5 ]'
 
+# --- 8b. the signing agent never inherits the session's credentials ---
+export OP_ENV_SIGNING_SOCK="$TMP/s4/op-env-signing.sock"
+mkdir -p "$TMP/agentspy"
+cat >"$TMP/agentspy/ssh-agent" <<EOF
+#!/bin/sh
+env >"$TMP/agent-env"
+exec "$(command -v ssh-agent)" "\$@"
+EOF
+chmod +x "$TMP/agentspy/ssh-agent"
+SESSION_VALUE="session-$(printf 'w%.0s' $(seq 1 16))"
+printf 'payload\n' >"$TMP/payload4"
+PATH="$TMP/agentspy:$PATH" GH_TOKEN="$SESSION_VALUE" CLOUDFLARE_API_TOKEN="$SESSION_VALUE" \
+    OP_SERVICE_ACCOUNT_TOKEN="$SESSION_VALUE" OP_ENV_FILE="$REPO/op.env" \
+    "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signkey.pub" "$TMP/payload4" </dev/null >/dev/null 2>&1
+rc=$?
+check "signing through the scrubbed agent succeeds" '[ "$rc" = 0 ] && [ -s "$TMP/payload4.sig" ]'
+check "the signing ssh-agent starts without session tokens" '[ -s "$TMP/agent-env" ] && ! grep -qF "$SESSION_VALUE" "$TMP/agent-env"'
+
 # --- 9. status ---
 rm -f "$REPO/op.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
@@ -286,6 +393,8 @@ exports="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
 out="$( (eval "$exports"; "$OP_ENV" status --cwd "$REPO") 2>&1)"
 check "status active: three active lines" '[ "$(printf "%s\n" "$out" | grep -c "^\[OK\] .*active in this shell")" = 3 ]'
 check "status never calls op or prints the token" '[ ! -s "$OP_LOG" ] && ! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
+out="$( (eval "$exports"; unset GIT_CONFIG_COUNT; export GIT_CONFIG_SYSTEM="$ROOT/git/agent-https.gitconfig"; "$OP_ENV" status --cwd "$REPO") 2>&1)"
+check "status flags a pre-change session with no command-scope helper" 'printf "%s\n" "$out" | grep -q "push:.*relaunch"'
 chmod 644 "$REPO/op.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
 check "status reports a bad mode as [X] and exits 1" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*mode is 644"'
@@ -318,6 +427,11 @@ out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op --rotate replaces the token" 'grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$NEWTOKEN" "$REPO2/op.env" && ! grep -qF "$FIXTURE_TOKEN" "$REPO2/op.env"'
 check "setup-op --rotate keeps the signing lines byte-identical" '[ "$(grep "^OP_SIGNING_" "$REPO2/op.env")" = "$signing_before" ]'
 check "setup-op --rotate output never prints either token" '! printf "%s" "$out" | grep -qF "$NEWTOKEN" && ! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
+printf 'OP_ENV_ALLOW=DB_URL,CUSTOM_NAME\n' >>"$REPO2/op.env"
+out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
+check "setup-op --rotate keeps the OP_ENV_ALLOW line" 'grep -qx "OP_ENV_ALLOW=DB_URL,CUSTOM_NAME" "$REPO2/op.env"'
+out="$(cd "$REPO2" && "$SETUP" --signing-key op://V/sign </dev/null 2>&1)"
+check "setup-op --signing-key keeps the OP_ENV_ALLOW line" 'grep -qx "OP_ENV_ALLOW=DB_URL,CUSTOM_NAME" "$REPO2/op.env" && grep -qx "OP_SIGNING_KEY=op://V/sign" "$REPO2/op.env"'
 
 out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op excludes are not duplicated on rerun" '[ "$(grep -cx "op.env" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cxF ".op.env.*" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cx "project.env" "$REPO2/.git/info/exclude")" = 1 ]'
@@ -325,12 +439,40 @@ printf 'keep\n' >"$REPO2/.op.env.bak"
 out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op --rotate leaves a foreign .op.env.* file alone" '[ "$(cat "$REPO2/.op.env.bak")" = keep ]'
 rm -f "$REPO2/.op.env.bak"
+REPO5="$HOME/Git/personal/proj5"
+git init -q "$REPO5"
+printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\nOP_ENV_ALLOW=EVIL_NAME\n' "$FIXTURE_TOKEN" >"$TMP/planted.env"
+chmod 600 "$TMP/planted.env"
+ln -s "$TMP/planted.env" "$REPO5/op.env"
+planted_before="$(cksum <"$TMP/planted.env")"
+out="$(cd "$REPO5" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"; rc=$?
+check "setup-op --rotate replaces a symlinked op.env without keeping its lines" '[ "$rc" = 0 ] && [ ! -L "$REPO5/op.env" ] && grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$NEWTOKEN" "$REPO5/op.env" && ! grep -q "OP_ENV_ALLOW" "$REPO5/op.env" && [ "$(cksum <"$TMP/planted.env")" = "$planted_before" ]'
+rm -f "$REPO5/op.env"
+printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\nOP_ENV_ALLOW=EVIL_NAME\n' "$FIXTURE_TOKEN" >"$REPO5/op.env"
+chmod 644 "$REPO5/op.env"
+out="$(cd "$REPO5" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"; rc=$?
+check "setup-op --rotate does not keep lines from a mode-644 op.env" '[ "$rc" = 0 ] && ! grep -q "OP_ENV_ALLOW" "$REPO5/op.env" && [ "$(stat -c %a "$REPO5/op.env" 2>/dev/null || stat -f %Lp "$REPO5/op.env")" = 600 ]'
+printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$FIXTURE_TOKEN" >"$REPO5/op.env"
+chmod 644 "$REPO5/op.env"
+before="$(cksum <"$REPO5/op.env")"
+out="$(cd "$REPO5" && "$SETUP" --signing-key op://V/sign </dev/null 2>&1)"; rc=$?
+check "setup-op --signing-key refuses a mode-644 op.env and leaves it" '[ "$rc" != 0 ] && [ "$(cksum <"$REPO5/op.env")" = "$before" ] && printf "%s" "$out" | grep -q "mode is 644"'
 REPO3="$HOME/Git/personal/proj3"
 git init -q "$REPO3"
 printf '%s\n' "$FIXTURE_TOKEN" | (cd "$REPO3" && "$SETUP" >/dev/null 2>&1)
 printf 'x\n' >"$REPO3/.op.env.keep"
 out="$(cd "$REPO3" && printf '%s\n' "$FIXTURE_TOKEN" | FAKE_OP_MODE=fail "$SETUP" --signing-key op://V/missing 2>&1)"; rc=$?
 check "setup-op failure leaves a foreign .op.env.* file and no own temp" '[ "$rc" != 0 ] && [ -f "$REPO3/.op.env.keep" ] && [ "$(find "$REPO3" -maxdepth 1 -name ".op.env.*" | wc -l | tr -d " ")" = 1 ]'
+
+# A symlink planted at the old pid-named temp path must not catch the token:
+# exec keeps the pid, so setup-op's $$ is the planting shell's.
+REPO4="$HOME/Git/personal/proj4"
+git init -q "$REPO4"
+: >"$TMP/victim"
+(cd "$REPO4" && printf '%s\n' "$FIXTURE_TOKEN" |
+    bash -c 'ln -s "$1" ".op.env.$$" && exec "$2"' _ "$TMP/victim" "$SETUP" >/dev/null 2>&1)
+check "setup-op never writes through a symlink at its old pid temp path" '[ ! -s "$TMP/victim" ]'
+check "setup-op writes a regular mode-600 op.env past a planted symlink" '[ -f "$REPO4/op.env" ] && [ ! -L "$REPO4/op.env" ] && [ "$(stat -c %a "$REPO4/op.env" 2>/dev/null || stat -f %Lp "$REPO4/op.env")" = 600 ] && grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$FIXTURE_TOKEN" "$REPO4/op.env"'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

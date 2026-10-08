@@ -68,11 +68,23 @@ fi
 
 token=""
 keep=()
-if [ -e "$op_env" ]; then
+# Same checks as read_op_env in bin/op-env: an untrusted file keeps no lines.
+op_env_trusted=0
+if [ -f "$op_env" ] && [ ! -L "$op_env" ] && [ -O "$op_env" ]; then
+    mode="$(stat -c %a "$op_env" 2>/dev/null || stat -f %Lp "$op_env")"
+    [ "$mode" = 600 ] && op_env_trusted=1
+fi
+if [ -e "$op_env" ] || [ -L "$op_env" ]; then
+    if [ "$op_env_trusted" = 0 ] && [ "$rotate" = 0 ]; then
+        echo "[X] setup-op: op.env is not a regular file you own with mode 600 (mode is ${mode:-unknown}); fix it or pass --rotate: $op_env" >&2
+        exit 1
+    fi
+fi
+if [ "$op_env_trusted" = 1 ]; then
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             OP_SERVICE_ACCOUNT_TOKEN=*) token="${line#*=}" ;;
-            OP_SIGNING_TTL=*) keep+=("$line") ;;
+            OP_SIGNING_TTL=*|OP_ENV_ALLOW=*) keep+=("$line") ;;
             OP_SIGNING_KEY=*|OP_SIGNING_PUBKEY=*) [ -n "$signing_ref" ] || keep+=("$line") ;;
         esac
     done <"$op_env"
@@ -96,8 +108,11 @@ if [ -n "$signing_ref" ]; then
     keep+=("OP_SIGNING_KEY=$signing_ref" "OP_SIGNING_PUBKEY=$pub")
 fi
 
-tmp="$root/.op.env.$$"
+# mktemp creates the file exclusively under a random name, so nothing planted
+# in $root can redirect the token write.
+tmp=""
 trap 'rm -f "$tmp"' EXIT
+tmp="$(mktemp "$root/.op.env.XXXXXX")"
 (
     umask 077
     {
