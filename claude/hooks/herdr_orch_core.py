@@ -5,6 +5,7 @@ single-writer ownership. Imported by the hook and driven as a CLI by the skill.
 Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 """
 
+import calendar
 import contextlib
 import contextvars
 import datetime
@@ -4228,11 +4229,32 @@ def archived_tasks(rd):
 
 
 
+def _attempt_stopped(row, done, reprompts):
+    """The attempt's own done record says paused or failed, and no reprompt
+    that could have resumed the worker started at or after it."""
+    if not isinstance(done, dict) or done.get("outcome") not in ("paused", "failed"):
+        return False
+    if not _attempt_settled(row, done):
+        return False
+    try:
+        stopped = calendar.timegm(time.strptime(done.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return False
+    for entry in reprompts:
+        if not isinstance(entry, dict) or entry.get("status") == "failed":
+            continue
+        started = entry.get("started_ns")
+        if type(started) is not int or started // 1_000_000_000 >= stopped:
+            return False
+    return True
+
+
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
     work. Rules 0b-5 rest on facts that stay true once written; rules 7-8 read
-    mutable evidence and authorize an agent exit. Whether the pane may close
+    mutable evidence and authorize an agent exit; attempt-stopped (a plan or
+    implement done record saying paused or failed) is one of the latter. Whether the pane may close
     is row_releases_pane's call: of the mutable reasons only ship-report
     releases one, because a ship.md rewrite only moves its mtime forward.
     The ship rule reads a write-once ship.json snapshot and may authorize a
@@ -4256,6 +4278,8 @@ def row_settlement(task, index, *, done, review, head, payload_root, ship_report
         return "launch-failed"
     if any(w.get("phase") == phase for w in later):
         return "superseded"
+    if phase in ("plan", "implement") and _attempt_stopped(row, done, reprompts):
+        return "attempt-stopped"
     if phase == "ship":
         launch = row.get("launch_id")
         return "handoff-recorded" if isinstance(launch, str) and launch in ship_handoffs else None

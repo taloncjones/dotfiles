@@ -27,7 +27,12 @@ from pathlib import Path
 
 import agent_runtime
 import herdr_dispatch
+import herdr_dispatch_cli
 import herdr_orch_core as core
+
+# Test-process globals; production keeps 0.5 s.
+herdr_dispatch.SHELL_READY_POLL_SECS = 0
+herdr_dispatch.SETTLE_POLL_SECS = 0
 
 
 PASS = 0
@@ -157,6 +162,19 @@ elif args[:2] == ["pane", "process-info"]:
     elif mode == "process-info-foreground-busy":
         # A pid other than the pane's shell -- a user's vim or test run.
         foreground = [{"pid": 202, "name": "vim", "cwd": cwd}]
+    elif mode == "process-info-claude-then-shell":
+        cpath = Path(os.environ["FAKE_PROCESS_INFO_COUNT"])
+        seen = int(cpath.read_text()) if cpath.exists() else 0
+        cpath.write_text(str(seen + 1))
+        foreground = ([{"pid": 202, "name": "claude", "cwd": cwd}] if seen < 1
+                      else [{"pid": 101, "name": "zsh", "cwd": cwd}])
+    elif mode == "shell-starting":
+        # A fresh split pane: the first two reads show a not-yet-ready shell.
+        cpath = Path(os.environ["FAKE_PROCESS_INFO_COUNT"])
+        seen = int(cpath.read_text()) if cpath.exists() else 0
+        cpath.write_text(str(seen + 1))
+        foreground = ([{"pid": 303, "name": "zsh", "cwd": cwd}] if seen < 2
+                      else [{"pid": 101, "name": "zsh", "cwd": cwd}])
     else:
         foreground = [{"pid": 101, "name": "zsh", "cwd": cwd}]
     print(json.dumps({"id": "fake", "result": {
@@ -282,6 +300,37 @@ elif args[:2] == ["agent", "start"]:
         "agent_status": "idle", "interactive_ready": True, "launch_pending": False,
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 2}}}))
+elif args[:2] == ["agent", "get"] and os.environ.get("FAKE_AGENT_GET_FROM_LIST") == "1":
+    apath = Path(os.environ["FAKE_AGENTS"])
+    agents = json.loads(apath.read_text())
+    if mode == "exit-slow" and Path(os.environ["FAKE_EXIT_SEEN"]).exists():
+        cpath = Path(os.environ["FAKE_POST_EXIT_GETS"])
+        gets = (int(cpath.read_text()) if cpath.exists() else 0) + 1
+        cpath.write_text(str(gets))
+        if gets >= 3:
+            agents = [a for a in agents if a["name"] != args[2]]
+            apath.write_text(json.dumps(agents))
+    if mode == "exit-agent-reappears":
+        # The row's agent is removed by the /exit reply, then reappears on
+        # the third read: the settle re-check after the exited verdict.
+        cpath = Path(os.environ["FAKE_AGENT_LIST_COUNT"])
+        gets = (int(cpath.read_text()) if cpath.exists() else 0) + 1
+        cpath.write_text(str(gets))
+        removed_path = Path(os.environ["FAKE_REMOVED_AGENT"])
+        if gets >= 3 and removed_path.exists():
+            removed = json.loads(removed_path.read_text())
+            if not any(a["name"] == removed["name"] for a in agents):
+                agents = agents + [removed]
+                apath.write_text(json.dumps(agents))
+    gone = json.loads(os.environ.get("FAKE_AGENT_GET_GONE", "[]"))
+    entry = next((a for a in agents if isinstance(a, dict) and a.get("name") == args[2]), None)
+    if args[2] in gone or entry is None:
+        print(json.dumps({"id": "cli:agent:get",
+                          "error": {"code": "agent_not_found",
+                                    "message": f"agent target {args[2]} not found"}}),
+              file=sys.stderr)
+        raise SystemExit(1)
+    print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": entry}}))
 elif args[:2] == ["agent", "get"]:
     observed_pane = "w9:p9" if mode == "stale-agent" else pane
     busy = mode == "agent-busy"
@@ -386,8 +435,10 @@ elif args[:2] == ["agent", "prompt"]:
                               "error": {"code": code, "message": code}}),
                   file=sys.stderr)
             raise SystemExit(1)
+        if mode == "exit-slow":
+            Path(os.environ["FAKE_EXIT_SEEN"]).write_text("yes")
         if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed",
-                        "exit-background-prose"):
+                        "exit-background-prose", "exit-slow"):
             apath = Path(os.environ["FAKE_AGENTS"])
             agents = json.loads(apath.read_text())
             if mode == "exit-agent-reappears":
@@ -434,18 +485,6 @@ elif args[:2] == ["pane", "report-metadata"]:
     # Mutation success is established by the exit status; no result body is required.
 elif args[:2] == ["agent", "list"]:
     agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
-    if mode == "exit-agent-reappears":
-        # The row's agent is removed by the /exit reply above, then
-        # reappears on the settle re-check that follows _exit_agent's own
-        # verdict -- simulates a transient reappearance between snapshots.
-        count_path = Path(os.environ["FAKE_AGENT_LIST_COUNT"])
-        calls_so_far = int(count_path.read_text()) if count_path.exists() else 0
-        count_path.write_text(str(calls_so_far + 1))
-        removed_path = Path(os.environ["FAKE_REMOVED_AGENT"])
-        if calls_so_far + 1 >= 3 and removed_path.exists():
-            removed = json.loads(removed_path.read_text())
-            if not any(a["name"] == removed["name"] for a in agents):
-                agents = agents + [removed]
     # Reported only by `agent list`, so other handlers never parse them.
     agents = agents + json.loads(os.environ.get("FAKE_AGENT_LIST_EXTRA", "[]"))
     print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
@@ -605,6 +644,9 @@ class Fixture:
             "FAKE_PANES": str(self.root / "panes.json"),
             "FAKE_REMOVED_AGENT": str(self.root / "removed-agent.json"),
             "FAKE_AGENT_LIST_COUNT": str(self.root / "agent-list-count"),
+            "FAKE_PROCESS_INFO_COUNT": str(self.root / "process-info-count"),
+            "FAKE_EXIT_SEEN": str(self.root / "exit-seen"),
+            "FAKE_POST_EXIT_GETS": str(self.root / "post-exit-gets"),
             "FAKE_WORKSPACES": str(self.root / "workspaces.json"),
         }
 
@@ -664,6 +706,7 @@ class Fixture:
         self.task_file.write_text(json.dumps(task))
         if review is not None:
             (self.rd / "tasks" / "td-a.review.json").write_text(json.dumps(review))
+        self.env["FAKE_AGENT_GET_FROM_LIST"] = "1"
         Path(self.env["FAKE_AGENTS"]).write_text(json.dumps(agents))
         Path(self.env["FAKE_PANES"]).write_text(json.dumps(panes))
 
@@ -1182,6 +1225,77 @@ def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
         fx.close()
 
 
+def test_settle_exits_an_idle_implementer_whose_attempt_paused():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        fx.settle_state([impl], "in-progress",
+                        [{"name": "I", "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2")])
+        done = {k: impl[k] for k in core.ATTEMPT_FIELDS}
+        done.update(task_id="td-a", outcome="paused", ts=core.now_iso(),
+                    head_sha=head, base_sha=head, agent="I")
+        (fx.rd / "tasks" / "td-a.done.json").write_text(json.dumps(done))
+        result = fx.settle("I")
+        assert result["reason"] == "attempt-stopped" and result["status"] == "settled", result
+        assert result["agent"] == "exited" and result["pane"].startswith("kept"), result
+        assert fx.worker_records()[0]["exit_requested"] == "attempt-stopped", fx.worker_records()
+    finally:
+        fx.close()
+
+
+def _settle_pair_state(fx, head):
+    impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+    fx.settle_state([impl, rev], "changes-requested",
+                    [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                    [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                    review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+
+
+def test_settle_closes_a_pane_whose_named_agent_is_gone_while_the_list_and_pane_still_show_claude():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        _settle_pair_state(fx, head)
+        fx.env["FAKE_AGENT_GET_GONE"] = json.dumps(["R"])
+        fx.env["FAKE_HERDR_MODE"] = "process-info-claude-then-shell"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "absent", result
+        assert result["pane"] == "closed", result
+        assert not [c for c in fx.calls() if c[:3] == ["agent", "prompt", "R"]], fx.calls()
+        assert ["pane", "close", "w1:p2"] in fx.calls(), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_waits_for_a_slowly_exiting_agent_and_closes_its_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        _settle_pair_state(fx, head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-slow"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "exited", result
+        assert result["pane"] == "closed", result
+    finally:
+        fx.close()
+
+
+def test_sweep_waits_for_a_slowly_exiting_agent_and_closes_its_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        _settle_pair_state(fx, head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-slow"
+        rows = {r["launch_id"]: r for r in fx.sweep()["rows"]}
+        assert rows["R"]["status"] == "settled" and rows["R"]["agent"] == "exited", rows
+        assert rows["R"]["pane"] == "closed", rows
+        assert rows["I"]["status"] == "not-settled", rows
+    finally:
+        fx.close()
+
+
 def test_settle_exits_an_idle_ship_worker_once_its_report_exists():
     fx = Fixture()
     try:
@@ -1603,9 +1717,9 @@ def test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         # A member settle cannot place could be the row's agent: unknown, not gone.
-        assert result["agent"] == "still-live", result
+        assert result["agent"] == "exited", result
         assert result["pane"] == "kept-occupied", result
-        assert result["status"] == "exit-incomplete", result
+        assert result["status"] == "settled", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
     finally:
         fx.close()
@@ -1623,9 +1737,9 @@ def test_settle_keeps_a_pane_when_an_agent_member_lacks_a_pane_id():
                         [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        assert result["agent"] == "still-live", result
+        assert result["agent"] == "exited", result
         assert result["pane"] == "kept-occupied", result
-        assert result["status"] == "exit-incomplete", result
+        assert result["status"] == "settled", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
     finally:
         fx.close()
@@ -1698,9 +1812,9 @@ def test_settle_keeps_a_pane_when_a_malformed_agent_member_appears_before_close(
         fx.env["FAKE_HERDR_MODE"] = "process-info-malformed-appears"
         result = fx.settle("R")
         # Unknown occupancy at the last read: report the exit as incomplete.
-        assert result["agent"] == "still-live", result
+        assert result["agent"] == "absent", result
         assert result["pane"] == "kept-occupied", result
-        assert result["status"] == "exit-incomplete", result
+        assert result["status"] == "settled", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
     finally:
         fx.close()
@@ -3036,6 +3150,39 @@ def test_presentation_failure_is_reported_after_successful_launch():
         assert "presentation_unsupported" in result["presentation"]["reason"], result
     finally:
         fixture.close()
+
+
+def test_launch_waits_for_a_fresh_panes_shell_before_validating():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "shell-starting"
+        result = fx.launch()
+        assert result["status"] == "launched", result
+        calls = fx.calls()
+        first_run = next(i for i, c in enumerate(calls) if c[:2] == ["pane", "run"])
+        reads = [c for c in calls[:first_run] if c[:2] == ["pane", "process-info"]]
+        assert len(reads) == 3, calls
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_a_pane_that_never_reaches_its_shell_after_the_bounded_wait():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "process-info-foreground-busy"
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == herdr_dispatch_cli.NOT_AT_SHELL, exc
+        else:
+            raise AssertionError("launch accepted a pane that is never at its shell")
+        calls = fx.calls()
+        reads = [c for c in calls if c[:2] == ["pane", "process-info"]]
+        assert len(reads) == herdr_dispatch.SHELL_READY_POLLS, calls
+        assert not [c for c in calls if c[:2] == ["pane", "run"]], calls
+        assert fx.worker_records() == [], fx.worker_records()
+    finally:
+        fx.close()
 
 
 def test_launch_requires_managed_herdr_environment():
@@ -4554,6 +4701,8 @@ for name, test in (
     ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
     ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
+    ("launch waits for a fresh pane's shell before validating", test_launch_waits_for_a_fresh_panes_shell_before_validating),
+    ("launch refuses a pane that never reaches its shell after the bounded wait", test_launch_refuses_a_pane_that_never_reaches_its_shell_after_the_bounded_wait),
     ("pane prep waits out a slow shell before sourcing the prep", test_pane_prep_waits_out_a_slow_shell),
     ("pane prep that never sees a prompt records launch_failed with its cause", test_pane_prep_dead_shell_records_launch_failed_with_cause),
     ("pane run lines stay under MAX_CANON and the prep script is removed", test_pane_run_lines_stay_under_max_canon_and_script_is_removed),
@@ -4562,6 +4711,10 @@ for name, test in (
     ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
     ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
+    ("settle exits an idle implementer whose attempt paused", test_settle_exits_an_idle_implementer_whose_attempt_paused),
+    ("settle closes a pane whose named agent is gone while the list and pane still show claude", test_settle_closes_a_pane_whose_named_agent_is_gone_while_the_list_and_pane_still_show_claude),
+    ("settle waits for a slowly exiting agent and closes its pane", test_settle_waits_for_a_slowly_exiting_agent_and_closes_its_pane),
+    ("sweep waits for a slowly exiting agent and closes its pane", test_sweep_waits_for_a_slowly_exiting_agent_and_closes_its_pane),
     ("settle exits an idle ship worker once its report exists", test_settle_exits_an_idle_ship_worker_once_its_report_exists),
     ("settle leaves a ship worker without a report", test_settle_leaves_a_ship_worker_without_a_report),
     ("settle exits an idle ship agent once its handoff is recorded", test_settle_exits_an_idle_ship_agent_once_its_handoff_is_recorded),

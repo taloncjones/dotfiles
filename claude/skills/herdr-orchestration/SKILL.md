@@ -795,7 +795,8 @@ and `rollover-due ...` (section 1a).
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
 recorded or retired; ship handoff recorded (`handoff-recorded`);
-implementer approved; superseded; failed launch; or terminal task. It names housekeeping, not a status transition, and ranks
+implementer approved; plan or implement attempt paused or failed
+(`attempt-stopped`); superseded; failed launch; or terminal task. It names housekeeping, not a status transition, and ranks
 after every other action.
 
 Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
@@ -811,10 +812,11 @@ After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
 or `timeout`) and the agent is still live, settle reads the pane and sends
 agent-bound keys only when Claude Code's background-work exit menu is
 actually showing. When `/exit` returns `agent_not_running` (the agent left
-the pane during the wait) or `agent_not_found`, settle re-reads the agent
-list once: the agent counts as exited if herdr no longer lists it and stays
-live otherwise; settle never reads the pane or sends keys after these
-codes.
+the pane during the wait) or `agent_not_found`, settle skips the menu read.
+Either way settle polls `herdr agent get <agent>` for up to about 10 seconds
+and reports `exited` once herdr returns `agent_not_found`; the row's agent is
+never judged by `agent list`. Before closing, settle waits up to about 10
+seconds for the pane's foreground to return to its shell.
 The director never runs `launch` while a `settle` or `sweep` for the same
 workspace is in flight, and starts neither during a launch: both read the
 pane and row set the other changes. After a `sweep` fails or is killed,
@@ -1683,7 +1685,9 @@ blocks that dispatch rather than silently falling back.
 Use `herdr_dispatch.py launch` with the existing shell pane/workspace,
 canonical repo path, task, session/fence, phase, unique agent name, resolved
 route JSON, sandbox, and prompt file. Read its `--help` for the exact current
-flags. The adapter owns argv quoting, environment binding, attempt reservation,
+flags. Launch waits up to about 5 seconds for a fresh pane's shell before
+refusing with `designated pane is not at an interactive shell`. The adapter
+owns argv quoting, environment binding, attempt reservation,
 readiness inspection, and presentation updates. It never creates a worktree
 or chooses a different account for the caller.
 
