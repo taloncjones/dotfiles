@@ -311,10 +311,12 @@ or `timeout`) and the agent is still live, settle reads the pane and sends
 agent-bound keys only when Claude Code's background-work exit menu is
 actually showing. When `/exit` returns `agent_not_running` (the agent left
 the pane during the wait) or `agent_not_found`, settle skips the menu read.
-Either way settle polls `herdr agent get <agent>` for up to about 10 seconds
-and reports `exited` once herdr returns `agent_not_found`; the row's agent is
-never judged by `agent list`. Before closing, settle waits up to about 10
-seconds for the pane's foreground to return to its shell.
+Either way settle polls `herdr agent get <agent>` and reports `exited` once
+herdr returns `agent_not_found` or reports the agent in another pane; the
+row's agent is never judged by `agent list`. Before closing, settle waits
+for the pane's foreground to return to its shell. Each of these waits polls
+for up to about 10 seconds and ends within about 20 seconds when herdr is
+slow to answer.
 The director never runs `launch` while a `settle` or `sweep` for the same
 workspace is in flight, and starts neither during a launch: both read the
 pane and row set the other changes. After a `sweep` fails or is killed,

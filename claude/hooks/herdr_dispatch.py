@@ -46,6 +46,9 @@ PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
 SETTLE_POLLS = 20
 SETTLE_POLL_SECS = 0.5
+# Wall-clock cap per wait, so a herdr call timing out (10 s each) cannot
+# stretch one wait to SETTLE_POLLS timeouts.
+SETTLE_WAIT_SECS = 10
 # bin/op-env: a project's 1Password-resolved credentials for Claude panes.
 OP_ENV = Path(__file__).resolve().parents[2] / "bin" / "op-env"
 # Ready wait for a pane that resolves op-env: its 20 s op bound plus startup.
@@ -1603,11 +1606,13 @@ def _row_agent(herdr_cli, row, env):
 
 
 def _poll(check):
+    deadline = time.monotonic() + SETTLE_WAIT_SECS
     for attempt in range(SETTLE_POLLS):
         if check():
             return True
-        if attempt < SETTLE_POLLS - 1:
-            time.sleep(SETTLE_POLL_SECS)
+        if attempt == SETTLE_POLLS - 1 or time.monotonic() >= deadline:
+            return False
+        time.sleep(SETTLE_POLL_SECS)
     return False
 
 

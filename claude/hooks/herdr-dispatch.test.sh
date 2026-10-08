@@ -1590,6 +1590,33 @@ def test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit(
         fx.close()
 
 
+def test_settle_poll_stops_at_its_wall_clock_budget():
+    saved = herdr_dispatch.SETTLE_WAIT_SECS
+    calls = []
+
+    def slow_never():
+        calls.append(1)
+        time.sleep(0.1)
+        return False
+
+    try:
+        herdr_dispatch.SETTLE_WAIT_SECS = 0.2
+        start = time.monotonic()
+        assert herdr_dispatch._poll(slow_never) is False
+        elapsed = time.monotonic() - start
+        assert len(calls) < herdr_dispatch.SETTLE_POLLS, len(calls)
+        assert elapsed < 1.0, elapsed
+        herdr_dispatch.SETTLE_WAIT_SECS = 60
+        calls.clear()
+        assert herdr_dispatch._poll(lambda: calls.append(1) or len(calls) == 3) is True
+        assert len(calls) == 3, calls
+        calls.clear()
+        assert herdr_dispatch._poll(lambda: calls.append(1) and False) is False
+        assert len(calls) == herdr_dispatch.SETTLE_POLLS, calls
+    finally:
+        herdr_dispatch.SETTLE_WAIT_SECS = saved
+
+
 def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited():
     fx = Fixture()
     try:
@@ -4728,6 +4755,7 @@ for name, test in (
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
+    ("settle poll stops at its wall-clock budget", test_settle_poll_stops_at_its_wall_clock_budget),
     ("settle keeps a pane when the agent reappears after exit reports exited", test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited),
     ("settle closes a pane when exit reports agent_not_running", test_settle_closes_a_pane_when_exit_reports_agent_not_running),
     ("settle closes a pane when exit reports agent_not_found", test_settle_closes_a_pane_when_exit_reports_agent_not_found),
