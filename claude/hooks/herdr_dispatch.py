@@ -1945,6 +1945,118 @@ def accept_review(*, repo_slug, repo_path, runtime, task_id, session, fence,
             "dirty": "no" if porcelain == "" else "yes", "lessons": lessons, "settle": results}
 
 
+CONTRACT_NOT_IGNORED = ("contract is not ignored: run update to link ~/.gitignore_global, "
+                        "or add claude/contracts/ to the repository's ignore rules")
+
+
+def _git_ok(worktree, *args, env):
+    return subprocess.run(["git", "-C", worktree, *args], capture_output=True,
+                          env=env, check=False).returncode == 0
+
+
+def advance(*, repo_slug, repo_path, runtime, task_id, session, fence, focus_file=None,
+            personal=False, herdr_cli="herdr", env=None):
+    """Advance a confirmed plan to its implement launch (references/phase-advance.md)."""
+    if not core.valid_task_id(task_id):
+        raise DispatchError("invalid task identity")
+    child_env, _repository, _scope, rd = _repo_context(
+        repo_slug, repo_path, runtime, personal, env, "advance")
+    ctx = {"repo_slug": repo_slug, "repo_path": str(repo_path), "runtime": runtime,
+           "personal": personal, "env": child_env}
+    fenced = ("--session", session, "--fence", str(fence))
+    task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    done = _sidecar(rd, task_id, ".done.json") or {}
+    worktree = task.get("worktree") or ""
+    head = core._git(worktree, "rev-parse", "HEAD")
+    if not head:
+        raise DispatchError("cannot read the task worktree HEAD")
+    plan_row = _last_row(task, "plan")
+    if plan_row is None:
+        raise DispatchError("no plan row to advance")
+    ws, pane = plan_row.get("workspace_id") or "", plan_row.get("pane_id") or ""
+    confirmed = _core_run("confirm-plan", "--task-id", task_id, "--workspace", ws,
+                          "--head-sha", head, ctx=ctx)
+    if confirmed.returncode != 0:
+        workers = task.get("workers", [])
+        later = workers[workers.index(plan_row) + 1:]
+        hint = ("; an implement row follows this plan attempt; relaunch by hand "
+                "(references/phase-advance.md)"
+                if any(isinstance(w, dict) and w.get("phase") == "implement" for w in later) else "")
+        raise DispatchError("confirm-plan refused" + hint)
+    porcelain = core._git(worktree, "status", "--porcelain")
+    if porcelain is None or porcelain:
+        raise DispatchError("worktree is dirty")
+    rel = task.get("contract_path") or f"claude/contracts/{task_id}-contract.json"
+    warnings = []
+    if task.get("contract_sha256"):
+        pin = _core_ok("verify-contract", "--task-id", task_id, "--worktree", worktree,
+                       "--validate-only", ctx=ctx).strip()
+    else:
+        if _git_ok(worktree, "ls-files", "--error-unmatch", "--", rel, env=child_env):
+            warnings.append("legacy tracked contract; untrack it with git rm --cached "
+                            "before the branch ships")
+        elif not (Path(worktree) / rel).is_file():
+            raise DispatchError(f"contract missing: {rel}")
+        elif not _git_ok(worktree, "check-ignore", "-q", "--", rel, env=child_env):
+            raise DispatchError(CONTRACT_NOT_IGNORED)
+        pin = _core_ok("verify-contract", "--task-id", task_id, "--worktree", worktree,
+                       "--contract", rel, "--allow-unpinned", "--validate-only", ctx=ctx).strip()
+    routes = core.read_config(rd).get("routes", {})
+    route = agent_runtime.resolve_route(runtime, agent_runtime.role_for_step("implement"),
+                                        "normal", {"routes": routes, "provisional": True})
+    if not route.get("ready"):
+        raise DispatchError("implement route is not ready")
+    source = f"pane {pane} (plan)"
+    try:
+        text = _run_herdr(herdr_cli, ["pane", "read", pane, "--source", "recent-unwrapped",
+                                      "--lines", "200"], env=child_env, json_result=False)
+    except DispatchError:
+        text, source = "", f"pane {pane} unreadable (plan)"
+    harvested = json.loads(_core_ok("append-lessons", "--task-id", task_id, "--phase", "plan",
+                                    "--source", source, *fenced, ctx=ctx, stdin=text))
+    lessons = {"source": source, "lines": harvested["lines"], "appended": harvested["appended"]}
+    record = {**task, "plan_artifacts": task.get("plan_artifacts") or done.get("plan_artifacts"),
+              "contract_path": rel, "contract_sha256": pin,
+              "note": "plan confirmed; implement launch pending"}
+
+    def incomplete(step, detail):
+        return {"status": "incomplete", "step": step, "detail": str(detail)[:200],
+                "task_id": task_id, "lessons": lessons, "warnings": warnings}
+
+    ok, detail = _core_step("write-task", "--task-id", task_id, "--present", *fenced,
+                            "--json", json.dumps(record), ctx=ctx)
+    if not ok:
+        return incomplete("write-task", detail)
+    focus = ["--focus-file", str(focus_file)] if focus_file else []
+    ok, rendered = _core_step("render-brief", "--task-id", task_id, "--phase", "implement",
+                              *focus, ctx=ctx)
+    if not ok:
+        return incomplete("render-brief", rendered)
+    brief = json.loads(rendered)
+    try:
+        settled = settle(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                         workspace_id=ws, launch_id=plan_row.get("launch_id"), cwd=worktree,
+                         runtime=runtime, herdr_cli=herdr_cli, env=child_env, personal=personal)
+    except DispatchError as exc:
+        return incomplete("settle", exc)
+    if settled.get("status") != "settled":
+        return incomplete("settle", settled.get("status"))
+    try:
+        launched = launch(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                          workspace_id=ws, pane_id=pane, phase="implement", agent=brief["agent"],
+                          route=route, cwd=worktree, sandbox="workspace-write",
+                          prompt=core.read_payload_text(Path(brief["brief_path"])),
+                          herdr_cli=herdr_cli, env=child_env, personal=personal)
+    except DispatchError as exc:
+        return incomplete("launch", exc)
+    if launched.get("status") != "launched":
+        return incomplete("launch", launched.get("status"))
+    return {"status": "advanced", "task_id": task_id, "launch_id": launched.get("launch_id"),
+            "agent": brief["agent"], "brief_path": brief["brief_path"],
+            "contract_sha256": pin, "lessons": lessons, "warnings": warnings}
+
+
+
 def runtime_main(argv: list[str] | None = None) -> int:
     from herdr_dispatch_cli import runtime_main as cli_runtime_main
 
