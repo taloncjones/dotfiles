@@ -439,6 +439,24 @@ printf 'keep\n' >"$REPO2/.op.env.bak"
 out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op --rotate leaves a foreign .op.env.* file alone" '[ "$(cat "$REPO2/.op.env.bak")" = keep ]'
 rm -f "$REPO2/.op.env.bak"
+REPO5="$HOME/Git/personal/proj5"
+git init -q "$REPO5"
+printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\nOP_ENV_ALLOW=EVIL_NAME\n' "$FIXTURE_TOKEN" >"$TMP/planted.env"
+chmod 600 "$TMP/planted.env"
+ln -s "$TMP/planted.env" "$REPO5/op.env"
+planted_before="$(cksum <"$TMP/planted.env")"
+out="$(cd "$REPO5" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"; rc=$?
+check "setup-op --rotate replaces a symlinked op.env without keeping its lines" '[ "$rc" = 0 ] && [ ! -L "$REPO5/op.env" ] && grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$NEWTOKEN" "$REPO5/op.env" && ! grep -q "OP_ENV_ALLOW" "$REPO5/op.env" && [ "$(cksum <"$TMP/planted.env")" = "$planted_before" ]'
+rm -f "$REPO5/op.env"
+printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\nOP_ENV_ALLOW=EVIL_NAME\n' "$FIXTURE_TOKEN" >"$REPO5/op.env"
+chmod 644 "$REPO5/op.env"
+out="$(cd "$REPO5" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"; rc=$?
+check "setup-op --rotate does not keep lines from a mode-644 op.env" '[ "$rc" = 0 ] && ! grep -q "OP_ENV_ALLOW" "$REPO5/op.env" && [ "$(stat -c %a "$REPO5/op.env" 2>/dev/null || stat -f %Lp "$REPO5/op.env")" = 600 ]'
+printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$FIXTURE_TOKEN" >"$REPO5/op.env"
+chmod 644 "$REPO5/op.env"
+before="$(cksum <"$REPO5/op.env")"
+out="$(cd "$REPO5" && "$SETUP" --signing-key op://V/sign </dev/null 2>&1)"; rc=$?
+check "setup-op --signing-key refuses a mode-644 op.env and leaves it" '[ "$rc" != 0 ] && [ "$(cksum <"$REPO5/op.env")" = "$before" ] && printf "%s" "$out" | grep -q "mode is 644"'
 REPO3="$HOME/Git/personal/proj3"
 git init -q "$REPO3"
 printf '%s\n' "$FIXTURE_TOKEN" | (cd "$REPO3" && "$SETUP" >/dev/null 2>&1)
