@@ -1706,17 +1706,18 @@ python3 claude/hooks/herdr_legacy_fixture.py watch --repo-slug "$S" \
 SH
 
 check "SKILL.md pins the every-probe sample capture and the safe-mode probe line" <<'SH'
-SKILL="claude/skills/herdr-orchestration/SKILL.md"
+SKILL="claude/skills/herdr-orchestration/references/legacy-wrappers.md"
+MAIN="claude/skills/herdr-orchestration/SKILL.md"
 rg -q -F 'probe-samples.jsonl' "$SKILL"
 rg -q -F 'diagnostic sample for every probe, whatever `CLS` is' "$SKILL"
 ind=$(grep -n -F -- '- `indeterminate` (no `claude`' "$SKILL" | head -1 | cut -d: -f1)
 app=$(grep -n -F -- '- After the map is written or the launches are aborted, append a' "$SKILL" | head -1 | cut -d: -f1)
 [ -n "$ind" ] && [ -n "$app" ] && [ "$app" -gt "$ind" ]
-! rg -q -F 'If `CLS` is not `available`' "$SKILL"
+! rg -q -F 'If `CLS` is not `available`' "$SKILL" "$MAIN"
 rg -q -F '|| true`' "$SKILL"
 rg -q -F -- "PROBE_JSON=\"\$(claude --model fable --safe-mode --max-turns 1 -p 'Reply with the single word: ok' --output-format json </dev/null)\"" "$SKILL"
-! rg -q -F 'claude --model fable -p' "$SKILL"
-! rg -q 'PROBE_JSON=.*(mktemp|cd )' "$SKILL"
+! rg -q -F 'claude --model fable -p' "$SKILL" "$MAIN"
+! rg -q 'PROBE_JSON=.*(mktemp|cd )' "$SKILL" "$MAIN"
 SH
 
 check "validate_messaging_socket: canonical dirs, pid basename, /private alias, rejects" <<PY
@@ -2905,16 +2906,16 @@ SH
 
 check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
-grep -q '| Mechanical worker (`mech`)' "$S"
-grep -Fq -- 'route --runtime <claude|codex> --role mechanical --risk normal' "$S"
-grep -q 'Legacy Claude wrapper' "$S"
-grep -q 'run-mech --repo-slug' "$S"
-grep -q '"haiku":true' "$S"                                  # probe writes the fourth alias
-grep -q 'mech-caps --repo-slug' "$S"
-grep -q 'mech-contract --repo-slug' "$S"
-grep -q 'Launch base' "$S"                                   # base_sha = post-contract HEAD
-grep -q 'wrapper lost' "$S"                                  # mech liveness table
-grep -q '_totals' "$S"
+grep -q '| Mechanical worker (`mech`)' "$R/legacy-wrappers.md"
+grep -Fq -- 'route --runtime <claude|codex> --role mechanical --risk normal' "$R/kickoff.md"
+grep -q 'Legacy Claude wrapper' "$R/legacy-wrappers.md"
+grep -q 'run-mech --repo-slug' "$R/legacy-wrappers.md"
+grep -q '"haiku":true' "$R/legacy-wrappers.md"                                  # probe writes the fourth alias
+grep -q 'mech-caps --repo-slug' "$R/kickoff.md"
+grep -q 'mech-contract --repo-slug' "$R/kickoff.md"
+grep -q 'Launch base' "$R/kickoff.md"                                   # base_sha = post-contract HEAD
+grep -q 'wrapper lost' "$R/legacy-wrappers.md"                                  # mech liveness table
+grep -q '_totals' "$R/legacy-wrappers.md"
 grep -q '"mech": {' "$R/state-layout.md"
 grep -q '\.spend\.jsonl' "$R/state-layout.md"
 grep -q '"haiku": true' "$R/state-layout.md"
@@ -2926,28 +2927,28 @@ SH
 
 check "docs pin effort routing, banner verb, deep think, and Workflow routing" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
-grep -q 'routing-table --repo-slug' "$S"                     # one snapshot per dispatch
-grep -q 'One snapshot per dispatch' "$S"
-grep -q -- '--effort \$EFFORT' "$S"                          # launch line
-grep -q 'classify-banner --model' "$S"
+grep -q 'routing-table --repo-slug' "$R/dispatch-adapter.md" "$R/legacy-wrappers.md"                     # one snapshot per dispatch
+grep -q 'One snapshot per dispatch' "$R/dispatch-adapter.md"
+grep -q -- '--effort \$EFFORT' "$R/legacy-wrappers.md"                          # launch line
+grep -q 'classify-banner --model' "$R/dispatch-adapter.md"
 grep -q 'effort-mismatch' "$S"
-grep -q 'not availability data' "$S"                         # never disable-model on effort-mismatch
-grep -q 'Deep-think escalation' "$S"
-grep -q 'run-think --repo-slug' "$S"
-grep -q 'think-caps --repo-slug' "$S"
-for t in 'Ambiguous triage' 'Milestone/epic decomposition' 'Novel incident' 'Not eligible'; do grep -q "$t" "$S"; done
-grep -q 'one live escalation per repo' "$S"
-grep -q 'daily_budget_usd' "$S"
-grep -q 'escalation deferred' "$S"
-grep -q '_think' "$S"
-grep -q 'Workflow' "$S" && grep -q 'in-turn helper work' "$S"
-grep -q 'Precedence with the user' "$S"
+grep -q 'not availability data' "$R/dispatch-adapter.md"                         # never disable-model on effort-mismatch
+grep -q 'Deep-think escalation' "$R/legacy-wrappers.md" "$R/triage.md"
+grep -q 'run-think --repo-slug' "$R/legacy-wrappers.md"
+grep -q 'think-caps --repo-slug' "$R/legacy-wrappers.md"
+for t in 'Ambiguous triage' 'Milestone/epic decomposition' 'Novel incident' 'Not eligible'; do grep -q "$t" "$R/legacy-wrappers.md" "$R/triage.md"; done
+grep -q 'one live escalation per repo' "$R/legacy-wrappers.md"
+grep -q 'daily_budget_usd' "$R/legacy-wrappers.md"
+grep -q 'escalation deferred' "$R/legacy-wrappers.md" "$R/triage.md"
+grep -q '_think' "$R/legacy-wrappers.md"
+grep -q 'Workflow' "$S" && grep -q 'in-turn helper work' "$R/workflow-routing.md"
+grep -q 'Precedence with the user' "$R/workflow-routing.md"
 grep -q 'route --step implementation-review' "$S"
 grep -q -- '--provisional' "$S"
 grep -q 'review-change' "$S"
 grep -q 'task-local readiness' "$S"
-grep -q 'sized review deadline' "$S"
-! grep -q '600_000_000_000' "$S"
+grep -q 'sized review deadline' "$R/review-dispatch-details.md"
+! grep -q '600_000_000_000' "$S" "$R/review-dispatch-details.md"
 grep -q 'outcome: changes-requested' "$S"
 grep -q 'outcome: approved' "$S"
 grep -q 'Workflow opt-in: granted by the user' "$R/brief-template.md"
@@ -3348,8 +3349,8 @@ PY
 
 check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
-if grep -q 'The director never merges, pushes, or opens a PR' "$S"; then exit 1; fi
-if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S"; then exit 1; fi
+if grep -q 'The director never merges, pushes, or opens a PR' "$S" "$R/director-launch.md"; then exit 1; fi
+if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S" "$R/director-launch.md"; then exit 1; fi
 grep -q '^## 6a\. Director merge (personal repositories)' "$S"
 grep -Fq 'merge-authority --repo-slug' "$S"
 grep -Fq 'merge-ready --repo-slug' "$S"
@@ -3373,9 +3374,9 @@ grep -Fq 'merge-refused' "$S"
 grep -Fq 'base-conflict' "$S"
 grep -Fq 'changes-requested' "$S"
 grep -Fq 'Workers never carry merge authority' "$S"
-grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$S"
-grep -Fq 'Bash(gh pr:*)' "$S"
-grep -Fq 'accepted prompt' "$S"
+grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$R/director-launch.md"
+grep -Fq 'Bash(gh pr:*)' "$R/director-launch.md"
+grep -Fq 'accepted prompt' "$R/director-launch.md"
 grep -Fq 'ship_launch_id' "$R/state-layout.md"
 grep -Fq 'teardown_blocked' "$R/state-layout.md"
 grep -Fq '"merge_commit_sha"' "$R/state-layout.md"
@@ -3391,25 +3392,25 @@ grep -Fq 'CHANGES, INCOMPLETE' "$R/brief-template.md"
 SH
 
 check "docs pin the carry-forward proof for merge-main-only heads" <<'SH'
-S="claude/skills/herdr-orchestration/SKILL.md"
-if grep -Fq 'rev-list --no-merges <reviewed_head>..HEAD' "$S"; then exit 1; fi
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+if grep -Fq 'rev-list --no-merges <reviewed_head>..HEAD' "$S" "$R/ship-carry-forward.md"; then exit 1; fi
 grep -Fq 'GATE_REPORT="$SKILL_DIR/../co-review/scripts/gate_report.py"' "$S"
-grep -Fq '"$GATE_REPORT" carry-forward --repo <worktree>' "$S"
-grep -Fq -- '--report-sha256 <report_sha256> --expected-sha256 <expected_sha256>' "$S"
-grep -Fq 'never dispatch a gate for that head' "$S"
+grep -Fq '"$GATE_REPORT" carry-forward --repo <worktree>' "$R/ship-carry-forward.md"
+grep -Fq -- '--report-sha256 <report_sha256> --expected-sha256 <expected_sha256>' "$R/ship-carry-forward.md"
+grep -Fq 'never dispatch a gate for that head' "$R/ship-carry-forward.md"
 SH
 
 check "docs pin delta dispatch, forced full, and relaunch-is-full" <<'SH'
-S="claude/skills/herdr-orchestration/SKILL.md"
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 L="claude/skills/herdr-orchestration/references/state-layout.md"
 grep -Fq 'the handoff report has `class` `delta`' "$S"
 grep -Fq '(section 6a step 0 owns it), except rule (c)' "$S"
 grep -Fq 'every such relaunch brief carries `herdr-ship-brief: tier=full`' "$S"
-grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$S"
-grep -Fq 'herdr-ship-brief: tier=delta' "$S"
-grep -Fq 'herdr-ship-prior-handoff:' "$S"
-grep -Fq 'herdr-ship-delta-head:' "$S"
-grep -Fq 'herdr-ship-delta-caps:' "$S"
+grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-brief: tier=delta' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-prior-handoff:' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-delta-head:' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-delta-caps:' "$R/ship-carry-forward.md"
 grep -Fq 'section 6 rule (c) dispatches a full gate' "$S"
 grep -Fq '"delta": {"max_files": 5, "max_lines": 150}' "$L"
 SH
@@ -3424,13 +3425,13 @@ grep -Fq 'at most 160 characters' "$R/brief-template.md"
 if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
 if grep -Eq '^[[:space:]]*LESSON:' "$R/brief-template.md"; then exit 1; fi
 grep -q '^### Lesson harvest$' "$S"
-grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$S"
-grep -Fq 'tasks/<task_id>.lessons.md' "$S"
+grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$R/lesson-harvest.md"
+grep -Fq 'tasks/<task_id>.lessons.md' "$R/lesson-harvest.md"
 grep -Fq 'skip the Lesson harvest' "$S"
-grep -Fq 'through every following indented' "$S"
-if grep -Fq 'to the end of the line' "$S"; then exit 1; fi
+grep -Fq 'through every following indented' "$R/lesson-harvest.md"
+if grep -Fq 'to the end of the line' "$S" "$R/lesson-harvest.md"; then exit 1; fi
 grep -Fq 'before the verdict or stale-reset' "$S"
-grep -Fq 'see references/state-layout.md,' "$S"
+grep -Fq 'see references/state-layout.md,' "$R/lesson-harvest.md"
 grep -Fq 'does not guarantee one physical row' "$R/brief-template.md"
 grep -Fq 'tasks/<task_id>.lessons.md' "$P"
 grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
@@ -12006,7 +12007,7 @@ def read(path):
 def section(text, start, end):
     i = text.index(start)
     return text[i:text.index(end, i + len(start))]
-herdr = read("claude/skills/herdr-orchestration/SKILL.md")
+herdr = read("claude/skills/herdr-orchestration/SKILL.md") + "\n" + read("claude/skills/herdr-orchestration/references/posting.md")
 director = read("claude/agents/director.md")
 cc = read("claude/skills/co-review/SKILL.md")
 cx = read("codex/skills/co-review/SKILL.md")
@@ -12765,11 +12766,25 @@ assert "personal_repository" in ship, "SKILL.md ship step derives merge from per
 assert "personal_repository" in layout, "state-layout derives merge from personal_repository"
 assert "back to the human for merge" not in skill, "stale hand-back text removed"
 assert "human merges; `/post-merge`" not in skill, "stale reviewed-row text removed"
-assert "In the review phase the review agent and director never push or open PRs" in skill, "review-phase scope added"
+assert "In the review phase the review agent and director never push or open PRs" in open("claude/skills/herdr-orchestration/references/review-dispatch-details.md").read(), "review-phase scope added"
 assert "human merge gate" not in open("claude/skills/herdr-orchestration/references/dispatch-mechanism.md").read(), "dispatch-mechanism stale text removed"
 assert "pr_number" in ship and "gh pr list" in ship, "ship step is re-entrant"
 assert "--repo <owner/repo>" in ship, "gh lines name the repo"
 PY
+
+check "docs: SKILL.md names every reference file and every named reference exists" <<'PY'
+import os, re
+d = "claude/skills/herdr-orchestration"
+skill = open(d + "/SKILL.md", encoding="utf-8").read()
+named = set(re.findall(r"references/([A-Za-z0-9_.-]+\.md)", skill))
+files = {f for f in os.listdir(d + "/references") if f.endswith(".md")}
+assert named == files, ("named but missing", sorted(named - files), "present but unnamed", sorted(files - named))
+PY
+
+check "docs: SKILL.md stays at or under 67000 bytes" <<'SH'
+n=$(wc -c < claude/skills/herdr-orchestration/SKILL.md)
+[ "$n" -le 67000 ]
+SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

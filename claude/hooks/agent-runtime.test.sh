@@ -307,7 +307,7 @@ def test_route_cli_rejects_repeated_config_json():
 def _extract_route_config_snippet():
     doc = (
         Path(os.environ["DOTFILES_TEST_ROOT"])
-        / "claude/skills/herdr-orchestration/SKILL.md"
+        / "claude/skills/herdr-orchestration/references/dispatch-adapter.md"
     )
     text = doc.read_text()
     for block in re.findall(r"```bash\n(.*?)```", text, re.DOTALL):
@@ -318,7 +318,7 @@ def _extract_route_config_snippet():
                 line for line in unindented
                 if not line.strip().startswith('python3 "$RUNTIME" route')
             )
-    raise AssertionError("route config snippet not found in SKILL.md")
+    raise AssertionError("route config snippet not found in references/dispatch-adapter.md")
 
 
 def test_skill_route_config_snippet_merges_difficulty():
