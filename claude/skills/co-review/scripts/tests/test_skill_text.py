@@ -553,7 +553,7 @@ class StructureLensText(unittest.TestCase):
                           "`Structure: <id>: <proposed layout>` line", flat)
 
     def test_brief_template_forbids_per_run_architecture_addendum(self):
-        section = BRIEF[BRIEF.index("## Director-authored repair and ship briefs"):]
+        section = BRIEF[BRIEF.index("## Repair and ship brief variants"):]
         flat = " ".join(section.split())
         self.assertIn("adds no architecture or lens addendum", flat)
         self.assertIn("`claude/skills/co-review/references/failure-classes.md`", flat)

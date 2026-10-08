@@ -69,6 +69,7 @@ STATE_ROOT/
       <task_id>.review.json           # review worker verdict (separate file)
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
+      <task_id>.<agent>.brief.md      # rendered worker brief (render-brief); inert text, safe to delete
       <task_id>.lessons.md            # lesson ledger, director-written, append-only (see Lesson ledger)
       orch-edits.jsonl                # tasks/orch-edits.jsonl bounded edit-marker audit
     bindings/
