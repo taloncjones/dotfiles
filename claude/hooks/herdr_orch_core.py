@@ -5075,6 +5075,50 @@ def append_decision(rd, *recs):
     append_payload(Path(rd) / DECISIONS_FILE, data.encode("utf-8"))
 
 
+LESSON_PHASES = ("plan", "implement", "repair", "review", "ship", "mech", "director")
+
+
+def harvest_lesson_lines(text, task_id, phase):
+    """Kept LESSON lines for one task and phase (references/lesson-harvest.md step 2)."""
+    tag = f"LESSON: [{task_id} {phase}]"
+    found, cur = [], None
+    for raw in text.splitlines():
+        s = raw.strip()
+        body = s[2:].lstrip() if s.startswith("- ") else s
+        if body.startswith("LESSON:"):
+            if cur:
+                found.append(cur)
+            cur = body
+        elif cur is not None and s and raw[:1] in (" ", "\t"):
+            cur += " " + s
+        else:
+            if cur:
+                found.append(cur)
+            cur = None
+    if cur:
+        found.append(cur)
+    return [f for f in found
+            if (f == tag or f.startswith(tag + " ")) and f[len(tag):].strip() != "none"]
+
+
+def append_lessons(rd, task_id, phase, source, text):
+    """Append the kept lines the ledger lacks as one batch.
+    -> (kept lines, number appended, whether the source had none)."""
+    kept = harvest_lesson_lines(text, task_id, phase)
+    path = Path(rd) / "tasks" / f"{task_id}.lessons.md"
+    try:
+        present = set(read_payload_text(path).splitlines())
+    except FileNotFoundError:
+        present = set()
+    note = f"- note: no LESSON line found ({source})"
+    new = [line for line in kept if line not in present]
+    if (kept and not new) or (not kept and note in present):
+        return kept, 0, not kept
+    body = "\n".join(new if kept else [note])
+    append_payload(path, f"## {now_iso()} {source}\n{body}\n".encode("utf-8"))
+    return kept, len(new), not kept
+
+
 def read_decisions(rd):
     """Parsed v1 dict lines in file order; bad lines are skipped, a missing
     file is an empty log, and any other read failure propagates."""
@@ -5637,6 +5681,7 @@ def _main(argv=None) -> int:
     pt.add_argument("--apply", action="store_true")
     pt.add_argument("--session", default=None)
     pt.add_argument("--fence", type=int, default=None)
+    add("append-lessons", "--task-id", "--phase", "--source", fenced=True)
     nd = add("note-decision", fenced=True)
     nd.add_argument("--text", required=True)
     scope_group = nd.add_mutually_exclusive_group(required=True)
@@ -5731,6 +5776,21 @@ def _main(argv=None) -> int:
         )
     if ns.cmd == "rollover":
         return _rollover(ns)
+    if ns.cmd == "append-lessons":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.phase in LESSON_PHASES, f"--phase must be one of {', '.join(LESSON_PHASES)}")
+        _require(ns.source.strip() and not any(ch in ns.source for ch in "\n\r\x00"),
+                 "--source must be one non-blank line")
+        text = sys.stdin.buffer.read().decode("utf-8", "replace")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd) as tx:
+            if not tx.check(ns.session, ns.fence):
+                print("owner: stale-fence")
+                return 1
+            kept, appended, note = append_lessons(rd, ns.task_id, ns.phase, ns.source, text)
+        print(json.dumps({"appended": appended, "lines": kept, "note": note}, sort_keys=True))
+        return 0
     if ns.cmd == "note-decision":
         return _note_decision(ns)
     if ns.cmd == "retire-decision":

@@ -482,6 +482,15 @@ def _dispatch_parser() -> argparse.ArgumentParser:
         sub.add_argument("--fence", required=True, type=int)
         sub.add_argument("--runtime", default="claude", choices=("claude", "codex"))
         sub.add_argument("--personal", action="store_true")
+    for verb in ("accept-review", "advance"):
+        sub = commands.add_parser(verb)
+        for flag in ("repo-slug", "repo-path", "task-id", "session"):
+            sub.add_argument(f"--{flag}", required=True)
+        sub.add_argument("--fence", required=True, type=int)
+        sub.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+        sub.add_argument("--personal", action="store_true")
+        if verb == "advance":
+            sub.add_argument("--focus-file", default=None)
     return parser
 
 
@@ -546,6 +555,14 @@ def main(argv: list[str] | None = None) -> int:
                 output = herdr_dispatch.settle(launch_id=args.launch_id, **kwargs)
             else:
                 output = herdr_dispatch.sweep(**kwargs)
+        elif args.command in ("accept-review", "advance"):
+            kwargs = dict(repo_slug=args.repo_slug, repo_path=args.repo_path,
+                          runtime=args.runtime, task_id=args.task_id, session=args.session,
+                          fence=args.fence, personal=args.personal)
+            if args.command == "advance":
+                output = herdr_dispatch.advance(focus_file=args.focus_file, **kwargs)
+            else:
+                output = herdr_dispatch.accept_review(**kwargs)
         else:
             output = herdr_dispatch.wake(
                 args.thread_id,
@@ -555,9 +572,10 @@ def main(argv: list[str] | None = None) -> int:
                 queue_validated=args.queue_validated,
             )
         print(json.dumps(output, sort_keys=True))
-        return (3 if output.get("status") in
+        unsettled = any(row.get("status") != "settled" for row in output.get("settle", []))
+        return (3 if unsettled or output.get("status") in
                 ("blocked", "unsupported", "not-settled", "busy",
-                 "occupant-unverified", "exit-incomplete") else 0)
+                 "occupant-unverified", "exit-incomplete", "incomplete") else 0)
     except (
         herdr_dispatch.DispatchError,
         OSError,

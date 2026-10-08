@@ -13,6 +13,7 @@ else
 fi
 
 "${PYTHON[@]}" - <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -4677,6 +4678,98 @@ def test_settle_label_failure_keeps_result():
         fx.close()
 
 
+def reviewed_state(fx):
+    """An approved, digest-correct review at HEAD, awaiting acceptance."""
+    head = core.repository_context(fx.repo)["head"]
+    impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+    findings = fx.rd / "artifacts" / "td-a" / "review-R" / "findings.md"
+    findings.parent.mkdir(parents=True)
+    findings.write_text("Verdict: approved\nBlocking: 0\nAdvisories: tidy names\n\n"
+                        "## Lessons\n\n- LESSON: [td-a review] keep fixtures small\n")
+    review = {**{k: rev[k] for k in core.ATTEMPT_FIELDS}, "task_id": "td-a", "outcome": "approved",
+              "blocking_count": 0, "reviewed_head_sha": head, "findings_ref": str(findings),
+              "findings_sha256": hashlib.sha256(findings.read_bytes()).hexdigest()}
+    fx.settle_state([impl, rev], "review-dispatched", [], [], review=review)
+    task = json.loads(fx.task_file.read_text())
+    task["review_head_sha"] = head
+    fx.task_file.write_text(json.dumps(task))
+    return head
+
+
+def accept(fx):
+    # The fake herdr lives at fx.root/herdr; write-task --present finds it on PATH,
+    # as core_cli(..., herdr_on_path=True) does, never a real herdr.
+    env = {**fx.env, "PATH": str(fx.root) + os.pathsep + fx.env["PATH"]}
+    return herdr_dispatch.accept_review(
+        repo_slug=fx.slug, repo_path=str(fx.repo), runtime="claude", task_id="td-a",
+        session="S", fence=1, herdr_cli=str(fx.bin), env=env)
+
+
+def test_accept_review_records_reviewed_and_settles_both_rows():
+    fx = Fixture()
+    settled = []
+    original = herdr_dispatch.settle
+    herdr_dispatch.settle = lambda **kw: settled.append(kw["launch_id"]) or {"status": "settled"}
+    try:
+        head = reviewed_state(fx)
+        out = accept(fx)
+        task = json.loads(fx.task_file.read_text())
+        assert task["status"] == "reviewed", task
+        assert task["note"] == f"review-change approved at {head[:7]} (0 blocking; advisories: tidy names)", task
+        assert settled == ["I", "R"], settled
+        assert out["status"] == "reviewed" and out["head"] == head and out["dirty"] == "no", out
+        assert out["lessons"] == {"source": "findings R", "appended": 1,
+                                  "lines": ["LESSON: [td-a review] keep fixtures small"]}, out
+        ledger = (fx.rd / "tasks" / "td-a.lessons.md").read_text()
+        assert "LESSON: [td-a review] keep fixtures small" in ledger, ledger
+        assert out["settle"] == [{"launch_id": "I", "status": "settled"},
+                                 {"launch_id": "R", "status": "settled"}], out
+    finally:
+        herdr_dispatch.settle = original
+        fx.close()
+
+
+def test_accept_review_refuses_unconfirmed_evidence_and_writes_nothing():
+    fx = Fixture()
+    try:
+        reviewed_state(fx)
+        review_file = fx.rd / "tasks" / "td-a.review.json"
+        review = json.loads(review_file.read_text())
+        review_file.write_text(json.dumps({**review, "blocking_count": 1}))
+        before = fx.task_file.read_text()
+        try:
+            accept(fx)
+        except herdr_dispatch.DispatchError as exc:
+            assert "confirm-review refused" in str(exc), exc
+        else:
+            raise AssertionError("an unconfirmed review must refuse")
+        assert fx.task_file.read_text() == before
+        assert not (fx.rd / "tasks" / "td-a.lessons.md").exists()
+    finally:
+        fx.close()
+
+
+def test_accept_review_replays_lessons_and_settle_on_a_reviewed_task():
+    fx = Fixture()
+    settled = []
+    original = herdr_dispatch.settle
+    herdr_dispatch.settle = lambda **kw: settled.append(kw["launch_id"]) or {"status": "settled"}
+    try:
+        reviewed_state(fx)
+        accept(fx)
+        task_bytes = fx.task_file.read_text()
+        ledger = (fx.rd / "tasks" / "td-a.lessons.md").read_text()
+        settled.clear()
+        out = accept(fx)
+        assert fx.task_file.read_text() == task_bytes, "replay must not rewrite the record"
+        assert (fx.rd / "tasks" / "td-a.lessons.md").read_text() == ledger
+        assert out["lessons"]["appended"] == 0 and out["lessons"]["lines"], out
+        assert settled == ["I", "R"], settled
+    finally:
+        herdr_dispatch.settle = original
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -4850,6 +4943,9 @@ for name, test in (
     ("bound launch skips the label", test_bound_launch_skips_label),
     ("ship settle relabels merge-ready", test_ship_settle_relabels_merge_ready),
     ("settle label failure keeps the settle result", test_settle_label_failure_keeps_result),
+    ("accept-review records reviewed and settles both rows", test_accept_review_records_reviewed_and_settles_both_rows),
+    ("accept-review refuses unconfirmed evidence and writes nothing", test_accept_review_refuses_unconfirmed_evidence_and_writes_nothing),
+    ("accept-review replays lessons and settle on a reviewed task", test_accept_review_replays_lessons_and_settle_on_a_reviewed_task),
 ):
     check(name, test)
 

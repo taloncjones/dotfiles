@@ -1530,9 +1530,8 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
             "observation": REPROMPT_OBSERVATION}
 
 
-def _settle_context(repo_slug, task_id, workspace_id, cwd, runtime, personal, env, verb):
-    if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
-        raise DispatchError("invalid task or workspace identity")
+def _repo_context(repo_slug, cwd, runtime, personal, env, verb):
+    """(child_env, repository, scope, rd) for a director-scope adapter verb."""
     if runtime not in ("claude", "codex"):
         raise DispatchError("route runtime is unsupported")
     child_env = dict(os.environ if env is None else env)
@@ -1545,6 +1544,12 @@ def _settle_context(repo_slug, task_id, workspace_id, cwd, runtime, personal, en
     if repo_slug != _expected_slug(repository, cwd):
         raise DispatchError("repo slug does not match repository context")
     return child_env, repository, scope, _payload_repo_dir(scope, repo_slug)
+
+
+def _settle_context(repo_slug, task_id, workspace_id, cwd, runtime, personal, env, verb):
+    if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
+        raise DispatchError("invalid task or workspace identity")
+    return _repo_context(repo_slug, cwd, runtime, personal, env, verb)
 
 
 def _sidecar(rd: Path, task_id: str, suffix: str) -> dict[str, Any] | None:
@@ -1841,6 +1846,103 @@ def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
             return {"status": "swept", "rows": rows}
     except (OSError, ValueError) as exc:
         raise DispatchError(f"sweep could not hold the owner fence: {exc}") from exc
+
+
+def _core_run(verb, *args, ctx, stdin=None):
+    """One core CLI call at director scope; the CompletedProcess."""
+    argv = [sys.executable, str(Path(core.__file__).resolve()), verb,
+            "--repo-slug", ctx["repo_slug"], "--repo-path", ctx["repo_path"],
+            "--runtime", ctx["runtime"], *(["--personal"] if ctx["personal"] else []), *args]
+    try:
+        return subprocess.run(argv, input=stdin, capture_output=True, text=True, check=False,
+                              timeout=CORE_CALL_TIMEOUT_SECS, env=ctx["env"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DispatchError(f"core {verb} failed: {type(exc).__name__}") from exc
+
+
+def _core_ok(verb, *args, ctx, stdin=None):
+    """stdout of a core call that must succeed, else DispatchError naming it."""
+    process = _core_run(verb, *args, ctx=ctx, stdin=stdin)
+    if process.returncode != 0:
+        reason = (process.stderr.strip() or process.stdout.strip() or "no reason given").splitlines()[0]
+        raise DispatchError(f"{verb} refused: {reason[:200]}")
+    return process.stdout
+
+
+def _core_step(verb, *args, ctx, stdin=None):
+    """(ok, stdout or reason) for a core call after the verb's first write.
+    Never raises: a failure here is reported as incomplete, not refused."""
+    try:
+        process = _core_run(verb, *args, ctx=ctx, stdin=stdin)
+    except DispatchError as exc:
+        return False, f"{exc} (outcome unknown; re-run to replay)"
+    if process.returncode != 0:
+        return False, (process.stderr.strip() or process.stdout.strip() or "no reason given").splitlines()[0][:200]
+    return True, process.stdout
+
+
+def _last_row(task, phase):
+    rows = [w for w in task.get("workers", []) if isinstance(w, dict) and w.get("phase") == phase]
+    return rows[-1] if rows else None
+
+
+def accept_review(*, repo_slug, repo_path, runtime, task_id, session, fence,
+                  personal=False, herdr_cli="herdr", env=None):
+    """Record an approved review as reviewed, file its lessons, and settle the
+    implementer and reviewer (SKILL.md section 5 step 6, approved branch)."""
+    if not core.valid_task_id(task_id):
+        raise DispatchError("invalid task identity")
+    child_env, _repository, _scope, rd = _repo_context(
+        repo_slug, repo_path, runtime, personal, env, "accept-review")
+    ctx = {"repo_slug": repo_slug, "repo_path": str(repo_path), "runtime": runtime,
+           "personal": personal, "env": child_env}
+    fenced = ("--session", session, "--fence", str(fence))
+    task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    worktree = task.get("worktree") or ""
+    head = core._git(worktree, "rev-parse", "HEAD")
+    if not head:
+        raise DispatchError("cannot read the task worktree HEAD")
+    review_row, impl_row = _last_row(task, "review"), _last_row(task, "implement")
+    if review_row is None:
+        raise DispatchError("no review row to accept")
+    replay = task.get("status") == "reviewed"
+    if not replay:
+        _core_ok("confirm-review", "--task-id", task_id, "--workspace",
+                 review_row.get("workspace_id") or "", "--head-sha", head, ctx=ctx)
+    review = _sidecar(rd, task_id, ".review.json") or {}
+    try:
+        text = core.read_payload_text(Path(review.get("findings_ref") or ""))
+    except (OSError, ValueError):
+        text = ""
+    source = f"findings {review_row.get('launch_id')}"
+    harvested = json.loads(_core_ok("append-lessons", "--task-id", task_id, "--phase", "review",
+                                    "--source", source, *fenced, ctx=ctx, stdin=text))
+    lessons = {"source": source, "lines": harvested["lines"], "appended": harvested["appended"]}
+    if not replay:
+        summary = core.findings_summary(text.encode("utf-8")) or {}
+        note = (f"review-change approved at {head[:7]} (0 blocking; "
+                f"advisories: {summary.get('advisories', 'unknown')})")
+        ok, detail = _core_step("write-task", "--task-id", task_id, "--present", *fenced,
+                                "--json", json.dumps({**task, "status": "reviewed", "note": note}),
+                                ctx=ctx)
+        if not ok:
+            return {"status": "incomplete", "step": "write-task", "detail": detail,
+                    "task_id": task_id, "head": head, "settle": [], "lessons": lessons}
+    results = []
+    for row in (impl_row, review_row):
+        if row is None:
+            continue
+        try:
+            status = settle(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                            workspace_id=row.get("workspace_id"), launch_id=row.get("launch_id"),
+                            cwd=worktree, runtime=runtime, herdr_cli=herdr_cli, env=child_env,
+                            personal=personal).get("status")
+        except DispatchError as exc:
+            status = f"error: {exc}"[:200]
+        results.append({"launch_id": row.get("launch_id"), "status": status})
+    porcelain = core._git(worktree, "--no-optional-locks", "status", "--porcelain")
+    return {"status": "reviewed", "task_id": task_id, "head": head,
+            "dirty": "no" if porcelain == "" else "yes", "lessons": lessons, "settle": results}
 
 
 def runtime_main(argv: list[str] | None = None) -> int:

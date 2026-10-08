@@ -12748,6 +12748,56 @@ assert subprocess.run(base + ["--runtime", "claude"], capture_output=True).retur
 assert subprocess.run(base + ["--repo-path", repo], capture_output=True).returncode == 2
 PY
 
+check "append-lessons: appends new tagged lines once" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'noise\nLESSON: [td-a plan] first lesson\nLESSON: [td-a plan] none\nLESSON: [td-ab plan] other task\nLESSON: [td-a review] other phase\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"appended": 1, "lines": ["LESSON: [td-a plan] first lesson"], "note": False}, d'
+test "$(grep -c '^## .* pane w1:p1 (plan)$' "$RD/tasks/td-a.lessons.md")" = 1
+grep -qx 'LESSON: \[td-a plan\] first lesson' "$RD/tasks/td-a.lessons.md"
+before=$(cat "$RD/tasks/td-a.lessons.md")
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["appended"] == 0 and d["lines"] == ["LESSON: [td-a plan] first lesson"], d'
+test "$(cat "$RD/tasks/td-a.lessons.md")" = "$before"
+SH
+
+check "append-lessons: joins wrapped rows and drops none" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+mkdir -p "$root/herdr-orch/slug-x/tasks"
+printf 'LESSON: [td-a review] wrapped\n   continuation row\n\nLESSON: [td-a review]   none\n- LESSON: [td-a review] bullet form\nafter\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase review --source "findings L1" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["lines"] == ["LESSON: [td-a review] wrapped continuation row", "LESSON: [td-a review] bullet form"] and d["appended"] == 2, d'
+SH
+
+check "append-lessons: notes an empty source once" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'nothing tagged here\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"appended": 0, "lines": [], "note": True}, d'
+$CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src" >/dev/null
+test "$(grep -cx -- '- note: no LESSON line found (pane w1:p1 (plan))' "$RD/tasks/td-a.lessons.md")" = 1
+test "$(grep -c '^## ' "$RD/tasks/td-a.lessons.md")" = 1
+SH
+
+check "append-lessons: stale fence writes nothing" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+$CLI claim-owner --repo-slug slug-x --session S --host h --pid 1 >/dev/null
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'LESSON: [td-a plan] x\n' > "$root/src"
+rc=0; out=$($CLI append-lessons --repo-slug slug-x --session S --fence 999 --task-id td-a --phase plan --source s < "$root/src") || rc=$?
+test "$rc" = 1 && test "$out" = "owner: stale-fence"
+test ! -e "$RD/tasks/td-a.lessons.md"
+SH
+
 check "checkin_action: exit-idle-worker ranks after every transition" <<PY
 $LOAD
 f = {"status": "in-progress", "poll_ok": True, "head": "a" * 40, "worktree_exists": True,
