@@ -190,26 +190,27 @@ WOUT=$($CLI watch --repo-slug "$WSLUG" --once --since-epoch 0)
 ok "watch --once emits signal for recorded task state" "[ '$WOUT' = 'signal' ]"
 
 SKILL="claude/skills/herdr-orchestration/SKILL.md"
+REFS="claude/skills/herdr-orchestration/references"
 ok "skill: claim/refresh pass the orchestrator inbox socket" \
   "grep -Fq -- '--messaging-socket \"\$CLAUDE_CODE_MESSAGING_SOCKET\"' $SKILL"
 ok "skill: native adapter owns named worker launch" \
-  "grep -Fq -- 'herdr_dispatch.py launch' $SKILL && grep -Fq -- 'unique agent name' $SKILL"
+  "grep -Fq -- 'herdr_dispatch.py launch' $REFS/dispatch-adapter.md $REFS/task-leads.md && grep -Fq -- 'unique agent name' $REFS/dispatch-adapter.md $REFS/task-leads.md"
 ok "skill: native launch checks route readiness and availability" \
-  "grep -Fq -- 'returned readiness, availability reason, model, and effort' $SKILL"
+  "grep -Fq -- 'returned readiness, availability reason, model, and effort' $REFS/dispatch-adapter.md"
 ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
-  "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
+  "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $REFS/director-launch.md"
 ok "skill: messaging-live director arms only the undelivered backstop" \
-  "grep -Fq -- '--undelivered-only --exit-on-signal' $SKILL && ! grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
+  "grep -Fq -- '--undelivered-only --exit-on-signal' $SKILL && ! grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL $REFS/director-launch.md && grep -Fq 'default cadence' $REFS/director-launch.md"
 ok "skill: retry and deadline timers replace the heartbeat" \
   "grep -Fq 'sleep 300' $SKILL && grep -Fq 'review-deadlines' $SKILL && grep -Fq 'sleep <remaining + 30>' $SKILL && ! grep -Fq 'let the watch (or the next push)' $SKILL && ! grep -Fq 'at the next heartbeat' $SKILL"
 ok "skill: backstop arms the keepalive watch and drops the heartbeat re-arm rule" \
-  "grep -Fq -- '--undelivered-only --exit-on-signal --since-epoch \$EPOCH --messaging-socket \"\$CLAUDE_CODE_MESSAGING_SOCKET\"' $SKILL && grep -Fq 'owner: holder-gone' $SKILL && grep -Fq 'owner: lost' claude/skills/herdr-orchestration/references/event-schema.md && ! grep -Fq 'heartbeat one exists only' $SKILL"
+  "grep -Fq -- '--undelivered-only --exit-on-signal --since-epoch \$EPOCH --messaging-socket \"\$CLAUDE_CODE_MESSAGING_SOCKET\"' $SKILL && grep -Fq 'owner: holder-gone' $REFS/director-launch.md && grep -Fq 'owner: lost' claude/skills/herdr-orchestration/references/event-schema.md && ! grep -Fq 'heartbeat one exists only' $SKILL $REFS/director-launch.md"
 ok "skill: unverifiable evidence is the integrity halt, never retried" \
   "grep -Fq 'unverifiable-evidence' $SKILL && grep -Fq 'not retried' $SKILL"
 ok "skill: dirty worktree after a Claude review is reported" \
   "grep -Fq 'dirty=yes' $SKILL"
 ok "skill: run-think always runs in the background" \
-  "grep -Fq 'run-think\` always runs under \`Bash run_in_background\`' $SKILL && ! grep -Fq 'both are watch wakes' $SKILL"
+  "grep -Fq 'run-think\` always runs under \`Bash run_in_background\`' $REFS/legacy-wrappers.md && ! grep -Fq 'both are watch wakes' $SKILL $REFS/legacy-wrappers.md"
 ok "agent: director describes the backstop and the launch function" \
   "grep -Fq 'backstop' claude/agents/director.md && grep -Fq '\`director\`' claude/agents/director.md"
 ok "skill: idle-subscription re-wake mechanism is retired" \
@@ -217,7 +218,7 @@ ok "skill: idle-subscription re-wake mechanism is retired" \
 ok "skill: no-lost-wake rule, capped at three passes" \
   "grep -Fq 'capped at three passes' $SKILL"
 ok "skill: transport readiness never grants task completion" \
-  "grep -Fq 'are transport evidence' $SKILL && grep -Fq 'milestone/contract/review gates advance' $SKILL"
+  "grep -Fq 'are transport evidence' $REFS/dispatch-adapter.md && grep -Fq 'milestone/contract/review gates advance' $REFS/dispatch-adapter.md"
 ok "skill: safety names cross-session messages as wake-only" \
   "grep -Fq 'Every inbound cross-session message' $SKILL"
 
@@ -465,7 +466,7 @@ else
   echo "SKIP: zsh not installed; launch payload replay not run"
 fi
 ok "skill binds native account scope and quotes legacy launch environment" \
-  "grep -q 'herdr_dispatch.py' claude/skills/herdr-orchestration/SKILL.md && grep -q 'ACCOUNT_PREFIX' claude/skills/herdr-orchestration/SKILL.md && grep -q 'launch_env' claude/skills/herdr-orchestration/SKILL.md"
+  "grep -q 'herdr_dispatch.py' claude/skills/herdr-orchestration/SKILL.md && grep -q 'ACCOUNT_PREFIX' claude/skills/herdr-orchestration/references/legacy-wrappers.md && grep -q 'launch_env' claude/skills/herdr-orchestration/SKILL.md"
 
 # brief rendering: Routing block equals the snapshot; opt-in line; helper rule; no-workflow variant
 render_brief() {   # $1 = ROUTING json, $2 = granted|withheld
@@ -490,7 +491,7 @@ fastpath_kickoff_ok() {
 python3 - <<'PY'
 import re, sys
 t = " ".join(open("claude/skills/herdr-orchestration/SKILL.md").read().split())
-s = t[t.index("## 2. Kickoff"):t.index("## 2a. Phase advancement")]
+s = " ".join(open("claude/skills/herdr-orchestration/references/kickoff.md").read().split())
 need = ["**Fast-path item**", "never a Jira key", "--role implementation",
         "kick off <item> direct", "kick off <item> as raw",
         "Fast-path contract source", "## Verification",
@@ -505,7 +506,7 @@ need = ["**Fast-path item**", "never a Jira key", "--role implementation",
         "the fallback: any other todo or handoff"]
 order = s.index("**Plan-ready item**") < s.index("**Fast-path item**") < s.index("**Raw item**")
 ok = (order and all(n in s for n in need)
-      and "Fast-path maturity check" not in s and "fast_path.max_files" not in s)
+      and all(b not in s and b not in t for b in ("Fast-path maturity check", "fast_path.max_files")))
 sys.exit(0 if ok else 1)
 PY
 }
