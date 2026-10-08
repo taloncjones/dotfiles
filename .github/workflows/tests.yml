@@ -29,7 +29,7 @@ jobs:
       - name: bash syntax check
         run: |
           for f in bootstrap.sh bootstrap-cloud.sh install/install.sh install/common/*.sh \
-                   install/linux/*.sh install/macos/*.sh bin/dotfiles-repair bin/dotfiles-tests \
+                   install/linux/*.sh install/macos/*.sh bin/dotfiles-repair bin/dotfiles-tests bin/dotfiles-test-env \
                    bin/identity-doctor bin/identity-setup bin/setup-claude \
                    .claude/hooks/session-start.sh git/hooks/*; do
             case "$f" in *.test.sh) continue ;; esac

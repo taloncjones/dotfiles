@@ -79,6 +79,7 @@ sh bin/zed-claude-agent.test.sh
 bash bin/op-env.test.sh
 sh bin/token-burn.test.sh
 sh bin/dotfiles-tests.test.sh
+sh bin/dotfiles-test-env.test.sh
 sh bin/herdr-zed-attach.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
