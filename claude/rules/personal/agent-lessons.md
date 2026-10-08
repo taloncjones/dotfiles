@@ -21,8 +21,6 @@ is the staging tier, not an archive.
   and account: inherited settings outlive the config change they predate.
 - (2026-10) zsh: unquoted vars do not word-split, `$v:h` is a modifier (write
   `${v}:h`), use `pipestatus`; rm/git guards reject vars -- pass literal paths.
-- (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
-  MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
 - (2026-10) Never emit an identifier from memory, or one an earlier edit moved:
   shas, paths, symbols, line numbers -- re-read it or anchor on nearby text.
 - (2026-09) A worker never commits with failing tests: fix or report
@@ -46,8 +44,6 @@ is the staging tier, not an archive.
   the repair worker emits: a superseded attempt row refuses its emit-done.
 - (2026-09) Re-read a PR body against the final head before posting it: wording
   written mid-fix (record-only vs asserted, tip sha vs bench sha) drifts.
-- (2026-09) The commit guard rejects the bare word "claude" in a commit message:
-  write "substitute seat" or "work config" up front, not after a block.
 - (2026-09) A contract pinned before a long-lived branch ships goes stale when
   main moves: after any main merge re-run the whole gate, never one check.
 - (2026-10) Each review round re-runs CI, lint and format, re-reads the head and
@@ -66,5 +62,9 @@ is the staging tier, not an archive.
   or a detached worktree); a partial `cp` misses the files a test imports.
 - (2026-10) Re-grep anchors after a Markdown Write/Edit: the formatter reflows.
 - (2026-10) Never pass `-c commit.gpgsign=false`; a locked signer means pause.
-- (2026-10) Read a script's usage before passing it `--help`: some run the
-  whole suite, and `todos.sh new --help` filed a todo titled --help.
+- (2026-10) A suite outside the brief that fails in a worker pane: rerun it on
+  the base tree first, and blame the change only if the base passes.
+- (2026-10) A fast-path contract runs the owning suite of every edited module
+  and greps tests for the changed literal; a one-file scope hides pinned tests.
+- (2026-10) An auto-mode worker cannot edit rules or principles files (the
+  self-modification classifier refuses); route those edits to a manual session.
