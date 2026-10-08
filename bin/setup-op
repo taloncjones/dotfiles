@@ -72,7 +72,7 @@ if [ -e "$op_env" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             OP_SERVICE_ACCOUNT_TOKEN=*) token="${line#*=}" ;;
-            OP_SIGNING_TTL=*) keep+=("$line") ;;
+            OP_SIGNING_TTL=*|OP_ENV_ALLOW=*) keep+=("$line") ;;
             OP_SIGNING_KEY=*|OP_SIGNING_PUBKEY=*) [ -n "$signing_ref" ] || keep+=("$line") ;;
         esac
     done <"$op_env"

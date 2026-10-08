@@ -424,6 +424,11 @@ out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op --rotate replaces the token" 'grep -qx "OP_SERVICE_ACCOUNT_TOKEN=$NEWTOKEN" "$REPO2/op.env" && ! grep -qF "$FIXTURE_TOKEN" "$REPO2/op.env"'
 check "setup-op --rotate keeps the signing lines byte-identical" '[ "$(grep "^OP_SIGNING_" "$REPO2/op.env")" = "$signing_before" ]'
 check "setup-op --rotate output never prints either token" '! printf "%s" "$out" | grep -qF "$NEWTOKEN" && ! printf "%s" "$out" | grep -qF "$FIXTURE_TOKEN"'
+printf 'OP_ENV_ALLOW=DB_URL,CUSTOM_NAME\n' >>"$REPO2/op.env"
+out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
+check "setup-op --rotate keeps the OP_ENV_ALLOW line" 'grep -qx "OP_ENV_ALLOW=DB_URL,CUSTOM_NAME" "$REPO2/op.env"'
+out="$(cd "$REPO2" && "$SETUP" --signing-key op://V/sign </dev/null 2>&1)"
+check "setup-op --signing-key keeps the OP_ENV_ALLOW line" 'grep -qx "OP_ENV_ALLOW=DB_URL,CUSTOM_NAME" "$REPO2/op.env" && grep -qx "OP_SIGNING_KEY=op://V/sign" "$REPO2/op.env"'
 
 out="$(cd "$REPO2" && printf '%s\n' "$NEWTOKEN" | "$SETUP" --rotate 2>&1)"
 check "setup-op excludes are not duplicated on rerun" '[ "$(grep -cx "op.env" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cxF ".op.env.*" "$REPO2/.git/info/exclude")" = 1 ] && [ "$(grep -cx "project.env" "$REPO2/.git/info/exclude")" = 1 ]'
