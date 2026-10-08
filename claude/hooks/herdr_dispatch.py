@@ -1632,7 +1632,7 @@ _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 _EXIT_GONE_CODES = frozenset({"agent_not_running", "agent_not_found"})
 
 
-def _exit_agent(herdr_cli, row, workspace_id, env):
+def _exit_agent(herdr_cli, row, env):
     try:
         result = _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
                                "--timeout", str(EXIT_WAIT_MS)],
@@ -1755,7 +1755,7 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
                     "pane": "untouched"}
         if not row.get("exit_requested"):
             _mark_exit_requested(task_path, task, index, reason)
-        agent = _exit_agent(herdr_cli, row, workspace_id, env)
+        agent = _exit_agent(herdr_cli, row, env)
         agents, panes = _snapshot(herdr_cli, workspace_id, env)
         if agent == "exited" and _row_agent(herdr_cli, row, env)[0] != "gone":
             # The exit verdict can go stale before this read; trust the

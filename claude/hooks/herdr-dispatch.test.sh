@@ -311,13 +311,14 @@ elif args[:2] == ["agent", "get"] and os.environ.get("FAKE_AGENT_GET_FROM_LIST")
             agents = [a for a in agents if a["name"] != args[2]]
             apath.write_text(json.dumps(agents))
     if mode == "exit-agent-reappears":
-        # The row's agent is removed by the /exit reply, then reappears on
-        # the third read: the settle re-check after the exited verdict.
+        # The /exit reply removes the row's agent; it reappears on the 4th
+        # read: entry read, menu check, the first _await_gone poll (gone),
+        # then the post-exit re-check this mode exercises.
         cpath = Path(os.environ["FAKE_AGENT_LIST_COUNT"])
         gets = (int(cpath.read_text()) if cpath.exists() else 0) + 1
         cpath.write_text(str(gets))
         removed_path = Path(os.environ["FAKE_REMOVED_AGENT"])
-        if gets >= 3 and removed_path.exists():
+        if gets >= 4 and removed_path.exists():
             removed = json.loads(removed_path.read_text())
             if not any(a["name"] == removed["name"] for a in agents):
                 agents = agents + [removed]
@@ -1628,12 +1629,13 @@ def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited(
                         [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        # _exit_agent's own snapshot says "exited"; the freshest re-check
-        # before deciding pane fate must catch the reappearance.
+        # _await_gone saw the agent gone; the post-exit re-check sees it back
+        # and keeps the pane before any pane-idle wait.
         assert result["agent"] == "still-live", result
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "exit-incomplete", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "process-info"]], fx.calls()
     finally:
         fx.close()
 
@@ -1743,7 +1745,7 @@ def test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member():
                         [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        # A member settle cannot place could be the row's agent: unknown, not gone.
+        # The row's agent is gone by name; a member settle cannot place keeps the pane.
         assert result["agent"] == "exited", result
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "settled", result
@@ -1838,7 +1840,8 @@ def test_settle_keeps_a_pane_when_a_malformed_agent_member_appears_before_close(
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         fx.env["FAKE_HERDR_MODE"] = "process-info-malformed-appears"
         result = fx.settle("R")
-        # Unknown occupancy at the last read: report the exit as incomplete.
+        # The agent was already absent, so the row settles; the malformed
+        # member seen at the last read keeps the pane.
         assert result["agent"] == "absent", result
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "settled", result
