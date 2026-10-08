@@ -522,6 +522,9 @@ def evaluate(payload, native=False):
             # in that pane. Another pane, or a process with no pane identity,
             # is not the dispatched agent: no nudge and no identity tuple.
             return {"action": "allow"}
+        if pane_row.get("phase") == "ship":
+            # A ship attempt reports through ship.json and never emits.
+            return {"action": "allow"}
     selection = (
         native_scope(task, entry, scope, root, runtime, context, personal)
         if isinstance(entry, dict) and "runtime" in entry

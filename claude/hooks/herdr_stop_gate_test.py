@@ -619,6 +619,43 @@ class StopGateTests(unittest.TestCase):
         self.assertEqual(other_pane["action"], "refuse")
         self.assertEqual(no_pane["action"], "refuse")
 
+    def test_ship_row_releases_without_a_record(self):
+        self.scope = gate.core.account_scope(self.worktree, "claude", personal=True)
+        self.rd = Path(self.scope["account_root"]) / "herdr-orch" / self.slug
+        (self.rd / "tasks").mkdir(parents=True, exist_ok=True)
+        (self.rd / "workspaces").mkdir(exist_ok=True)
+        self.entry = {
+            **self.entry,
+            "runtime": "claude",
+            "account_id": self.scope["account_id"],
+            "personal": True,
+        }
+        os.environ["HERDR_PERSONAL"] = "1"
+        os.environ["HERDR_ACCOUNT_ID"] = self.scope["account_id"]
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        ship = {
+            **self.entry,
+            "role": "reviewer",
+            "phase": "ship",
+            "agent": "ship-proj-1",
+            "launch_id": "ship-1",
+        }
+        self._write_index("review")
+        self._write_task([self.entry, review, ship])
+
+        with mock.patch.object(gate, "record_accepted") as accepted:
+            result = gate.evaluate(self._payload())
+
+        self.assertEqual(result, {"action": "allow"})
+        accepted.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
