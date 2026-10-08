@@ -656,6 +656,120 @@ class StopGateTests(unittest.TestCase):
         self.assertEqual(result, {"action": "allow"})
         accepted.assert_not_called()
 
+    def test_repair_attempt_under_review_index_accepts_its_done_record(self):
+        self.scope = gate.core.account_scope(self.worktree, "claude", personal=True)
+        self.rd = Path(self.scope["account_root"]) / "herdr-orch" / self.slug
+        (self.rd / "tasks").mkdir(parents=True, exist_ok=True)
+        (self.rd / "workspaces").mkdir(exist_ok=True)
+        self.entry = {
+            **self.entry,
+            "runtime": "claude",
+            "account_id": self.scope["account_id"],
+            "personal": True,
+        }
+        os.environ["HERDR_PERSONAL"] = "1"
+        os.environ["HERDR_ACCOUNT_ID"] = self.scope["account_id"]
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        repair = {**self.entry, "agent": "repair-proj-1", "launch_id": "repair-1"}
+        self._write_index("review")
+        self._write_task([self.entry, review, repair])
+        self._write_done(
+            agent="repair-proj-1",
+            launch_id="repair-1",
+            runtime="claude",
+            outcome="paused",
+        )
+
+        result = gate.evaluate(self._payload())
+
+        self.assertEqual(result, {"action": "allow"})
+
+    def test_repair_attempt_under_review_index_is_told_to_emit_done(self):
+        self.scope = gate.core.account_scope(self.worktree, "claude", personal=True)
+        self.rd = Path(self.scope["account_root"]) / "herdr-orch" / self.slug
+        (self.rd / "tasks").mkdir(parents=True, exist_ok=True)
+        (self.rd / "workspaces").mkdir(exist_ok=True)
+        self.entry = {
+            **self.entry,
+            "runtime": "claude",
+            "account_id": self.scope["account_id"],
+            "personal": True,
+        }
+        os.environ["HERDR_PERSONAL"] = "1"
+        os.environ["HERDR_ACCOUNT_ID"] = self.scope["account_id"]
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        repair = {**self.entry, "agent": "repair-proj-1", "launch_id": "repair-1"}
+        self._write_index("review")
+        self._write_task([self.entry, review, repair])
+
+        result = gate.evaluate(self._payload())
+
+        self.assertEqual(result["action"], "refuse")
+        self.assertIsNotNone(result["command"])
+        self.assertIn("emit-done", result["command"])
+        self.assertIn("--launch-id repair-1", result["command"])
+        self.assertIn("--phase implement", result["command"])
+        self.assertNotIn("emit-review", result["command"])
+
+    def test_review_attempt_under_impl_index_accepts_its_review_record(self):
+        self.scope = gate.core.account_scope(self.worktree, "claude", personal=True)
+        self.rd = Path(self.scope["account_root"]) / "herdr-orch" / self.slug
+        (self.rd / "tasks").mkdir(parents=True, exist_ok=True)
+        (self.rd / "workspaces").mkdir(exist_ok=True)
+        self.entry = {
+            **self.entry,
+            "runtime": "claude",
+            "account_id": self.scope["account_id"],
+            "personal": True,
+        }
+        os.environ["HERDR_PERSONAL"] = "1"
+        os.environ["HERDR_ACCOUNT_ID"] = self.scope["account_id"]
+        os.environ["HERDR_PANE_ID"] = "pane-2"
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        self._write_index("impl")
+        self._write_task([self.entry, review])
+        record = {
+            "task_id": self.task_id,
+            "workspace_id": self.workspace,
+            "agent": "rev-proj-1",
+            "phase": "review",
+            "outcome": "approved",
+            "reviewed_head_sha": self.head_sha,
+            "launch_id": "review-1",
+            "runtime": "claude",
+            "pane_id": "pane-2",
+            "source_head_sha": self.base_sha,
+            "ts": "2026-09-07T12:00:01Z",
+        }
+        (self.rd / "tasks" / f"{self.task_id}.review.json").write_text(
+            json.dumps(record)
+        )
+
+        result = gate.evaluate(self._payload())
+
+        self.assertEqual(result, {"action": "allow"})
+
 
 if __name__ == "__main__":
     unittest.main()

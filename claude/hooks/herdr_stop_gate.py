@@ -18,12 +18,16 @@ allowed, before any state read. When no row of the index role is current
 (a newer native row of another role follows it), the pane of the
 workspace's latest native row is used instead.
 
-Gate: tasks/<task_id>.done.json (impl) or .review.json (review) must carry
-this task id, workspace id, and a valid lifecycle timestamp/outcome. Native
-attempts also match the current launch/phase/runtime/pane/source-HEAD tuple,
-the provider-selected account, and the current task's repository. Dispatch
-pins HERDR_PERSONAL and HERDR_ACCOUNT_ID without changing authentication.
-Legacy entries retain the timestamp comparison with their worker launch.
+Gate: a native attempt owes the record of its own row's phase, never the
+index role's: plan and implement need tasks/<task_id>.done.json, review
+needs .review.json, and a ship row owes none and is allowed (it reports
+through ship.json). The record must carry this task id, workspace id, and
+a valid lifecycle timestamp/outcome, and match the current
+launch/phase/runtime/pane/source-HEAD tuple, the provider-selected
+account, and the current task's repository. Dispatch pins HERDR_PERSONAL
+and HERDR_ACCOUNT_ID without changing authentication. Legacy entries keep
+the index role's record and their timestamp comparison with the worker
+launch.
 An accepted record allows the stop; controller verification remains required
 before treating the task as completed.
 
@@ -64,6 +68,9 @@ ROLE_NAMES = {
     "impl": {"impl", "implementation", "planner", "mechanical"},
     "review": {"review", "reviewer", "skeptic", "development_reviewer", "plan_reviewer"},
 }
+# The record a native attempt owes follows its own phase, never the index
+# role: a repair implement row runs while the index still says review.
+PHASE_RECORD = {"plan": "impl", "implement": "impl", "review": "review"}
 RECORD_SUFFIX = {"impl": ".done.json", "review": ".review.json"}
 CORE_CMD = 'python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"'
 # Assembled from two pieces so the literal never appears in this file: a
@@ -282,7 +289,7 @@ def _head(worktree):
     return head if isinstance(head, str) and core.SHA40_RE.fullmatch(head) else None
 
 
-def emit_command(rd, index, ws, task, entry, selection=None):
+def emit_command(rd, index, ws, task, entry, selection, role):
     """Return a shell-safe completion command, or None when identity is unsafe."""
     slug = Path(rd).name
     task_id = index.get("task_id")
@@ -318,7 +325,7 @@ def emit_command(rd, index, ws, task, entry, selection=None):
         command = [
             "python3",
             str(Path(core.__file__).resolve()),
-            "emit-review" if index.get("role") == "review" else "emit-done",
+            "emit-review" if role == "review" else "emit-done",
             "--repo-path",
             worktree,
             "--runtime",
@@ -342,7 +349,7 @@ def emit_command(rd, index, ws, task, entry, selection=None):
             "--source-head-sha",
             entry["source_head_sha"],
         ]
-        if index.get("role") == "review":
+        if role == "review":
             command += [
                 "--reviewed-head-sha",
                 head,
@@ -379,7 +386,7 @@ def emit_command(rd, index, ws, task, entry, selection=None):
         else "<agent>"
     )
     agent = shlex.quote(agent)
-    if index.get("role") == "review":
+    if role == "review":
         return (
             f"{CORE_CMD} emit-review --repo-slug {slug} --task-id {task_id} "
             f"--workspace {ws} --agent {agent} "
@@ -525,6 +532,11 @@ def evaluate(payload, native=False):
         if pane_row.get("phase") == "ship":
             # A ship attempt reports through ship.json and never emits.
             return {"action": "allow"}
+        kind = PHASE_RECORD.get(pane_row.get("phase"))
+        if kind is not None and pane_row.get("role") in ROLE_NAMES[kind]:
+            entry, role = pane_row, kind
+        else:
+            entry = None
     selection = (
         native_scope(task, entry, scope, root, runtime, context, personal)
         if isinstance(entry, dict) and "runtime" in entry
@@ -575,7 +587,7 @@ def evaluate(payload, native=False):
     command = (
         None
         if strict and selection is None
-        else emit_command(rd, index, ws, task, entry, selection)
+        else emit_command(rd, index, ws, task, entry, selection, role)
     )
     reason = "completion record is missing or does not match the current attempt"
     if strict and selection is None:
