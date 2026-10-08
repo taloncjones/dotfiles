@@ -120,7 +120,7 @@ read_op_env() {
 is_floor_name() {
     case "$1" in
         PATH|HOME|SHELL|ENV|IFS|SHELLOPTS|BASHOPTS) return 0 ;;
-        BASH_*|PS*|PROMPT*|LD_*|DYLD_*|GIT_*|OP_*|CLAUDE_*) return 0 ;;
+        BASH_*|PS[0-4]|PROMPT*|LD_*|DYLD_*|GIT_*|OP_*|CLAUDE_*) return 0 ;;
     esac
     return 1
 }

@@ -166,6 +166,9 @@ printf 'GH_TOKEN=op://V/gh/token\nOPENAI_API_KEY=op://V/x/y\nNPM_TOKEN=op://V/x/
 out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
 check "suffix names GH_TOKEN and a _KEY name resolve" 'printf "%s\n" "$out" | grep -qx "export GH_TOKEN='"'"'resolved-GH_TOKEN'"'"'" && printf "%s\n" "$out" | grep -qx "export OPENAI_API_KEY='"'"'resolved-OPENAI_API_KEY'"'"'"'
 check "suffix names _TOKEN _PASSWORD _PAT _SECRET resolve" '[ "$(printf "%s\n" "$out" | grep -cE "^export (GH_TOKEN|OPENAI_API_KEY|NPM_TOKEN|DB_PASSWORD|SIGN_PAT|WEBHOOK_SECRET)=")" = 6 ]'
+printf 'GH_TOKEN=op://V/gh/token\nPSQL_PASSWORD=op://V/x/y\nPSCALE_TOKEN=op://V/x/y\n' >"$REPO/project.env"
+out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>/dev/null)"
+check "PS-prefixed credential names PSQL_PASSWORD and PSCALE_TOKEN resolve" 'printf "%s\n" "$out" | grep -qx "export PSQL_PASSWORD='"'"'resolved-PSQL_PASSWORD'"'"'" && printf "%s\n" "$out" | grep -qx "export PSCALE_TOKEN='"'"'resolved-PSCALE_TOKEN'"'"'"'
 
 write_op_env "OP_ENV_ALLOW=ADAPTER_REF,CUSTOM_NAME"
 printf 'CUSTOM_NAME=op://V/x/y\n' >"$REPO/project.env"
