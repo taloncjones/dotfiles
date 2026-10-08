@@ -591,7 +591,9 @@ Helper sessions a reviewer spawns, and which of them may emit: read
    `completed`, `review_head_sha` null) so a fresh review dispatches at the
    same head, or restore the file byte-for-byte from the reviewer's pane if
    it still exists. The verdict is honoured only after the file has been read
-   and its blocking list reconciled with `blocking_count`.
+   and its blocking list reconciled with `blocking_count`. Read the findings
+   header (its first three lines) and the `## Lessons` section; read the body
+   only for changes-requested.
    Once the digest matches, run the Lesson harvest (section 4) on the
    findings file before the verdict or stale-reset `write-task`; on an
    integrity halt, skip the Lesson harvest.
@@ -605,7 +607,9 @@ Helper sessions a reviewer spawns, and which of them may emit: read
    fresh review dispatches. Only when all three SHAs agree:
    - `changes-requested` or blocking findings -> `status: changes-requested`,
      event `changes-requested`, and surface the findings or incomplete evidence
-     for deliberate development repair. Run a scoped `review-change` only when
+     for deliberate development repair; render the repair brief (section 2
+     step 7) with `--phase repair --findings <the review record's findings_ref
+     or the ship handoff's report_path>`. Run a scoped `review-change` only when
      the repair needs fresh evidence; structural repairs return to design. An
      exhausted final `co-review --fix` budget never resets or re-enters its gate
      here. Record the stop in the task/handoff and return control to the user.
@@ -717,9 +721,10 @@ only when `ship_relaunch_head` differs from `review_head_sha`,
 and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
 (every other field carried), so the budget is spent before any worker
 can start and an interrupted relaunch parks the task. Otherwise report
-the stopped run, park the task, and stop. To dispatch, write the brief,
-then launch through the adapter:
-`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent ship-<task prefix> --route-json <route> ...`
+the stopped run, park the task, and stop. To dispatch, render the brief
+(section 2 step 7, `--phase ship`, with `--tier delta --prior-handoff
+<ship.json>` for a delta gate), then launch through the adapter:
+`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent <agent from render-brief> --prompt-file <brief_path> --route-json <route> ...`
 (the same fields as any launch; resolve the route with
 `route --runtime claude --role reviewer`). The adapter refuses any other
 runtime or sandbox, starts the herdr agent under the returned
@@ -733,8 +738,9 @@ its launch directory, and no merge authority.
 The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
 gate gates the current PR base. A head behind that base is gated on its
-merge result; the branch is merged with its base only when `prepare`
-reports a conflict. A base that moves cleanly after the gate needs no
+merge result and needs no merge. On a `prepare` conflict the ship worker
+records INCOMPLETE and the director's repair flow resolves it; no worker
+merges the base into the branch. A base that moves cleanly after the gate needs no
 re-gate: `merge-ready` re-checks it with `base-check`.
 
 Once its `ship.json` is written, the idle ship agent settles as

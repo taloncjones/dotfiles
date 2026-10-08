@@ -51,18 +51,24 @@ advisories, and coverage gaps after safe reproductions where useful. It may
 consult relevant reference skills as permitted by `review-change`; it
 never applies fixes, launches another reviewer, posts externally, or runs
 final co-review. `review-change` is herdr-agnostic; the herdr-specific
-`emit-review` call lives in this brief.
+`emit-review` call lives in this brief. Render the brief (section 2 step 7)
+with `--phase review`; the focus file names the intended behavior and what
+to check.
 
-Resolve `<findings_path>` =
+`<findings_path>` is
 `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/review-<launch_id>/findings.md`
 (the same `<slug>` directory that holds `tasks/<task_id>.json`; a
 review-specific launch directory that never collides with the plan-artifact
-helper's) and put it in the brief. The reviewer creates the directory,
+helper's); the rendered brief carries it. The reviewer creates the directory,
 writes its report to a temporary name in that directory and renames it onto
 `findings.md` (so a partial write is never the named file), and passes
 exactly that path as `--findings-ref`. Content: blocking findings,
 advisories, coverage gaps, reproduction evidence, or an explicit "no
-findings" statement naming what was inspected. `emit-review` refuses a
+findings" statement naming what was inspected. The report opens with a
+three-line header (`Verdict: approved|changes-requested`, `Blocking: <n>`,
+`Advisories: none` or titles joined by `; `); inside herdr an unbound
+`emit-review` refuses a report whose header is missing or disagrees with
+`--outcome` and `--blocking-count`. `emit-review` refuses a
 `--findings-ref` that is not an absolute path under the orchestration state
 root to a readable, non-blank regular file, refuses to emit without one
 inside herdr, and pins the file's SHA-256 as `findings_sha256`. A findings

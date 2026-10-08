@@ -218,17 +218,17 @@ A PR gate waits for the head's CI to finish and freezes it as `ci.json`
 before any probe or seat runs, so no seat reports a CI gap the coordinator
 already holds. CI can outlast a foreground call: a Claude coordinator runs
 this block with `run_in_background` and waits for its completion, as for the
-seats. `HEAD` is the manifest's `source.head`. A local no-PR review skips
+seats. `ci-capture` reads the PR number and head from the expected identity
+and runs `gh` from `$REPO` itself; never write `ci.json` from your own `gh`
+output. A local no-PR review skips
 this block; a `lessons` class there falls back to `CLASS=light`.
 
 ```bash
 gh pr checks "$PR" --watch --interval 30 >"$RUN_DIR/ci-watch.txt" 2>&1 || true
-gh pr view "$PR" --json headRefOid,statusCheckRollup >"$RUN_DIR/pr-ci.json" || exit 2
-uv run --no-project python "$GATE_REPORT" ci-envelope --pr-json "$RUN_DIR/pr-ci.json" \
-  --head "$HEAD" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
+uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
 ```
 
-The watch's exit status is ignored; `ci-envelope` decides. Exit 0
+The watch's exit status is ignored; `ci-capture` decides. Exit 0
 continues. A nonzero exit whose `reasons` is exactly
 `["CI evidence is missing"]` means the PR has no checks: record the no-CI
 evidence in `preconditions.no_ci` as `schema` describes, and a `lessons`

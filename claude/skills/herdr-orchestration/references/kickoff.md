@@ -175,6 +175,16 @@ phase-appropriate brief (references/brief-template.md) and model.
    rechecks the fence on return. The attempt binds `launch_id`, runtime, phase,
    workspace, pane, source HEAD, requested model/effort, and account. A failed
    launch is recorded as failed; never erase it to make the task look unstarted.
+
+   Render the brief with
+   `python3 "$CORE" render-brief --repo-slug <slug> --repo-path <canonical repo root> --runtime <claude|codex> --task-id <task_id> --phase <plan|implement|repair|review|ship> [--focus-file <file>] [--findings <path>] [--artifact-class advisory|behavior] [--no-workflow] [--tier delta --prior-handoff <ship.json>]`.
+   Write only the task-specific focus file (intended behavior, what to check,
+   owner direction) under the scratchpad. The verb prints `agent` and
+   `brief_path`; pass them to the adapter as `--agent` and `--prompt-file`.
+   Exit 2 means a refusal: read its `[X]` line; never hand-edit a rendered
+   brief to get past one. Fast-path implement and fast-path review
+   dispatches, mech and deep-think keep their hand-filled variants
+   (references/brief-template.md); do not render them with this verb.
 8. **Jira writeback**, only for a Jira task with existing user authorization:
    transition to In Progress (section 10). Personal todos do not use Atlassian.
 9. **Partial failure:** leave adopted resources untouched. Stop or clean only

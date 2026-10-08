@@ -27,6 +27,9 @@ def _artifact(entry: object, root: Path, label: str) -> tuple[Path | None, list[
 def _ci_reasons(payload: object, no_ci: object) -> list[str]:
     if not isinstance(payload, dict):
         return ["CI payload is invalid"]
+    if "statusCheckRollup" in payload:
+        return ["CI payload is raw gh output, not the {head, check_runs, "
+                "status_contexts} envelope; capture it with gate_report.py ci-capture"]
     head = payload.get("head")
     if not isinstance(head, str) or not head:
         return ["CI payload head is missing"]

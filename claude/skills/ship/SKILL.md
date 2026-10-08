@@ -69,7 +69,13 @@ gate.
    values. Also stop unless `gate_report.py base-check --repo <repo>
    --expected EXPECTED --head <head> --live-base <live-base>` exits 0; it
    re-derives the reviewed tree from the gated base and refuses a head that
-   no longer merges cleanly with the live base. Refresh its exact-head CI artifact and digest, then
+   no longer merges cleanly with the live base. Refresh its CI artifact: run
+   `gate_report.py ci-capture --repo <repo> --expected EXPECTED --out <the
+   report's preconditions.ci artifact path>`. Exit 0 continues; an exit 1
+   whose `reasons` is exactly `["CI evidence is missing"]` continues only
+   when the report carries `preconditions.no_ci` evidence; any other nonzero
+   exit stops. Write its printed `sha256` into the report's
+   `preconditions.ci.sha256`, then
    invoke `gate_report.py evaluate --report REPORT --expected EXPECTED`. The
    co-review snapshot has already been verified and cleaned; this step checks
    live source/PR identity and retained report artifacts, not a deleted manifest.

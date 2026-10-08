@@ -29,7 +29,8 @@ phase; it never marks the task `completed` and never dispatches review.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
    again with `--config-json "$ROUTE_CONFIG"` (step 6 snippet), require readiness,
    append a new strict attempt through
-   the adapter, update the display role, and give the worker the exact frozen
-   PRD path and hash (and the legacy plan's, when present). Status remains `in-progress`.
+   the adapter, update the display role, and render the implement brief
+   (section 2 step 7, `--phase implement`), which lists the frozen PRD path
+   and hash (and the legacy plan's, when present). Status remains `in-progress`.
 4. Failed/paused planning never launches implementation. `confirm-completion`
    is the separate final implementation gate and rejects a plan milestone.
