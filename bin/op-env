@@ -154,6 +154,10 @@ read_project_env() {
             fail_rule "project.env line $n is not NAME=op://..."
             return 1
         fi
+        if is_floor_name "$name"; then
+            fail_rule "project.env line $n names a reserved variable"
+            return 1
+        fi
         if ! is_allowed_name "$name"; then
             fail_rule "project.env line $n name is not allowed (uppercase NAME ending _TOKEN, _KEY, _SECRET, _PASSWORD or _PAT, or listed in OP_ENV_ALLOW)"
             return 1

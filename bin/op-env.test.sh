@@ -140,16 +140,25 @@ check "status never prints the bare padded token" '! printf "%s" "$out" | grep -
 
 RULE="project.env line 2 name is not allowed"
 : >"$OP_LOG"
-for name in OP_SERVICE_ACCOUNT_TOKEN PATH path fpath BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM PWD \
-    SHELLOPTS BASHOPTS BASH_XTRACEFD LC_ALL LANG PS1 PS4 PROMPT PROMPT_COMMAND CDPATH NODE_OPTIONS NODE_PATH ADAPTER \
-    PYTHONPATH PERL5LIB RUBYOPT HTTPS_PROXY https_proxy NO_PROXY XDG_CONFIG_HOME GH_CONFIG_DIR LD_PRELOAD DYLD_INSERT_LIBRARIES; do
+for name in path fpath PWD LC_ALL LANG CDPATH NODE_OPTIONS NODE_PATH ADAPTER \
+    PYTHONPATH PERL5LIB RUBYOPT HTTPS_PROXY https_proxy NO_PROXY XDG_CONFIG_HOME GH_CONFIG_DIR; do
     printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
     out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
     check "shell-exports refuses project.env name $name" '[ -z "$out" ] && grep -q "$RULE" "$TMP/err" && ! grep -qF "$name" "$TMP/err"'
     out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "${GH_TOKEN-unset}"' 2>"$TMP/err")"
     check "exec refuses project.env name $name" '[ "$out" = unset ] && grep -q "$RULE" "$TMP/err"'
 done
+RULE_FLOOR="project.env line 2 names a reserved variable"
+for name in OP_SERVICE_ACCOUNT_TOKEN PATH BASH_ENV CLAUDE_CONFIG_DIR GIT_CONFIG_SYSTEM SHELLOPTS BASHOPTS \
+    BASH_XTRACEFD PS1 PS4 PROMPT PROMPT_COMMAND LD_PRELOAD DYLD_INSERT_LIBRARIES; do
+    printf 'GH_TOKEN=op://V/gh/token\n%s=op://V/x/y\n' "$name" >"$REPO/project.env"
+    out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
+    check "shell-exports refuses reserved name $name" '[ -z "$out" ] && grep -q "$RULE_FLOOR" "$TMP/err" && ! grep -qF "$name" "$TMP/err" && ! grep -q "OP_ENV_ALLOW" "$TMP/err"'
+    out="$(cd "$REPO" && "$OP_ENV" exec -- sh -c 'printf %s "${GH_TOKEN-unset}"' 2>"$TMP/err")"
+    check "exec refuses reserved name $name" '[ "$out" = unset ] && grep -q "$RULE_FLOOR" "$TMP/err"'
+done
 check "name refusal calls no op" '[ ! -s "$OP_LOG" ]'
+printf 'GH_TOKEN=op://V/gh/token\nADAPTER=op://V/x/y\n' >"$REPO/project.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
 check "status reports a refused project.env name as [X]" '[ "$rc" = 1 ] && printf "%s\n" "$out" | grep -q "^\[X\] .*name is not allowed"'
 
@@ -169,7 +178,7 @@ write_op_env "OP_ENV_ALLOW=PATH,PS1,GIT_DIR,OP_FOO,HOME,path,BASH_ENV,LD_PRELOAD
 for name in PATH PS1 GIT_DIR OP_FOO HOME path BASH_ENV LD_PRELOAD CLAUDE_X IFS SHELL ENV; do
     printf '%s=op://V/x/y\n' "$name" >"$REPO/project.env"
     out="$("$OP_ENV" shell-exports --cwd "$REPO" 2>"$TMP/err")"
-    check "allowed floor name $name is still refused" '[ -z "$out" ] && grep -q "name is not allowed" "$TMP/err"'
+    check "allowed floor name $name is still refused" '[ -z "$out" ] && grep -qE "names a reserved variable|name is not allowed" "$TMP/err"'
 done
 write_op_env "OP_ENV_ALLOW=*"
 touch "$REPO/GLOB_NAME"
