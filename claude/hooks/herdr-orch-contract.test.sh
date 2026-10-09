@@ -197,8 +197,9 @@ ok "skill: native adapter owns named worker launch" \
   "grep -Fq -- 'herdr_dispatch.py launch' $REFS/dispatch-adapter.md $REFS/task-leads.md && grep -Fq -- 'unique agent name' $REFS/dispatch-adapter.md $REFS/task-leads.md"
 ok "skill: native launch checks route readiness and availability" \
   "grep -Fq -- 'returned readiness, availability reason, model, and effort' $REFS/dispatch-adapter.md"
-ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
-  "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $REFS/director-launch.md"
+DIRECTOR_SETTINGS=$(sed -n "s/^ *claude --agent director --settings '\([^']*\)'.*/\1/p" zsh/claude-account.zsh)
+ok "skill: director launch line carries director()'s settings, inbound accept" \
+  "[ -n \"\$DIRECTOR_SETTINGS\" ] && printf '%s' \"\$DIRECTOR_SETTINGS\" | grep -Fq '\"crossSessionInbound\":\"accept\"' && grep -Fq -- \"--settings '\$DIRECTOR_SETTINGS'\" $REFS/director-launch.md"
 ok "skill: messaging-live director arms only the undelivered backstop" \
   "grep -Fq -- '--undelivered-only --exit-on-signal' $SKILL && ! grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL $REFS/director-launch.md && grep -Fq 'default cadence' $REFS/director-launch.md"
 ok "skill: retry and deadline timers replace the heartbeat" \

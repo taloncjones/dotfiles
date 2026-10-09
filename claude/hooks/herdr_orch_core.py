@@ -5019,9 +5019,11 @@ def _rollover(ns) -> int:
         held = tx.check(ns.session, ns.fence)
         other = read_rollover_pending(rd)
         busy = other is not None and marker_live(other, ns.session, ns.fence)
+        saved = True
         if held and not busy:
+            saved = append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
+        if held and not busy and saved:
             created = time.time()
-            append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
             write_json_atomic(Path(rd) / ROLLOVER_PENDING_FILE, {
                 "v": 1, "token": token, "pane": new_pane, "from_session": ns.session,
                 "from_fence": ns.fence, "from_pane": pane, "carry": ns.carry,
@@ -5033,6 +5035,9 @@ def _rollover(ns) -> int:
         close(new_pane)
         print(f"rollover: rollover in progress for pane {other['pane']}")
         return 1
+    if not saved:
+        print("rollover: carry notes not saved; this session keeps the lease")
+        return failed("carry-unsaved", hid, new_pane, close_pane=True)
     scope_kind = ((_PAYLOAD_SELECTION.get() or {}).get("scope") or {}).get("kind")
     try:
         run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
@@ -5079,9 +5084,18 @@ def decision_id():
 
 
 def append_decision(rd, *recs):
-    """Append decision-log records as one write, so a batch is never interleaved."""
-    data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in recs)
-    append_payload(Path(rd) / DECISIONS_FILE, data.encode("utf-8"))
+    """Append decision-log records as one write, so a batch is never interleaved.
+    A torn last line (no newline) gets one first, so it cannot swallow this
+    batch; every writer holds the owner lock, so the check cannot race."""
+    path = Path(rd) / DECISIONS_FILE
+    data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in recs).encode("utf-8")
+    try:
+        tail = read_payload_bytes(path)[-1:]
+    except FileNotFoundError:
+        tail = b""
+    if tail not in (b"", b"\n"):
+        data = b"\n" + data
+    append_payload(path, data)
 
 
 LESSON_PHASES = ("plan", "implement", "repair", "review", "ship", "mech", "director")
@@ -5129,8 +5143,10 @@ def append_lessons(rd, task_id, phase, source, text):
 
 
 def read_decisions(rd):
-    """Parsed v1 dict lines in file order; bad lines are skipped, a missing
-    file is an empty log, and any other read failure propagates."""
+    """Parsed v1 dict lines in file order. A bad line is skipped, and so is a
+    record whose id, or a retire's retires, is not a string (live_decisions
+    hashes both). A missing file is an empty log; any other read failure
+    propagates."""
     try:
         text = read_payload_text(Path(rd) / DECISIONS_FILE)
     except FileNotFoundError:
@@ -5141,8 +5157,11 @@ def read_decisions(rd):
             rec = json.loads(line)
         except ValueError:
             continue
-        if isinstance(rec, dict) and rec.get("v") == 1:
-            out.append(rec)
+        if not isinstance(rec, dict) or rec.get("v") != 1 or not isinstance(rec.get("id"), str):
+            continue
+        if rec.get("event") == "retire" and not isinstance(rec.get("retires"), str):
+            continue
+        out.append(rec)
     return out
 
 
@@ -5202,7 +5221,7 @@ def decisions_block(entries, repo_path, show_all=False):
 
     def omit(k):
         return (f"({k} older omitted; full list: python3 ~/.claude/hooks/"
-                f"herdr_orch_core.py decisions --repo-path {repo_path} --all)")
+                f"herdr_orch_core.py decisions --repo-path {shlex.quote(repo_path)} --all)")
 
     full = "\n".join([header] + lines)
     if len(full) <= DECISIONS_BLOCK_MAX:
@@ -5221,7 +5240,9 @@ def decisions_block(entries, repo_path, show_all=False):
 def append_carry_decisions(rd, carry, batch, session, fence):
     """Record a rollover's carry notes in the decisions log: one carry-batch
     line (always, so an empty carry expires the prior batch) plus one entry
-    per 500-character chunk of each non-blank carry line."""
+    per 500-character chunk of each non-blank carry line. Returns False,
+    with a warning on stderr, on any failed append: a successor would
+    otherwise serve the previous batch as current, so rollover refuses."""
     base = {"v": 1, "ts": now_iso(), "session": session, "fence": fence}
     recs = [{**base, "id": decision_id(), "event": "carry-batch", "batch": batch}]
     for line in carry.splitlines():
@@ -5231,7 +5252,15 @@ def append_carry_decisions(rd, carry, batch, session, fence):
             text = chunk if i == 0 else f"(cont.) {chunk}"
             recs.append({**base, "id": decision_id(), "event": "decision", "task": None,
                          "source": "carry", "batch": batch, "text": text})
-    append_decision(rd, *recs)
+    try:
+        append_decision(rd, *recs)
+    except (OSError, ValueError) as exc:
+        # stderr: rollover's last stdout line is the director's outcome.
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        print(f"[WARNING] rollover: carry notes not saved to {Path(rd) / DECISIONS_FILE} "
+              f"({reason})", file=sys.stderr)
+        return False
+    return True
 
 
 def _note_decision(ns) -> int:
