@@ -247,8 +247,10 @@ Before any implement launch, read `references/contract-pinning.md`.
 
 ## 2a. Phase advancement (plan -> implement) -- raw items only
 
-On `action=confirm-plan`, read `references/phase-advance.md`; pin the contract
-per `references/contract-pinning.md` before the implement launch.
+On `action=confirm-plan`, run the `python3 "$DISPATCH" advance` line `next`
+prints; it covers `references/phase-advance.md` and
+`references/contract-pinning.md`, read only on exit 2 or 3. Re-run on exit 3,
+except at `launch`: relaunch by hand.
 
 ## 2a-UI. Bounded Codex UI specialist dispatch
 
@@ -263,35 +265,30 @@ Read `references/triage.md` before ranking the queue.
 
 **Run the verb first.** A wake-driven check-in is one call:
 
-`python3 "$CORE" checkin --repo-slug <slug> --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
+`python3 "$CORE" next --repo-slug <slug> --repo-path <repo> --runtime claude --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
 
-It refreshes the ownership heartbeat itself, so a wake turn runs it IN PLACE
-OF preflight step 4's `refresh-owner` and skips the dashboard regeneration,
-which is a kickoff-time concern. It polls `herdr agent list` / `herdr
-workspace list`, correlates each task's records, reads HEAD and ancestry, and
-prints one line per non-terminal task plus a final `changed:` line. It mutates
-nothing but the heartbeat; every status transition below is still the
-director's own `write-task`.
+It prints what `checkin --repo-slug ...` prints plus `next:` lines under each
+task with an action: `next: run <command>` (run it as printed), `next: ask
+<question>` (ask it once) or `next: read <section>`. It refreshes the
+ownership heartbeat itself, so a wake turn runs it IN PLACE OF preflight
+step 4's `refresh-owner` and skips the dashboard regeneration. It polls
+herdr, correlates each task's records, reads HEAD and ancestry, and mutates
+nothing but the heartbeat; every status transition is still a `write-task`.
 
-Then, whatever the `changed:` line says, run
-`python3 "$CORE" present-task --repo-slug <slug> --session <id> --fence <fence> --all --apply`
-once. It relabels any workspace a missed trigger left stale (a crash, a
-rollover, a sweep, a settle that lost its fence). A nonzero exit is
-reported in the check-in and does not make the check-in incomplete.
+Whatever the `changed:` line says, run the `present-task` line printed just
+above it once. It relabels any workspace a missed trigger left stale. A
+nonzero exit is reported and does not make the check-in incomplete.
 
 - `changed: no` -- end the turn. Do not read panes, do not re-poll.
 - `changed: yes`, any `action=unknown`, or `poll: failed (...)` -- fall through
   to the full reconciliation below, for the named tasks only.
 - exit 1 with `owner: stale-fence` -- re-claim before acting.
 
-Each `action` names the transition still to be written: `confirm-completion`,
-`confirm-plan`, `dispatch-review`, `confirm-review`, `changes-requested`,
-`stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
-`mech-ledger`, `paused`, `failed`, `exit-idle-worker`. An action fires only
-while that transition is unrecorded, so a settled task reports `none`
-instead of re-reporting its evidence forever. Two non-task lines
-also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
-and `rollover-due ...` (section 1a).
+Each `action` names the transition still to be written (the core's
+`NEXT_ACTIONS` maps each to its `next:` line) and fires only while it is
+unrecorded. Two non-task lines also set `changed: yes`:
+`review-overdue <task> ...` (section 5 step 6) and `rollover-due ...`
+(section 1a).
 
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
@@ -300,7 +297,7 @@ implementer approved; plan or implement attempt paused or failed
 (`attempt-stopped`); superseded; failed launch; or terminal task. It names housekeeping, not a status transition, and ranks
 after every other action.
 
-Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
+Run the `settle --launch-id <launch>` line `next` prints for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
 means report it. `settle` never closes a workspace, its root pane (the first
 row's pane) or its last pane. It closes any other pane once every row that
@@ -622,6 +619,10 @@ Helper sessions a reviewer spawns, and which of them may emit: read
    - only `approved` with no blocking findings and complete evidence ->
      `status: reviewed`, event `reviewed`. Advisories remain visible and do not
      create an automatic fix queue.
+
+On `action=confirm-review`, the `python3 "$DISPATCH" accept-review` line
+`next` prints runs this approved branch, the Lesson harvest and both
+settles; exit 2 is a refusal, exit 3 a step or settle to re-run.
 
 When a Claude review record arrives and `checkin` shows the task `dirty=yes`,
 tell the human before any phase advance; acceptance itself is unchanged
