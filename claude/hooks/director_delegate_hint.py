@@ -14,9 +14,6 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 HOOKS = Path(__file__).resolve().parent
 sys.path.insert(0, str(HOOKS))
-import herdr_orch_core as core  # noqa: E402
-import orch_edit_guard as guard  # noqa: E402
-import rm_guard  # noqa: E402
 
 HINT_EVERY = 20
 STATE_FILE = "delegate-hint.json"
@@ -100,12 +97,21 @@ def task_label(payload):
     return label
 
 
+def is_director(payload):
+    """Cheap gate: runs before any heavy import so other sessions exit fast."""
+    return (os.environ.get("HERDR_ENV") == "1" and payload.get("agent_type") == "director"
+            and not payload.get("agent_id"))
+
+
+def load_modules():
+    global core, guard, rm_guard
+    import herdr_orch_core as core  # noqa: E402
+    import orch_edit_guard as guard  # noqa: E402
+    import rm_guard  # noqa: E402
+
+
 def director_rd(payload):
     """The owned slug's state dir for a director session, else None."""
-    if os.environ.get("HERDR_ENV") != "1":
-        return None
-    if payload.get("agent_type") != "director" or payload.get("agent_id"):
-        return None
     session, cwd = payload.get("session_id"), payload.get("cwd")
     if not isinstance(session, str) or not isinstance(cwd, str):
         return None
@@ -132,6 +138,9 @@ def main():
         payload = json.loads(sys.stdin.read())
         if not isinstance(payload, dict):
             return 0
+        if not is_director(payload):
+            return 0
+        load_modules()
         rd = director_rd(payload)
         if rd is None:
             return 0

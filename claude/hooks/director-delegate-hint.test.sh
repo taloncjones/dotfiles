@@ -152,5 +152,12 @@ assert any(e.get("matcher") == "*" and any(h.get("command") == "~/.claude/hooks/
 PY
 then pass "18 the template registers the hook under PostToolUse *"; else fail "18 the template registers the hook under PostToolUse *"; fi
 
+# 19: a non-director payload exits before importing the core
+p="$(payload "$SID_A" Bash "$(bash_in 'uv run pytest')" "")"
+printf '%s' "$p" | env HOME="$H" CLAUDE_CONFIG_DIR="$CFG" HERDR_ENV=1 python3 -X importtime "$HOOK" >"$FIX/out" 2>"$FIX/err"
+rc=$?
+if [ "$rc" = 0 ] && [ ! -s "$FIX/out" ] && ! grep -q 'herdr_orch_core\|orch_edit_guard\|rm_guard' "$FIX/err"; then
+    pass "19 a non-director payload exits without importing the core"; else fail "19 a non-director payload exits without importing the core"; fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

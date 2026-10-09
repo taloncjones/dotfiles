@@ -333,13 +333,13 @@ while its worktree exists; an `abandoned` task has no workspace left to
 sweep, and `merged` sweeps in section 6a.
 
 `stale-review-reset` also fires for a `completed` task pinned at HEAD: a
-review dispatch interrupted between its `review_head_sha` write and its
-`review-dispatched` write (nothing reserved, a launch not accepted, or an
-accepted launch whose status write was lost). The remedy is the same
+review dispatch interrupted after `dispatch-gate` reserved the pin but before
+`review-dispatched` landed (a launch not accepted, or an accepted launch
+whose status write was lost). The remedy is the same
 stale-verdict reset: `write-task` the full record with `review_head_sha:
 null` and the status unchanged. That write retires the latest review
 launch (`retired_review_launch_ids`), and the next check-in reports
-`dispatch-review`, which re-runs section 5 from its preflight.
+`dispatch-review`; run section 5's `dispatch-gate` again.
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
@@ -727,8 +727,8 @@ Once its `ship.json` is written, the idle ship agent settles as
 `handoff-recorded`: run
 `python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <ship_launch_id>`,
 which exits it and closes its pane under the same limits as section 4.
-The manual `esc`, `/exit`, exact-pane-close path above stays for a pinned
-agent with no handoff.
+An agent with no recorded handoff stays pinned: leave it to section 4's
+`settle`/`sweep`.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
