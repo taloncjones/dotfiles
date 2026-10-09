@@ -1015,6 +1015,17 @@ class GateReportTests(unittest.TestCase):
                 "POLICY",
             )
 
+    def test_invalidate_removes_expected_identity(self):
+        target = self.root / "invalidate-target.json"
+        target.write_text("{}", encoding="utf-8")
+        self.assertEqual(gate.main(["invalidate", "--expected", str(target)]), 0)
+        self.assertFalse(target.exists())
+
+    def test_invalidate_missing_expected_identity_succeeds(self):
+        target = self.root / "absent.json"
+        self.assertEqual(gate.main(["invalidate", "--expected", str(target)]), 0)
+        self.assertFalse(target.exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
