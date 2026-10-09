@@ -287,6 +287,12 @@ unrecorded. Two non-task lines also set `changed: yes`:
 `review-overdue <task> ...` (section 5 step 6) and `rollover-due ...`
 (section 1a).
 
+`paused` and `failed` are recorded by a field: once a stopped plan or
+implement attempt will not be reprompted, `write-task --present` the full
+record with `stop_recorded: {"launch_id": <done launch_id>, "ts": <done ts>}`
+(a `failed` that ends the task writes `status: failed`). The next check-in
+reports `exit-idle-worker`; a later stop has a new `ts` and needs a new record.
+
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
 recorded or retired; ship handoff recorded (`handoff-recorded`);
@@ -308,10 +314,11 @@ or `timeout`) and the agent is still live, settle reads the pane and sends
 agent-bound keys only when Claude Code's background-work exit menu is
 actually showing. When `/exit` returns `agent_not_running` (the agent left
 the pane during the wait) or `agent_not_found`, settle skips the menu read.
-Either way settle polls `herdr agent get <agent>` for up to about 10 seconds
-and reports `exited` once herdr returns `agent_not_found`; the row's agent is
-never judged by `agent list`. Before closing, settle waits up to about 10
-seconds for the pane's foreground to return to its shell.
+Either way settle polls `herdr agent get <agent>` and reports `exited` once
+herdr returns `agent_not_found` or reports the agent in another pane; the
+row's agent is never judged by `agent list`. Before closing, settle waits
+for the pane's foreground to return to its shell. Each wait takes about 10
+seconds, or about 20 when herdr is slow.
 The director never runs `launch` while a `settle` or `sweep` for the same
 workspace is in flight, and starts neither during a launch: both read the
 pane and row set the other changes. After a `sweep` fails or is killed,

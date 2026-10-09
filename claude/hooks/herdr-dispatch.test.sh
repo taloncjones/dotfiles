@@ -312,13 +312,14 @@ elif args[:2] == ["agent", "get"] and os.environ.get("FAKE_AGENT_GET_FROM_LIST")
             agents = [a for a in agents if a["name"] != args[2]]
             apath.write_text(json.dumps(agents))
     if mode == "exit-agent-reappears":
-        # The row's agent is removed by the /exit reply, then reappears on
-        # the third read: the settle re-check after the exited verdict.
+        # The /exit reply removes the row's agent; it reappears on the 4th
+        # read: entry read, menu check, the first _await_gone poll (gone),
+        # then the post-exit re-check this mode exercises.
         cpath = Path(os.environ["FAKE_AGENT_LIST_COUNT"])
         gets = (int(cpath.read_text()) if cpath.exists() else 0) + 1
         cpath.write_text(str(gets))
         removed_path = Path(os.environ["FAKE_REMOVED_AGENT"])
-        if gets >= 3 and removed_path.exists():
+        if gets >= 4 and removed_path.exists():
             removed = json.loads(removed_path.read_text())
             if not any(a["name"] == removed["name"] for a in agents):
                 agents = agents + [removed]
@@ -1591,6 +1592,33 @@ def test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit(
         fx.close()
 
 
+def test_settle_poll_stops_at_its_wall_clock_budget():
+    saved = herdr_dispatch.SETTLE_WAIT_SECS
+    calls = []
+
+    def slow_never():
+        calls.append(1)
+        time.sleep(0.1)
+        return False
+
+    try:
+        herdr_dispatch.SETTLE_WAIT_SECS = 0.2
+        start = time.monotonic()
+        assert herdr_dispatch._poll(slow_never) is False
+        elapsed = time.monotonic() - start
+        assert len(calls) < herdr_dispatch.SETTLE_POLLS, len(calls)
+        assert elapsed < 1.0, elapsed
+        herdr_dispatch.SETTLE_WAIT_SECS = 60
+        calls.clear()
+        assert herdr_dispatch._poll(lambda: calls.append(1) or len(calls) == 3) is True
+        assert len(calls) == 3, calls
+        calls.clear()
+        assert herdr_dispatch._poll(lambda: calls.append(1) and False) is False
+        assert len(calls) == herdr_dispatch.SETTLE_POLLS, calls
+    finally:
+        herdr_dispatch.SETTLE_WAIT_SECS = saved
+
+
 def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited():
     fx = Fixture()
     try:
@@ -1602,12 +1630,13 @@ def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited(
                         [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        # _exit_agent's own snapshot says "exited"; the freshest re-check
-        # before deciding pane fate must catch the reappearance.
+        # _await_gone saw the agent gone; the post-exit re-check sees it back
+        # and keeps the pane before any pane-idle wait.
         assert result["agent"] == "still-live", result
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "exit-incomplete", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "process-info"]], fx.calls()
     finally:
         fx.close()
 
@@ -1717,7 +1746,7 @@ def test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member():
                         [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        # A member settle cannot place could be the row's agent: unknown, not gone.
+        # The row's agent is gone by name; a member settle cannot place keeps the pane.
         assert result["agent"] == "exited", result
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "settled", result
@@ -1812,7 +1841,8 @@ def test_settle_keeps_a_pane_when_a_malformed_agent_member_appears_before_close(
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         fx.env["FAKE_HERDR_MODE"] = "process-info-malformed-appears"
         result = fx.settle("R")
-        # Unknown occupancy at the last read: report the exit as incomplete.
+        # The agent was already absent, so the row settles; the malformed
+        # member seen at the last read keeps the pane.
         assert result["agent"] == "absent", result
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "settled", result
@@ -4987,6 +5017,7 @@ for name, test in (
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
+    ("settle poll stops at its wall-clock budget", test_settle_poll_stops_at_its_wall_clock_budget),
     ("settle keeps a pane when the agent reappears after exit reports exited", test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited),
     ("settle closes a pane when exit reports agent_not_running", test_settle_closes_a_pane_when_exit_reports_agent_not_running),
     ("settle closes a pane when exit reports agent_not_found", test_settle_closes_a_pane_when_exit_reports_agent_not_found),

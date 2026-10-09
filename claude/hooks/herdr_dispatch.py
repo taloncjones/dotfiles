@@ -46,6 +46,9 @@ PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
 SETTLE_POLLS = 20
 SETTLE_POLL_SECS = 0.5
+# Wall-clock cap per wait, so a herdr call timing out (10 s each) cannot
+# stretch one wait to SETTLE_POLLS timeouts.
+SETTLE_WAIT_SECS = 10
 # bin/op-env: a project's 1Password-resolved credentials for Claude panes.
 OP_ENV = Path(__file__).resolve().parents[2] / "bin" / "op-env"
 # Ready wait for a pane that resolves op-env: its 20 s op bound plus startup.
@@ -1608,11 +1611,13 @@ def _row_agent(herdr_cli, row, env):
 
 
 def _poll(check):
+    deadline = time.monotonic() + SETTLE_WAIT_SECS
     for attempt in range(SETTLE_POLLS):
         if check():
             return True
-        if attempt < SETTLE_POLLS - 1:
-            time.sleep(SETTLE_POLL_SECS)
+        if attempt == SETTLE_POLLS - 1 or time.monotonic() >= deadline:
+            return False
+        time.sleep(SETTLE_POLL_SECS)
     return False
 
 
@@ -1632,7 +1637,7 @@ _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 _EXIT_GONE_CODES = frozenset({"agent_not_running", "agent_not_found"})
 
 
-def _exit_agent(herdr_cli, row, workspace_id, env):
+def _exit_agent(herdr_cli, row, env):
     try:
         result = _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
                                "--timeout", str(EXIT_WAIT_MS)],
@@ -1755,7 +1760,7 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
                     "pane": "untouched"}
         if not row.get("exit_requested"):
             _mark_exit_requested(task_path, task, index, reason)
-        agent = _exit_agent(herdr_cli, row, workspace_id, env)
+        agent = _exit_agent(herdr_cli, row, env)
         agents, panes = _snapshot(herdr_cli, workspace_id, env)
         if agent == "exited" and _row_agent(herdr_cli, row, env)[0] != "gone":
             # The exit verdict can go stale before this read; trust the
