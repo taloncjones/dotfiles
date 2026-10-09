@@ -12622,6 +12622,182 @@ assert facts["idle_settled"] is False, facts
 assert facts["action"] != "exit-idle-worker", facts["action"]
 PY
 
+check "next: confirm-review prints a ready accept-review command" <<PY
+$LOAD
+import shlex
+adapter = os.path.join(os.path.dirname(os.path.realpath("claude/hooks/herdr_orch_core.py")), "herdr_dispatch.py")
+ctx = {"repo_slug": "slug-x", "repo_path": "/r/p q", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+facts = {"task_id": "td-a", "action": "confirm-review", "head": "a" * 40, "ws": "w1",
+         "idle_launch": None, "idle_ws": None}
+line = c.next_line({"worktree": "/w"}, facts, ctx)
+assert line.startswith("  next: run "), line
+argv = shlex.split(line[len("  next: run "):])
+assert argv == ["python3", adapter, "accept-review", "--repo-slug", "slug-x", "--repo-path", "/r/p q",
+                "--runtime", "claude", "--session", "S", "--fence", "7", "--task-id", "td-a"], argv
+ctx["personal"] = True
+facts["action"] = "confirm-plan"
+argv = shlex.split(c.next_line({"worktree": "/w"}, facts, ctx)[len("  next: run "):])
+assert argv[2] == "advance" and argv[7:10] == ["--runtime", "claude", "--personal"], argv
+facts["action"] = "none"
+assert c.next_line({"worktree": "/w"}, facts, ctx) is None
+PY
+
+check "next: exit-idle-worker prints a settle command for the idle row" <<PY
+$LOAD
+import shlex
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+rev = {"phase": "review", "workspace_id": "w1", "runtime": "claude", "launch_id": "R",
+       "pane_id": "w1:p2", "source_head_sha": h, "agent": "rev-x"}
+impl = dict(rev, phase="implement", launch_id="I", pane_id="w1:p1", agent="impl-x")
+rec = {k: rev[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(dict(rec, task_id="PROJ-1", outcome="changes-requested")))
+task = {"v": 1, "task_id": "PROJ-1", "status": "changes-requested", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl, rev]}
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "rev-x", "pane_id": "w1:p2", "agent_status": "done"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_launch"] == "R" and facts["idle_ws"] == "w1", facts
+facts["action"] = "exit-idle-worker"
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+argv = shlex.split(c.next_line(task, facts, ctx)[len("  next: run "):])
+assert argv[2:] == ["settle", "--repo-slug", "slug-x", "--task-id", "PROJ-1", "--session", "S",
+                    "--fence", "7", "--workspace-id", "w1", "--cwd", task["worktree"],
+                    "--launch-id", "R", "--runtime", "claude"], argv
+poll["agents"]["w1"][0]["agent_status"] = "working"
+quiet = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert quiet["idle_launch"] is None and quiet["idle_ws"] is None, quiet
+PY
+
+check "next: changes-requested prints an ask line" <<PY
+$LOAD
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+facts = {"task_id": "td-a", "action": "changes-requested", "head": "abcdef0123" + "0" * 30,
+         "ws": "w1", "idle_launch": None, "idle_ws": None}
+assert c.next_line({}, facts, ctx) == ("  next: ask Review at abcdef0 requested changes: render a repair "
+    "brief (SKILL.md section 5 step 6), or return the task to design?"), c.next_line({}, facts, ctx)
+facts.update(action="paused", head=None)
+assert c.next_line({}, facts, ctx) == "  next: ask Attempt paused at unknown: relaunch, re-brief, or stop?"
+facts["action"] = "dispatch-review"
+assert c.next_line({}, facts, ctx) == "  next: read SKILL.md section 5"
+PY
+
+check "next: output is checkin output plus next lines" <<'PY'
+import os, re, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+fence = subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                        "--session", "S", "--host", "h", "--pid", str(os.getpid())],
+                       capture_output=True, text=True, check=True).stdout.strip()
+a, w = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(a, "w").write('{"result":{"agents":[]}}'); open(w, "w").write('{"result":{"workspaces":[]}}')
+base = ["--repo-slug", slug, "--session", "S", "--fence", fence, "--agents-json", a, "--workspaces-json", w]
+ck = subprocess.run(["python3", CORE, "checkin", *base], capture_output=True, text=True)
+nx = subprocess.run(["python3", CORE, "next", *base, "--repo-path", repo, "--runtime", "claude"],
+                    capture_output=True, text=True)
+assert ck.returncode == 0 and nx.returncode == 0, (ck.stderr, nx.stderr)
+lines = nx.stdout.splitlines()
+assert [l for l in lines if not re.match(r"^ *next: ", l)] == ck.stdout.splitlines(), (lines, ck.stdout)
+assert lines[-1].startswith("changed: ") and lines[-2].startswith("next: run python3 "), lines
+assert " present-task " in lines[-2] and lines[-2].endswith(" --all --apply"), lines[-2]
+task_line = next(i for i, l in enumerate(lines) if l.startswith("td-render-x "))
+if " action=none " not in lines[task_line]:
+    assert re.match(r"^  next: (run|ask|read) ", lines[task_line + 1]), lines
+PY
+
+check "next: a quiet repo prints only the present-task line" <<'PY'
+import os, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+os.remove(task_file)
+fence = subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                        "--session", "S", "--host", "h", "--pid", str(os.getpid())],
+                       capture_output=True, text=True, check=True).stdout.strip()
+a, w = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(a, "w").write('{"result":{"agents":[]}}'); open(w, "w").write('{"result":{"workspaces":[]}}')
+nx = subprocess.run(["python3", CORE, "next", "--repo-slug", slug, "--repo-path", repo, "--runtime", "claude",
+                     "--session", "S", "--fence", fence, "--agents-json", a, "--workspaces-json", w],
+                    capture_output=True, text=True)
+assert nx.returncode == 0, nx.stderr
+lines = nx.stdout.splitlines()
+assert len(lines) == 2 and lines[0].startswith("next: run python3 ") and lines[1] == "changed: no", lines
+PY
+
+check "next: stale fence prints owner: stale-fence and exits 1" <<'PY'
+import os, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                "--session", "S", "--host", "h", "--pid", str(os.getpid())], capture_output=True, check=True)
+a, w = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(a, "w").write('{"result":{"agents":[]}}'); open(w, "w").write('{"result":{"workspaces":[]}}')
+nx = subprocess.run(["python3", CORE, "next", "--repo-slug", slug, "--repo-path", repo, "--runtime", "claude",
+                     "--session", "S", "--fence", "999", "--agents-json", a, "--workspaces-json", w],
+                    capture_output=True, text=True)
+assert nx.returncode == 1 and nx.stdout == "owner: stale-fence\n", (nx.returncode, nx.stdout)
+PY
+
+check "next: refuses without --repo-path and --runtime" <<'PY'
+import os, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+fence = subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                        "--session", "S", "--host", "h", "--pid", str(os.getpid())],
+                       capture_output=True, text=True, check=True).stdout.strip()
+base = ["python3", CORE, "next", "--repo-slug", slug, "--session", "S", "--fence", fence]
+assert subprocess.run(base + ["--runtime", "claude"], capture_output=True).returncode == 2
+assert subprocess.run(base + ["--repo-path", repo], capture_output=True).returncode == 2
+PY
+
+check "append-lessons: appends new tagged lines once" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'noise\nLESSON: [td-a plan] first lesson\nLESSON: [td-a plan] none\nLESSON: [td-ab plan] other task\nLESSON: [td-a review] other phase\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"appended": 1, "lines": ["LESSON: [td-a plan] first lesson"], "note": False}, d'
+test "$(grep -c '^## .* pane w1:p1 (plan)$' "$RD/tasks/td-a.lessons.md")" = 1
+grep -qx 'LESSON: \[td-a plan\] first lesson' "$RD/tasks/td-a.lessons.md"
+before=$(cat "$RD/tasks/td-a.lessons.md")
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["appended"] == 0 and d["lines"] == ["LESSON: [td-a plan] first lesson"], d'
+test "$(cat "$RD/tasks/td-a.lessons.md")" = "$before"
+SH
+
+check "append-lessons: joins wrapped rows and drops none" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+mkdir -p "$root/herdr-orch/slug-x/tasks"
+printf 'LESSON: [td-a review] wrapped\n   continuation row\n\nLESSON: [td-a review]   none\n- LESSON: [td-a review] bullet form\nafter\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase review --source "findings L1" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["lines"] == ["LESSON: [td-a review] wrapped continuation row", "LESSON: [td-a review] bullet form"] and d["appended"] == 2, d'
+SH
+
+check "append-lessons: notes an empty source once" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'nothing tagged here\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"appended": 0, "lines": [], "note": True}, d'
+$CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src" >/dev/null
+test "$(grep -cx -- '- note: no LESSON line found (pane w1:p1 (plan))' "$RD/tasks/td-a.lessons.md")" = 1
+test "$(grep -c '^## ' "$RD/tasks/td-a.lessons.md")" = 1
+SH
+
+check "append-lessons: stale fence writes nothing" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+$CLI claim-owner --repo-slug slug-x --session S --host h --pid 1 >/dev/null
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'LESSON: [td-a plan] x\n' > "$root/src"
+rc=0; out=$($CLI append-lessons --repo-slug slug-x --session S --fence 999 --task-id td-a --phase plan --source s < "$root/src") || rc=$?
+test "$rc" = 1 && test "$out" = "owner: stale-fence"
+test ! -e "$RD/tasks/td-a.lessons.md"
+SH
+
 check "checkin_action: exit-idle-worker ranks after every transition" <<PY
 $LOAD
 f = {"status": "in-progress", "poll_ok": True, "head": "a" * 40, "worktree_exists": True,

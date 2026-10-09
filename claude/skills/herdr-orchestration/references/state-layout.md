@@ -1039,7 +1039,8 @@ done
 
 `tasks/<task_id>.lessons.md` holds the rule lessons and harvest notes for one
 task (SKILL.md section 4, Lesson harvest); lessons that name a fixable defect
-go to todos instead. Only the director writes it, by convention and only while
+go to todos instead. The transition verbs write every line here through
+`append-lessons`; the director files a defect line in its todo as well. Only the director writes it, by convention and only while
 it holds the owner fence, at the check-in that reads a completion record or a
 review findings file and in the turn it handles friction itself. The file is
 append-only: each batch is one shell append (`>>`) of a

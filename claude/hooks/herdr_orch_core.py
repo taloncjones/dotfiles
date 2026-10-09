@@ -17,6 +17,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import signal
 import socket
 import stat
@@ -3652,6 +3653,109 @@ def pending_action(f) -> str:
     return "none"
 
 
+# One entry per checkin_rules name: (kind, template). A run entry's template
+# is the adapter verb; ask and read templates take {head7} and {ws}.
+NEXT_ACTIONS = {
+    "confirm-plan": ("run", "advance"),
+    "confirm-review": ("run", "accept-review"),
+    "exit-idle-worker": ("run", "settle"),
+    "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
+    "dispatch-review": ("read", "SKILL.md section 5"),
+    "stale-review-reset": ("read", "SKILL.md section 4 (stale-review-reset)"),
+    "unblocked": ("read", "SKILL.md section 9 (blocked -> in-progress)"),
+    "mech-ledger": ("read", "SKILL.md section 4 (run-mech worker)"),
+    "ship": ("read", "SKILL.md section 6 (ship step)"),
+    "unknown": ("read", "SKILL.md section 4 (full reconciliation)"),
+    "changes-requested": ("ask", "Review at {head7} requested changes: render a repair brief "
+                                 "(SKILL.md section 5 step 6), or return the task to design?"),
+    "blocked": ("ask", "Worker in {ws} is blocked: read its pane and answer it, or stop it?"),
+    "abandoned-candidate": ("ask", "Workspace {ws} and its worktree are gone with no completion: "
+                                   "record abandoned?"),
+    "paused": ("ask", "Attempt paused at {head7}: relaunch, re-brief, or stop?"),
+    "failed": ("ask", "Attempt failed at {head7}: repair, relaunch, or record failed?"),
+}
+ADAPTER_PATH = Path(__file__).resolve().parent / "herdr_dispatch.py"
+
+
+def _command(script, verb, *args) -> str:
+    return " ".join(shlex.quote(str(a)) for a in ("python3", script, verb, *args))
+
+
+def next_line(task, facts, ctx):
+    """The `next:` line under one check-in task line, or None for no action."""
+    action = facts["action"]
+    if action == "none":
+        return None
+    kind, template = NEXT_ACTIONS[action]
+    if kind != "run":
+        head7 = (facts.get("head") or "unknown")[:7]
+        return f"  next: {kind} {template.format(head7=head7, ws=facts.get('ws'))}"
+    account = ["--runtime", ctx["runtime"]] + (["--personal"] if ctx["personal"] else [])
+    fenced = ["--session", ctx["session"], "--fence", str(ctx["fence"])]
+    if template == "settle":
+        args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
+                "--workspace-id", facts["idle_ws"], "--cwd", task.get("worktree") or "",
+                "--launch-id", facts["idle_launch"], *account]
+    else:
+        args = ["--repo-slug", ctx["repo_slug"], "--repo-path", ctx["repo_path"], *account,
+                *fenced, "--task-id", facts["task_id"]]
+    return f"  next: run {_command(ADAPTER_PATH, template, *args)}"
+
+
+def checkin_report(ns, rd):
+    """The check-in lines as (line, task, facts); task and facts are None on
+    a non-task line. `checkin` and `next` print the same lines."""
+    rows = []
+
+    def emit(line, task=None, facts=None):
+        rows.append((line, task, facts))
+
+    poll, reason = _checkin_poll(ns)
+    if poll is None:
+        emit(f"poll: failed ({reason})")
+    payload_root = state_root().parent
+    changed = poll is None
+    now_ns = time.time_ns()
+    for tf in task_record_files(rd / "tasks"):
+        try:
+            task = json.loads(read_payload_text(tf))
+        except (OSError, ValueError):
+            emit(f"unreadable-task {tf.name}")
+            changed = True
+            continue
+        if not isinstance(task, dict):
+            emit(f"unreadable-task {tf.name}")
+            changed = True
+            continue
+        if not ns.all and task.get("status") in CHECKIN_TERMINAL:
+            continue
+        f = checkin_facts(rd, task, poll, payload_root)
+        if f["action"] != "none":
+            changed = True
+        for name in f["unreadable"]:
+            emit(f"unreadable-record {name}")
+            changed = True
+        for kind in f["unverifiable"]:
+            emit(f"unverifiable-evidence {f['task_id']} {kind}")
+            changed = True
+        emit(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
+             f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
+             f"dirty={f['dirty']} done={f['done']} review={f['review']} "
+             f"hint={f['hint']} action={f['action']} wake={f['wake']}", task, f)
+        if task.get("status") == "review-dispatched":
+            d = review_deadline(rd, task, now_ns)
+            if d["state"] in ("overdue", "expired"):
+                emit(f"review-overdue {f['task_id']} state={d['state']} "
+                     f"launch={d['launch']} remaining={d['remaining']}")
+                changed = True
+    due = rollover_due(rd, ns.session)
+    if due:
+        emit(f"rollover-due used_pct={due[0]} threshold={due[1]}")
+        changed = True
+    emit(f"changed: {'yes' if changed else 'no'}")
+    return rows
+
+
 def _utc_stamp(value):
     """value when it is a core UTC timestamp exactly as now_iso writes it,
     else None. The round trip rejects unpadded forms strptime accepts
@@ -3831,6 +3935,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
     poll_agents = poll.get("agents", {}) if isinstance(poll, dict) else {}
     idle_settled = False
+    idle_launch = idle_ws = None
     ship_handoffs = ship_handoff_launches(rd, tid, task)
     for index, row in enumerate(workers):
         if not isinstance(row, dict) or not _nonempty_str(row.get("agent")):
@@ -3848,6 +3953,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                                    ship_report=ship_report_ns(rd, tid),
                                    ship_handoffs=ship_handoffs):
             idle_settled = True
+            idle_launch, idle_ws = row.get("launch_id"), row.get("workspace_id")
             break
     impl_ws = phase_workspace(task, "implement")
     plan_ws = phase_workspace(task, "plan")
@@ -3920,6 +4026,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # in the core deletes done.json on relaunch.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "idle_settled": idle_settled,
+        "idle_launch": idle_launch, "idle_ws": idle_ws,
         "ship_pending": ship_pending(task),
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES
@@ -4968,6 +5075,50 @@ def append_decision(rd, *recs):
     append_payload(Path(rd) / DECISIONS_FILE, data.encode("utf-8"))
 
 
+LESSON_PHASES = ("plan", "implement", "repair", "review", "ship", "mech", "director")
+
+
+def harvest_lesson_lines(text, task_id, phase):
+    """Kept LESSON lines for one task and phase (references/lesson-harvest.md step 2)."""
+    tag = f"LESSON: [{task_id} {phase}]"
+    found, cur = [], None
+    for raw in text.splitlines():
+        s = raw.strip()
+        body = s[2:].lstrip() if s.startswith("- ") else s
+        if body.startswith("LESSON:"):
+            if cur:
+                found.append(cur)
+            cur = body
+        elif cur is not None and s and raw[:1] in (" ", "\t"):
+            cur += " " + s
+        else:
+            if cur:
+                found.append(cur)
+            cur = None
+    if cur:
+        found.append(cur)
+    return [f for f in found
+            if (f == tag or f.startswith(tag + " ")) and f[len(tag):].strip() != "none"]
+
+
+def append_lessons(rd, task_id, phase, source, text):
+    """Append the kept lines the ledger lacks as one batch.
+    -> (kept lines, number appended, whether the source had none)."""
+    kept = harvest_lesson_lines(text, task_id, phase)
+    path = Path(rd) / "tasks" / f"{task_id}.lessons.md"
+    try:
+        present = set(read_payload_text(path).splitlines())
+    except FileNotFoundError:
+        present = set()
+    note = f"- note: no LESSON line found ({source})"
+    new = [line for line in kept if line not in present]
+    if (kept and not new) or (not kept and note in present):
+        return kept, 0, not kept
+    body = "\n".join(new if kept else [note])
+    append_payload(path, f"## {now_iso()} {source}\n{body}\n".encode("utf-8"))
+    return kept, len(new), not kept
+
+
 def read_decisions(rd):
     """Parsed v1 dict lines in file order; bad lines are skipped, a missing
     file is an empty log, and any other read failure propagates."""
@@ -5485,6 +5636,11 @@ def _main(argv=None) -> int:
     ck.add_argument("--agents-json", default=None)
     ck.add_argument("--workspaces-json", default=None)
     ck.add_argument("--all", action="store_true")
+    nx = add("next", "--session", "--fence")
+    nx.add_argument("--messaging-socket", default=None)
+    nx.add_argument("--agents-json", default=None)
+    nx.add_argument("--workspaces-json", default=None)
+    nx.add_argument("--all", action="store_true")
     st = add("status")
     st.add_argument("--archived", action="store_true")
     add("pending")
@@ -5525,6 +5681,7 @@ def _main(argv=None) -> int:
     pt.add_argument("--apply", action="store_true")
     pt.add_argument("--session", default=None)
     pt.add_argument("--fence", type=int, default=None)
+    add("append-lessons", "--task-id", "--phase", "--source", fenced=True)
     nd = add("note-decision", fenced=True)
     nd.add_argument("--text", required=True)
     scope_group = nd.add_mutually_exclusive_group(required=True)
@@ -5619,6 +5776,21 @@ def _main(argv=None) -> int:
         )
     if ns.cmd == "rollover":
         return _rollover(ns)
+    if ns.cmd == "append-lessons":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.phase in LESSON_PHASES, f"--phase must be one of {', '.join(LESSON_PHASES)}")
+        _require(ns.source.strip() and not any(ch in ns.source for ch in "\n\r\x00"),
+                 "--source must be one non-blank line")
+        text = sys.stdin.buffer.read().decode("utf-8", "replace")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd) as tx:
+            if not tx.check(ns.session, ns.fence):
+                print("owner: stale-fence")
+                return 1
+            kept, appended, note = append_lessons(rd, ns.task_id, ns.phase, ns.source, text)
+        print(json.dumps({"appended": appended, "lines": kept, "note": note}, sort_keys=True))
+        return 0
     if ns.cmd == "note-decision":
         return _note_decision(ns)
     if ns.cmd == "retire-decision":
@@ -7407,57 +7579,39 @@ def _main(argv=None) -> int:
             "pr": summary["pr"],
         }, separators=(",", ":")))
         return 0
-    if ns.cmd == "checkin":
+    if ns.cmd in ("checkin", "next"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        if ns.cmd == "next":
+            _require(ns.repo_path is not None and ns.runtime is not None,
+                     "next requires --repo-path and --runtime")
         rd = repo_dir(ns.repo_slug)
         if not refresh_owner(rd, ns.session, ns.fence, ns.messaging_socket):
             print("owner: stale-fence")
             return 1
         acked = undelivered_blocks(rd)
         prune_context_records(keep=ns.session)
-        poll, reason = _checkin_poll(ns)
-        if poll is None:
-            print(f"poll: failed ({reason})")
-        payload_root = state_root().parent
-        changed = poll is None
-        now_ns = time.time_ns()
-        for tf in task_record_files(rd / "tasks"):
-            try:
-                task = json.loads(read_payload_text(tf))
-            except (OSError, ValueError):
-                print(f"unreadable-task {tf.name}")
-                changed = True
+        ctx = None
+        if ns.cmd == "next":
+            ctx = {"repo_slug": ns.repo_slug, "runtime": ns.runtime, "personal": ns.personal,
+                   "repo_path": _PAYLOAD_SELECTION.get()["context"]["root"],
+                   "session": ns.session, "fence": ns.fence}
+        for line, task, facts in checkin_report(ns, rd):
+            if ctx and line.startswith("changed: "):
+                print("next: run " + _command(Path(__file__).resolve(), "present-task",
+                                              "--repo-slug", ns.repo_slug, "--session", ns.session,
+                                              "--fence", ns.fence, "--all", "--apply"))
+            print(line)
+            if ctx is None:
                 continue
-            if not isinstance(task, dict):
-                print(f"unreadable-task {tf.name}")
-                changed = True
-                continue
-            if not ns.all and task.get("status") in CHECKIN_TERMINAL:
-                continue
-            f = checkin_facts(rd, task, poll, payload_root)
-            if f["action"] != "none":
-                changed = True
-            for name in f["unreadable"]:
-                print(f"unreadable-record {name}")
-                changed = True
-            for kind in f["unverifiable"]:
-                print(f"unverifiable-evidence {f['task_id']} {kind}")
-                changed = True
-            print(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
-                  f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
-                  f"dirty={f['dirty']} done={f['done']} review={f['review']} "
-                  f"hint={f['hint']} action={f['action']} wake={f['wake']}")
-            if task.get("status") == "review-dispatched":
-                d = review_deadline(rd, task, now_ns)
-                if d["state"] in ("overdue", "expired"):
-                    print(f"review-overdue {f['task_id']} state={d['state']} "
-                          f"launch={d['launch']} remaining={d['remaining']}")
-                    changed = True
-        due = rollover_due(rd, ns.session)
-        if due:
-            print(f"rollover-due used_pct={due[0]} threshold={due[1]}")
-            changed = True
-        print(f"changed: {'yes' if changed else 'no'}")
+            extra = None
+            if facts is not None:
+                extra = next_line(task, facts, ctx)
+            elif line.startswith("review-overdue "):
+                extra = "  next: read references/review-dispatch-details.md (Review deadline bound)"
+            elif line.startswith("rollover-due "):
+                extra = "  next: read SKILL.md section 1a"
+            if extra:
+                print(extra)
         write_drop_ack(rd, acked)
         return 0
     if ns.cmd == "pending":
