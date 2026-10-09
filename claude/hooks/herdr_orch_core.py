@@ -5231,10 +5231,9 @@ def decisions_block(entries, repo_path, show_all=False):
 def append_carry_decisions(rd, carry, batch, session, fence):
     """Record a rollover's carry notes in the decisions log: one carry-batch
     line (always, so an empty carry expires the prior batch) plus one entry
-    per 500-character chunk of each non-blank carry line. A failed append
-    warns on stderr. It returns False only when the log is still readable:
-    a successor would then serve the previous batch as current, so rollover
-    refuses the handover. An unreadable log serves nothing; the handover goes on."""
+    per 500-character chunk of each non-blank carry line. Returns False,
+    with a warning on stderr, on any failed append: a successor would
+    otherwise serve the previous batch as current, so rollover refuses."""
     base = {"v": 1, "ts": now_iso(), "session": session, "fence": fence}
     recs = [{**base, "id": decision_id(), "event": "carry-batch", "batch": batch}]
     for line in carry.splitlines():
@@ -5248,15 +5247,9 @@ def append_carry_decisions(rd, carry, batch, session, fence):
         append_decision(rd, *recs)
     except (OSError, ValueError) as exc:
         # stderr: rollover's last stdout line is the director's outcome.
-        try:
-            read_decisions(rd)
-        except (OSError, ValueError):
-            # Unreadable too: no stale batch can be served.
-            print(f"[WARNING] rollover: carry notes not saved to decisions.jsonl ({exc}); "
-                  "rollover continues", file=sys.stderr)
-            return True
-        print(f"[WARNING] rollover: carry notes not saved to decisions.jsonl ({exc})",
-              file=sys.stderr)
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        print(f"[WARNING] rollover: carry notes not saved to {Path(rd) / DECISIONS_FILE} "
+              f"({reason})", file=sys.stderr)
         return False
     return True
 

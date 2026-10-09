@@ -191,11 +191,9 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
    line); the new director sees them as `carried:` lines. The same notes
    also land in `decisions.jsonl` and show in the decisions block until the
    next rollover. If that log write fails, the verb prints `[WARNING]
-   rollover: carry notes not saved to decisions.jsonl` on stderr. An unreadable
-   log lets the handover continue; a completed handover then delivers the
-   notes only as `carried:` lines. A log that is still readable makes the verb
-   close the new pane and keep this lease (`handover-failed`,
-   `carry-unsaved`); fix the log and roll over again.
+   rollover: carry notes not saved to decisions.jsonl` on stderr, closes the
+   new pane and keeps this lease (`handover-failed`, `carry-unsaved`); fix the
+   log and roll over again.
 3. Run in the foreground, with a Bash timeout of 300000 ms:
    `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence> --carry '<notes>'`
    (add `--personal` when this director runs on an intentional personal
@@ -217,6 +215,8 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
 7. `rollover: lease moved without a handover ack` or `owner: stale-fence`:
    this session no longer holds the lease. Stop its watch per section 1 step
    7 and run the section-1 preflight, which reports the holder.
+   `rollover: carry notes not saved; this session keeps the lease`: the new pane
+   is closed; fix `decisions.jsonl` and roll over again.
 
 If the Bash call times out or is interrupted, run the same `rollover`
 command again: it reports a handover that completed meanwhile, refuses

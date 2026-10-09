@@ -1661,7 +1661,7 @@ PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-so
 chmod 0600 "$RD/decisions.jsonl"
 test "$rc" = 1
 tail -n 1 "$FX/o" | grep -q '^rollover: carry notes not saved; this session keeps the lease$'
-grep -q '^\[WARNING\] rollover: carry notes not saved to decisions.jsonl' "$FX/e"
+grep -q '^\[WARNING\] rollover: carry notes not saved to .*/decisions.jsonl (Permission denied)$' "$FX/e"
 if grep -q '^pane run ' "$FX/herdr.log"; then exit 1; fi
 grep -qx 'pane close w9:p2' "$FX/herdr.log"
 test ! -e "$RD/rollover-pending.json"
@@ -1672,28 +1672,52 @@ assert last["event"] == "handover-failed" and last["reason"] == "carry-unsaved",
 PY
 SH
 
-check "rollover: an unwritable decisions log warns and the handover goes on" <<'SH'
+check "rollover: a directory at the decisions log path refuses the handover" <<'SH'
 cp "$HANDOVER_STUB" "$FX/bin/herdr"
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
 mkdir "$RD/decisions.jsonl"
-printf 'cp "%s/rollover-pending.json" "%s/marker.copy"\n' "$RD" "$FX" > "$FX/on-run"
 PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
     $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
     --carry "carry note" --ack-secs 1 --poll-secs 0.1 > "$FX/o" 2> "$FX/e" && rc=0 || rc=$?
+chmod 0600 "$RD/decisions.jsonl" 2>/dev/null || true
 test "$rc" = 1
-tail -n 1 "$FX/o" | grep -q '^rollover: no ack from pane w9:p2 '
-grep -q '^\[WARNING\] rollover: carry notes not saved to decisions.jsonl (.*); rollover continues$' "$FX/e"
-if grep -q '^\[X\]' "$FX/e"; then exit 1; fi
-grep -q '^pane run w9:p2 ' "$FX/herdr.log"
+tail -n 1 "$FX/o" | grep -q '^rollover: carry notes not saved; this session keeps the lease$'
+grep -q '^\[WARNING\] rollover: carry notes not saved to .*/decisions.jsonl (Is a directory)$' "$FX/e"
+if grep -q '^pane run ' "$FX/herdr.log"; then exit 1; fi
 grep -qx 'pane close w9:p2' "$FX/herdr.log"
-python3 - "$FX/marker.copy" "$RD/rollover.jsonl" <<'PY'
+test ! -e "$RD/rollover-pending.json"
+python3 - "$RD/rollover.jsonl" <<'PY'
 import json, sys
-m = json.load(open(sys.argv[1]))
-assert m["carry"] == "carry note" and m["pane"] == "w9:p2", m
-last = json.loads(open(sys.argv[2]).read().splitlines()[-1])
-assert last["event"] == "handover-failed" and last["reason"] == "no-ack", last
+last = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert last["event"] == "handover-failed" and last["reason"] == "carry-unsaved", last
+PY
+SH
+
+check "rollover: an unreadable and unwritable decisions log refuses the handover" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+$CORE note-decision $A --repo-wide --text "stays live" >/dev/null
+chmod 0000 "$RD/decisions.jsonl"
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --carry "carry note" --ack-secs 1 --poll-secs 0.1 > "$FX/o" 2> "$FX/e" && rc=0 || rc=$?
+chmod 0600 "$RD/decisions.jsonl" 2>/dev/null || true
+test "$rc" = 1
+tail -n 1 "$FX/o" | grep -q '^rollover: carry notes not saved; this session keeps the lease$'
+grep -q '^\[WARNING\] rollover: carry notes not saved to .*/decisions.jsonl (Permission denied)$' "$FX/e"
+if grep -q '^pane run ' "$FX/herdr.log"; then exit 1; fi
+grep -qx 'pane close w9:p2' "$FX/herdr.log"
+test ! -e "$RD/rollover-pending.json"
+python3 - "$RD/rollover.jsonl" <<'PY'
+import json, sys
+last = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert last["event"] == "handover-failed" and last["reason"] == "carry-unsaved", last
 PY
 SH
 
