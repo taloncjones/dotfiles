@@ -12055,7 +12055,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 584
+assert t.count("\n") <= 586
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -12094,7 +12094,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 584
+assert t.count("\n") <= 586
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -12274,6 +12274,18 @@ os.makedirs(os.path.dirname(handoff)); open(handoff, "w").write("{}\n")
 out, brief = rendered("--phase", "ship", "--focus-file", focus, "--tier", "delta", "--prior-handoff", handoff)
 assert "herdr-ship-brief: tier=delta" in brief and "herdr-ship-delta-caps: 5/150" in brief
 assert f"herdr-ship-prior-handoff: {handoff}" in brief and f"herdr-ship-delta-head: {B}" in brief
+PY
+
+check "render-brief: ship brief defines report_path as the gate report in the launch directory" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "ship", "--focus-file", focus)
+flat = " ".join(brief.split())
+launch_dir = os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") + "/"
+ship_report = os.path.join(rd, "tasks", "td-render-x.ship.md")
+assert f"set co-review's `RUN_DIR` to `{launch_dir}run`" in flat, flat
+assert ("`report_path` is the gate's `run/report.json` inside the launch directory and "
+        f"`expected_path` its `run/expected.json`, never `{ship_report}`.") in flat, flat
 PY
 
 check "render-brief: ship refuses without a PR, on a moved head, or delta without a handoff" <<'PY'

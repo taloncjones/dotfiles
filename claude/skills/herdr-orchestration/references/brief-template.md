@@ -552,8 +552,8 @@ Posting, editing the PR, pushing, committing, and merging are not authorized.
    `gh pr view <pr_number> --repo <pr_repo> --json headRefOid,statusCheckRollup`;
    poll `gh run view` when `gh run watch` dies. A failed check or a wait that
    runs out ends at step 5 with verdict INCOMPLETE.
-3. Create the launch directory, keep co-review's `RUN_DIR` inside it, and
-   write every artifact path absolute.
+3. Create the launch directory, set co-review's `RUN_DIR` to
+   `<ship_launch_dir>run`, and write every artifact path absolute.
 4. Run the `co-review` skill on PR #<pr_number> at <head_sha>. A head behind
    the live base is gated on its merge result, which co-review computes; it
    needs no merge. Only if `prepare` reports a merge conflict, do not touch
@@ -569,7 +569,9 @@ Posting, editing the PR, pushing, committing, and merging are not authorized.
    `task_id`, `launch_id`, `pr_number`, `pr_url`, `head_sha`, `base_ref`,
    `base_sha` (the expected identity's `base`), `tree_sha`, `report_path`,
    `report_sha256`, `expected_path`, `expected_sha256`, `verdict`,
-   `written_at`. A run that dies before a verdict writes none.
+   `written_at`. `report_path` is the gate's `run/report.json` inside the
+   launch directory and `expected_path` its `run/expected.json`, never
+   `<ship_report>`. A run that dies before a verdict writes none.
 7. Then stop and go idle with one paragraph: PR URL, verdict, report path.
    Do not emit-done, post the audit comment, merge, run /post-merge, remove
    worktrees, or delete branches.
