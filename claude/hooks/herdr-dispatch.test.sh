@@ -13,6 +13,7 @@ else
 fi
 
 "${PYTHON[@]}" - <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -4707,6 +4708,264 @@ def test_settle_label_failure_keeps_result():
         fx.close()
 
 
+def reviewed_state(fx):
+    """An approved, digest-correct review at HEAD, awaiting acceptance."""
+    head = core.repository_context(fx.repo)["head"]
+    impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+    findings = fx.rd / "artifacts" / "td-a" / "review-R" / "findings.md"
+    findings.parent.mkdir(parents=True)
+    findings.write_text("Verdict: approved\nBlocking: 0\nAdvisories: tidy names\n\n"
+                        "## Lessons\n\n- LESSON: [td-a review] keep fixtures small\n")
+    review = {**{k: rev[k] for k in core.ATTEMPT_FIELDS}, "task_id": "td-a", "outcome": "approved",
+              "blocking_count": 0, "reviewed_head_sha": head, "findings_ref": str(findings),
+              "findings_sha256": hashlib.sha256(findings.read_bytes()).hexdigest()}
+    fx.settle_state([impl, rev], "review-dispatched", [], [], review=review)
+    task = json.loads(fx.task_file.read_text())
+    task["review_head_sha"] = head
+    fx.task_file.write_text(json.dumps(task))
+    return head
+
+
+def accept(fx):
+    # The fake herdr lives at fx.root/herdr; write-task --present finds it on PATH,
+    # as core_cli(..., herdr_on_path=True) does, never a real herdr.
+    env = {**fx.env, "PATH": str(fx.root) + os.pathsep + fx.env["PATH"]}
+    return herdr_dispatch.accept_review(
+        repo_slug=fx.slug, repo_path=str(fx.repo), runtime="claude", task_id="td-a",
+        session="S", fence=1, herdr_cli=str(fx.bin), env=env)
+
+
+def test_accept_review_records_reviewed_and_settles_both_rows():
+    fx = Fixture()
+    settled = []
+    original = herdr_dispatch.settle
+    herdr_dispatch.settle = lambda **kw: settled.append(kw["launch_id"]) or {"status": "settled"}
+    try:
+        head = reviewed_state(fx)
+        out = accept(fx)
+        task = json.loads(fx.task_file.read_text())
+        assert task["status"] == "reviewed", task
+        assert task["note"] == f"review-change approved at {head[:7]} (0 blocking; advisories: tidy names)", task
+        assert settled == ["I", "R"], settled
+        assert out["status"] == "reviewed" and out["head"] == head and out["dirty"] == "no", out
+        assert out["lessons"] == {"source": "findings R", "appended": 1,
+                                  "lines": ["LESSON: [td-a review] keep fixtures small"]}, out
+        ledger = (fx.rd / "tasks" / "td-a.lessons.md").read_text()
+        assert "LESSON: [td-a review] keep fixtures small" in ledger, ledger
+        assert out["settle"] == [{"launch_id": "I", "status": "settled"},
+                                 {"launch_id": "R", "status": "settled"}], out
+    finally:
+        herdr_dispatch.settle = original
+        fx.close()
+
+
+def test_accept_review_refuses_unconfirmed_evidence_and_writes_nothing():
+    fx = Fixture()
+    try:
+        reviewed_state(fx)
+        review_file = fx.rd / "tasks" / "td-a.review.json"
+        review = json.loads(review_file.read_text())
+        review_file.write_text(json.dumps({**review, "blocking_count": 1}))
+        before = fx.task_file.read_text()
+        try:
+            accept(fx)
+        except herdr_dispatch.DispatchError as exc:
+            assert "confirm-review refused" in str(exc), exc
+        else:
+            raise AssertionError("an unconfirmed review must refuse")
+        assert fx.task_file.read_text() == before
+        assert not (fx.rd / "tasks" / "td-a.lessons.md").exists()
+    finally:
+        fx.close()
+
+
+def test_accept_review_replays_lessons_and_settle_on_a_reviewed_task():
+    fx = Fixture()
+    settled = []
+    original = herdr_dispatch.settle
+    herdr_dispatch.settle = lambda **kw: settled.append(kw["launch_id"]) or {"status": "settled"}
+    try:
+        reviewed_state(fx)
+        accept(fx)
+        task_bytes = fx.task_file.read_text()
+        ledger = (fx.rd / "tasks" / "td-a.lessons.md").read_text()
+        settled.clear()
+        out = accept(fx)
+        assert fx.task_file.read_text() == task_bytes, "replay must not rewrite the record"
+        assert (fx.rd / "tasks" / "td-a.lessons.md").read_text() == ledger
+        assert out["lessons"]["appended"] == 0 and out["lessons"]["lines"], out
+        assert settled == ["I", "R"], settled
+    finally:
+        herdr_dispatch.settle = original
+        fx.close()
+
+
+CONTRACT = {"v": 1, "task_id": "td-a", "commands": [{"name": "t", "run": "true"}]}
+
+
+def plan_ready(fx):
+    """A completed plan attempt at HEAD: frozen spec, done record, ignored contract."""
+    git = ["git", "-C", str(fx.repo)]
+    (fx.repo / ".gitignore").write_text("/claude/contracts/\n")
+    subprocess.run([*git, "add", ".gitignore"], check=True)
+    subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "commit", "-qm", "test: ignore contracts"], check=True)
+    head = core.repository_context(fx.repo)["head"]
+    (fx.repo / "claude" / "contracts").mkdir(parents=True)
+    (fx.repo / "claude" / "contracts" / "td-a-contract.json").write_text(json.dumps(CONTRACT))
+    spec = fx.rd / "artifacts" / "td-a" / "plan-P" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("spec\n")
+    ref = {"kind": "spec", "path": str(spec), "sha256": hashlib.sha256(b"spec\n").hexdigest()}
+    row = settle_row("plan", "P", "w1:p1", head)
+    task = json.loads(fx.task_file.read_text())
+    task.update(workers=[row], base_sha=head, base_ref="origin/main", title="Advance fixture",
+                workspace_id="w1")
+    fx.task_file.write_text(json.dumps(task))
+    done = {**{k: row[k] for k in core.ATTEMPT_FIELDS}, "task_id": "td-a", "outcome": "completed",
+            "head_sha": head, "base_sha": head, "plan_artifacts": [ref]}
+    (fx.rd / "tasks" / "td-a.done.json").write_text(json.dumps(done))
+    focus = fx.root / "focus.md"
+    focus.write_text("ADVANCE-FOCUS\n")
+    return head, ref, focus
+
+
+def run_advance(fx, focus=None):
+    env = {**fx.env, "PATH": str(fx.root) + os.pathsep + fx.env["PATH"]}
+    return herdr_dispatch.advance(
+        repo_slug=fx.slug, repo_path=str(fx.repo), runtime="claude", task_id="td-a",
+        session="S", fence=1, focus_file=None if focus is None else str(focus),
+        herdr_cli=str(fx.bin), env=env)
+
+
+def test_advance_pins_the_contract_and_launches_implement_in_the_plan_pane():
+    fx = Fixture()
+    calls = []
+    originals = herdr_dispatch.settle, herdr_dispatch.launch
+    herdr_dispatch.settle = lambda **kw: calls.append(("settle", kw["launch_id"])) or {"status": "settled"}
+    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "L9"}
+    try:
+        head, ref, focus = plan_ready(fx)
+        out = run_advance(fx, focus)
+        pin = hashlib.sha256((fx.repo / "claude/contracts/td-a-contract.json").read_bytes()).hexdigest()
+        task = json.loads(fx.task_file.read_text())
+        assert task["plan_artifacts"] == [ref] and task["contract_sha256"] == pin, task
+        assert task["contract_path"] == "claude/contracts/td-a-contract.json", task
+        assert task["note"] == "plan confirmed; implement launch pending", task
+        assert calls[0] == ("settle", "P"), calls
+        kw = calls[1][1]
+        assert (kw["phase"], kw["pane_id"], kw["workspace_id"], kw["sandbox"]) == \
+            ("implement", "w1:p1", "w1", "workspace-write"), kw
+        assert kw["agent"] == out["agent"] and "ADVANCE-FOCUS" in kw["prompt"], kw
+        assert kw["route"]["ready"] is True, kw["route"]
+        assert out["status"] == "advanced" and out["launch_id"] == "L9" and out["contract_sha256"] == pin, out
+        assert out["lessons"]["source"] == "pane w1:p1 (plan)" and out["lessons"]["lines"] == [], out
+        ledger = (fx.rd / "tasks" / "td-a.lessons.md").read_text()
+        assert "- note: no LESSON line found (pane w1:p1 (plan))" in ledger, ledger
+    finally:
+        herdr_dispatch.settle, herdr_dispatch.launch = originals
+        fx.close()
+
+
+def test_advance_refuses_a_dirty_worktree_and_writes_nothing():
+    fx = Fixture()
+    try:
+        _head, _ref, focus = plan_ready(fx)
+        (fx.repo / "stray.txt").write_text("x\n")
+        before = fx.task_file.read_text()
+        try:
+            run_advance(fx, focus)
+        except herdr_dispatch.DispatchError as exc:
+            assert "worktree is dirty" in str(exc), exc
+        else:
+            raise AssertionError("a dirty worktree must refuse")
+        assert fx.task_file.read_text() == before
+        assert not (fx.rd / "tasks" / "td-a.lessons.md").exists()
+    finally:
+        fx.close()
+
+
+def test_advance_refuses_a_contract_that_differs_from_the_pin():
+    fx = Fixture()
+    try:
+        _head, _ref, focus = plan_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task.update(contract_path="claude/contracts/td-a-contract.json", contract_sha256="0" * 64)
+        fx.task_file.write_text(json.dumps(task))
+        before = fx.task_file.read_text()
+        try:
+            run_advance(fx, focus)
+        except herdr_dispatch.DispatchError as exc:
+            assert "verify-contract refused" in str(exc), exc
+        else:
+            raise AssertionError("a pin mismatch must refuse")
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_advance_refuses_a_plan_attempt_followed_by_an_implement_row():
+    fx = Fixture()
+    try:
+        head, _ref, focus = plan_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["workers"].append({**settle_row("implement", "I", "w1:p1", head), "status": "launch_failed"})
+        fx.task_file.write_text(json.dumps(task))
+        before = fx.task_file.read_text()
+        try:
+            run_advance(fx, focus)
+        except herdr_dispatch.DispatchError as exc:
+            assert "confirm-plan refused" in str(exc) and "relaunch by hand" in str(exc), exc
+        else:
+            raise AssertionError("a plan attempt with a later implement row must refuse")
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_advance_stops_at_render_brief_with_the_record_written():
+    fx = Fixture()
+    calls = []
+    originals = herdr_dispatch.settle, herdr_dispatch.launch
+    herdr_dispatch.settle = lambda **kw: calls.append("settle") or {"status": "settled"}
+    herdr_dispatch.launch = lambda **kw: calls.append("launch") or {"status": "launched"}
+    try:
+        plan_ready(fx)
+        out = run_advance(fx)  # no focus file and no todo body: render-brief refuses
+        assert out["status"] == "incomplete" and out["step"] == "render-brief", out
+        assert "todo body or --focus-file" in out["detail"], out
+        assert calls == [], calls
+        task = json.loads(fx.task_file.read_text())
+        assert task["contract_sha256"] and task["note"] == "plan confirmed; implement launch pending", task
+        assert (fx.rd / "tasks" / "td-a.lessons.md").exists()
+    finally:
+        herdr_dispatch.settle, herdr_dispatch.launch = originals
+        fx.close()
+
+
+def test_advance_reports_a_failed_record_write_as_incomplete():
+    fx = Fixture()
+    original = herdr_dispatch._core_run
+
+    def failing(verb, *args, **kw):
+        if verb == "write-task":
+            return subprocess.CompletedProcess([verb], 2, "", "[X] simulated refusal\n")
+        return original(verb, *args, **kw)
+
+    herdr_dispatch._core_run = failing
+    try:
+        _head, _ref, focus = plan_ready(fx)
+        before = fx.task_file.read_text()
+        out = run_advance(fx, focus)
+        assert out["status"] == "incomplete" and out["step"] == "write-task", out
+        assert "simulated refusal" in out["detail"], out
+        assert fx.task_file.read_text() == before, "the refused write left the record alone"
+        assert (fx.rd / "tasks" / "td-a.lessons.md").exists(), "the harvest ran before the write"
+    finally:
+        herdr_dispatch._core_run = original
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -4881,6 +5140,15 @@ for name, test in (
     ("bound launch skips the label", test_bound_launch_skips_label),
     ("ship settle relabels merge-ready", test_ship_settle_relabels_merge_ready),
     ("settle label failure keeps the settle result", test_settle_label_failure_keeps_result),
+    ("accept-review records reviewed and settles both rows", test_accept_review_records_reviewed_and_settles_both_rows),
+    ("accept-review refuses unconfirmed evidence and writes nothing", test_accept_review_refuses_unconfirmed_evidence_and_writes_nothing),
+    ("accept-review replays lessons and settle on a reviewed task", test_accept_review_replays_lessons_and_settle_on_a_reviewed_task),
+    ("advance pins the contract and launches implement in the plan pane", test_advance_pins_the_contract_and_launches_implement_in_the_plan_pane),
+    ("advance refuses a dirty worktree and writes nothing", test_advance_refuses_a_dirty_worktree_and_writes_nothing),
+    ("advance refuses a contract that differs from the pin", test_advance_refuses_a_contract_that_differs_from_the_pin),
+    ("advance refuses a plan attempt followed by an implement row", test_advance_refuses_a_plan_attempt_followed_by_an_implement_row),
+    ("advance stops at render-brief with the record written", test_advance_stops_at_render_brief_with_the_record_written),
+    ("advance reports a failed record write as incomplete", test_advance_reports_a_failed_record_write_as_incomplete),
 ):
     check(name, test)
 
