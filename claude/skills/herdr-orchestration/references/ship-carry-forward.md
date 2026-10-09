@@ -46,7 +46,3 @@ round" dispatches as usual. The delta brief carries these lines:
 `herdr-ship-prior-handoff: <pinned ship.json path>`,
 `herdr-ship-delta-head: <head>`, and
 `herdr-ship-delta-caps: <files>/<lines>`.
-
-**Gate base.** The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and `ship.json` `base_sha` copies the expected identity's `base`, so a fresh gate gates the current PR base. A head behind that base is gated on its merge result and needs no merge. On a `prepare` conflict the ship worker records INCOMPLETE and the director's repair flow resolves it; no worker merges the base into the branch. A base that moves cleanly after the gate needs no re-gate: `merge-ready` re-checks it with `base-check`.
-
-A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md` is not harvested at check-in; `/post-merge` step 1 reads it.
