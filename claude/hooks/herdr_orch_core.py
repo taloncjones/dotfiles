@@ -5010,9 +5010,11 @@ def _rollover(ns) -> int:
         held = tx.check(ns.session, ns.fence)
         other = read_rollover_pending(rd)
         busy = other is not None and marker_live(other, ns.session, ns.fence)
+        saved = True
         if held and not busy:
+            saved = append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
+        if held and not busy and saved:
             created = time.time()
-            append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
             write_json_atomic(Path(rd) / ROLLOVER_PENDING_FILE, {
                 "v": 1, "token": token, "pane": new_pane, "from_session": ns.session,
                 "from_fence": ns.fence, "from_pane": pane, "carry": ns.carry,
@@ -5024,6 +5026,9 @@ def _rollover(ns) -> int:
         close(new_pane)
         print(f"rollover: rollover in progress for pane {other['pane']}")
         return 1
+    if not saved:
+        print("rollover: carry notes not saved; this session keeps the lease")
+        return failed("carry-unsaved", hid, new_pane, close_pane=True)
     scope_kind = ((_PAYLOAD_SELECTION.get() or {}).get("scope") or {}).get("kind")
     try:
         run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
@@ -5226,8 +5231,9 @@ def decisions_block(entries, repo_path, show_all=False):
 def append_carry_decisions(rd, carry, batch, session, fence):
     """Record a rollover's carry notes in the decisions log: one carry-batch
     line (always, so an empty carry expires the prior batch) plus one entry
-    per 500-character chunk of each non-blank carry line. Best effort: a
-    failed append warns on stderr and the rollover goes on."""
+    per 500-character chunk of each non-blank carry line. Returns False on a
+    failed append (warned on stderr): a successor would otherwise serve the
+    previous batch as current, so rollover refuses the handover."""
     base = {"v": 1, "ts": now_iso(), "session": session, "fence": fence}
     recs = [{**base, "id": decision_id(), "event": "carry-batch", "batch": batch}]
     for line in carry.splitlines():
@@ -5241,8 +5247,10 @@ def append_carry_decisions(rd, carry, batch, session, fence):
         append_decision(rd, *recs)
     except (OSError, ValueError) as exc:
         # stderr: rollover's last stdout line is the director's outcome.
-        print(f"[WARNING] rollover: carry notes not saved to decisions.jsonl ({exc}); "
-              "rollover continues", file=sys.stderr)
+        print(f"[WARNING] rollover: carry notes not saved to decisions.jsonl ({exc})",
+              file=sys.stderr)
+        return False
+    return True
 
 
 def _note_decision(ns) -> int:

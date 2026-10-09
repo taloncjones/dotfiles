@@ -251,9 +251,11 @@ repo-wide, `text` at most 500 characters), `retire-decision` (fenced;
 `event: retire`, `retires: <id>`), and the `rollover` verb's carry (inside
 the marker's owner transaction: one `event: carry-batch` line with
 `batch: <handover id>`, then one `source: carry` decision per 500-character
-chunk). A decision is live unless a retire names it, its task is failed,
+chunk); if that append fails the verb refuses the handover (`handover-failed`,
+reason `carry-unsaved`) and this lease stays. An append first adds a newline
+when the file ends in a torn line. A decision is live unless a retire names it, its task is failed,
 abandoned, merged or archived, or it is a carry entry whose batch is not the
-last `carry-batch`. Unparseable lines and other versions are skipped. The
+last `carry-batch`. Unparseable lines, other versions, and entries of the wrong shape (a non-string `text`, `ts`, `id` or `retires`) are skipped one by one. The
 `decisions --repo-path <P> [--no-carry] [--all]` verb prints the live entries
 (newest kept, 3000 characters unless `--all`); the SessionStart hook injects
 that block.
