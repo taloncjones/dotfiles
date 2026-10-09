@@ -1613,6 +1613,173 @@ assert "decisions.jsonl" in layout
 PY
 SH
 
+check "decisions: a malformed record is skipped and the rest of the block stays" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+id=$($CORE note-decision $A --repo-wide --text "keep me")
+id=${id#decision: }
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+printf '%s\n' '{"v":1,"event":"retire","id":"r1r1r1r1r1r1","retires":["x"]}' \
+    '{"v":1,"event":"decision","id":["x"],"text":"bad id","ts":"2026-10-08T00:00:00Z"}' \
+    '{"v":1,"event":"retire","id":"r2r2r2r2r2r2","retires":{"k":1}}' >> "$LOG"
+b=$($CORE decisions --repo-path "$FX_REPO")
+printf '%s\n' "$b" | grep -Eqx -- "- [0-9]{4}-[0-9]{2}-[0-9]{2} repo: keep me \[$id\]"
+if printf '%s\n' "$b" | grep -q 'bad id'; then exit 1; fi
+test "$($CORE retire-decision $A --id "$id")" = "retired: $id"
+test -z "$($CORE decisions --repo-path "$FX_REPO")"
+SH
+
+check "decisions: an append after a torn line starts on a new line" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+id=$($CORE note-decision $A --repo-wide --text "retire me")
+id=${id#decision: }
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+printf '%s' '{"v":1,"event":"decision","id":"ffff' >> "$LOG"
+test "$($CORE retire-decision $A --id "$id")" = "retired: $id"
+test "$(wc -l < "$LOG")" -eq 3
+test "$(sed -n 2p "$LOG")" = '{"v":1,"event":"decision","id":"ffff'
+test -z "$($CORE decisions --repo-path "$FX_REPO")"
+$CORE note-decision $A --repo-wide --text "after the tear" >/dev/null
+test "$(wc -l < "$LOG")" -eq 4
+$CORE decisions --repo-path "$FX_REPO" | grep -q 'repo: after the tear \['
+SH
+
+check "rollover: an unwritable decisions log refuses the handover" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+$CORE note-decision $A --repo-wide --text "stays live" >/dev/null
+chmod 0400 "$RD/decisions.jsonl"
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --carry "carry note" --ack-secs 1 --poll-secs 0.1 > "$FX/o" 2> "$FX/e" && rc=0 || rc=$?
+chmod 0600 "$RD/decisions.jsonl"
+test "$rc" = 1
+tail -n 1 "$FX/o" | grep -q '^rollover: carry notes not saved; this session keeps the lease$'
+grep -q '^\[WARNING\] rollover: carry notes not saved to .*/decisions.jsonl (Permission denied)$' "$FX/e"
+if grep -q '^pane run ' "$FX/herdr.log"; then exit 1; fi
+grep -qx 'pane close w9:p2' "$FX/herdr.log"
+test ! -e "$RD/rollover-pending.json"
+python3 - "$RD/rollover.jsonl" <<'PY'
+import json, sys
+last = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert last["event"] == "handover-failed" and last["reason"] == "carry-unsaved", last
+PY
+SH
+
+check "rollover: a directory at the decisions log path refuses the handover" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+mkdir "$RD/decisions.jsonl"
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --carry "carry note" --ack-secs 1 --poll-secs 0.1 > "$FX/o" 2> "$FX/e" && rc=0 || rc=$?
+chmod 0600 "$RD/decisions.jsonl" 2>/dev/null || true
+test "$rc" = 1
+tail -n 1 "$FX/o" | grep -q '^rollover: carry notes not saved; this session keeps the lease$'
+grep -q '^\[WARNING\] rollover: carry notes not saved to .*/decisions.jsonl (Is a directory)$' "$FX/e"
+if grep -q '^pane run ' "$FX/herdr.log"; then exit 1; fi
+grep -qx 'pane close w9:p2' "$FX/herdr.log"
+test ! -e "$RD/rollover-pending.json"
+python3 - "$RD/rollover.jsonl" <<'PY'
+import json, sys
+last = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert last["event"] == "handover-failed" and last["reason"] == "carry-unsaved", last
+PY
+SH
+
+check "rollover: an unreadable and unwritable decisions log refuses the handover" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+$CORE note-decision $A --repo-wide --text "stays live" >/dev/null
+chmod 0000 "$RD/decisions.jsonl"
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --carry "carry note" --ack-secs 1 --poll-secs 0.1 > "$FX/o" 2> "$FX/e" && rc=0 || rc=$?
+chmod 0600 "$RD/decisions.jsonl" 2>/dev/null || true
+test "$rc" = 1
+tail -n 1 "$FX/o" | grep -q '^rollover: carry notes not saved; this session keeps the lease$'
+grep -q '^\[WARNING\] rollover: carry notes not saved to .*/decisions.jsonl (Permission denied)$' "$FX/e"
+if grep -q '^pane run ' "$FX/herdr.log"; then exit 1; fi
+grep -qx 'pane close w9:p2' "$FX/herdr.log"
+test ! -e "$RD/rollover-pending.json"
+python3 - "$RD/rollover.jsonl" <<'PY'
+import json, sys
+last = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert last["event"] == "handover-failed" and last["reason"] == "carry-unsaved", last
+PY
+SH
+
+check "decisions: printed recovery commands quote a repo path with a space" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+R2="$FX/sp ace/repo"
+git init -q "$R2"
+git -C "$R2" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+git -C "$R2" remote add origin "$(git -C "$FX_REPO" remote get-url origin)"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$R2" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+T=$(python3 -c 'print("x" * 390)')
+i=0
+while [ $i -lt 10 ]; do
+    $CORE note-decision --repo-path "$R2" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+        --repo-wide --text "n$i $T" >/dev/null
+    i=$((i + 1))
+done
+$CORE decisions --repo-path "$R2" | tail -n 1 > "$FX/last"
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+mv "$RD/decisions.jsonl" "$FX/log.bak"
+mkdir "$RD/decisions.jsonl"
+printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$R2" \
+  | HERDR_ENV=1 python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h"
+python3 - "$FX/last" "$FX/h" "$R2" <<'PY'
+import json, shlex, sys
+line = open(sys.argv[1]).read().strip()
+assert line.startswith("(") and line.endswith(")") and "older omitted; full list: " in line, line
+argv = shlex.split(line[:-1].split("full list: ", 1)[1])
+assert argv[argv.index("--repo-path") + 1] == sys.argv[3], argv
+c = json.load(open(sys.argv[2]))["hookSpecificOutput"]["additionalContext"]
+last = c.splitlines()[-1]
+prefix = "[WARNING] herdr decisions: not loaded; run "
+assert last.startswith(prefix), last
+argv = shlex.split(last[len(prefix):])
+assert argv[argv.index("--repo-path") + 1] == sys.argv[3], argv
+PY
+SH
+
+check "decisions: a personal override in a work repo reads the log note-decision wrote" <<'SH'
+unset CLAUDE_CONFIG_DIR
+W="$HOME/Git/work/proj"
+git init -q "$W"
+git -C "$W" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+git -C "$W" remote add origin "git@example.invalid:org/personal-override-$$.git"
+WS=$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[2] + "/claude/hooks")
+import herdr_orch_core as c
+from workflow_context import repository_context
+ctx = repository_context(sys.argv[1])
+print(c.repo_slug(c.context_git(ctx["root"], "remote", "get-url", "origin"), ctx["common_dir"]))
+' "$W" "$REPO_ROOT")
+export WORKFLOW_PERSONAL_ACCOUNT=1
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$W" --runtime claude --repo-slug "$WS" --session $S1 --host h --pid $$)
+$CORE note-decision --repo-slug "$WS" --session $S1 --fence "$F" --repo-wide --text "personal note" >/dev/null
+test -f "$HOME/.claude/herdr-orch/$WS/decisions.jsonl"
+$CORE decisions --repo-path "$W" | grep -q 'repo: personal note \['
+test -z "$(env -u WORKFLOW_PERSONAL_ACCOUNT $CORE decisions --repo-path "$W")"
+SH
+
 rm -f "$WRITE_MARKER" "$HANDOVER_STUB"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

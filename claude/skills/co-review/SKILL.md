@@ -546,7 +546,7 @@ else
   cleanup_status=$?
 fi
 if [ "$cleanup_status" -ne 0 ]; then
-  rm -f -- "$EXPECTED_IDENTITY"
+  uv run --no-project python "$GATE_REPORT" invalidate --expected "$EXPECTED_IDENTITY"
   printf '%s\n' '{"verdict":"INCOMPLETE","approve_allowed":false,"reasons":["snapshot cleanup failed; evidence preserved"]}' >&2
   exit 2
 fi

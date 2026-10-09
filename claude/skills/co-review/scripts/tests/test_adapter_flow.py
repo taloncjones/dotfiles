@@ -45,6 +45,7 @@ class AdapterFinalizationTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 'printf "%s\\n" "$*" >> "$TRACE"\n'
                 'case " $* " in\n'
+                '  *" invalidate "*) shift 3; exec python3 "$@";;\n'
                 '  *" evaluate "*) printf "{\\"verdict\\":\\"CHANGES\\"}\\n"; exit "$EVALUATOR_EXIT";;\n'
                 '  *" cleanup "*) printf "cleanup\\n"; exit "$CLEANUP_EXIT";;\n'
                 '  *" verify "*) exit 0;;\n'
@@ -67,7 +68,7 @@ class AdapterFinalizationTests(unittest.TestCase):
                     "RUN_DIR": str(run_dir),
                     "EXPECTED_IDENTITY": str(expected),
                     "REVIEW_HELPER": "review.py",
-                    "GATE_REPORT": "gate_report.py",
+                    "GATE_REPORT": str(ROOT / "claude/skills/co-review/scripts/gate_report.py"),
                     "MANIFEST": "manifest.json",
                 },
                 check=False,
@@ -87,6 +88,13 @@ class AdapterFinalizationTests(unittest.TestCase):
                 )
                 self.assertTrue(any(" evaluate " in f" {line} " for line in trace))
                 self.assertTrue(any(" cleanup " in f" {line} " for line in trace))
+                self.assertTrue(any(" invalidate " in f" {line} " for line in trace))
+
+    def test_finalization_block_runs_no_rm(self):
+        for adapter in ADAPTERS:
+            with self.subTest(adapter=adapter):
+                body = finalization_block(adapter)
+                self.assertIsNone(re.search(r"(^|[\s;&|(`])rm(\s|$)", body, re.M))
 
     def test_evaluator_failure_still_runs_cleanup_before_returning_result(self):
         for adapter in ADAPTERS:

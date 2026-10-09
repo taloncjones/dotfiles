@@ -17,6 +17,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import signal
 import socket
 import stat
@@ -148,6 +149,26 @@ def findings_bytes(value, root):
     if not content.strip():
         raise ValueError("is empty")
     return content
+
+
+FINDINGS_HEADER = (re.compile(r"Verdict: (approved|changes-requested)\Z"),
+                   re.compile(r"Blocking: (\d+)\Z"),
+                   re.compile(r"Advisories: (\S.*)\Z"))
+FINDINGS_HEADER_HELP = ("findings report must open with three lines: 'Verdict: approved' or "
+                        "'Verdict: changes-requested', 'Blocking: <n>', and 'Advisories: none' or "
+                        "titles joined by '; ', agreeing with --outcome and --blocking-count")
+
+
+def findings_summary(content):
+    """The verdict header of a findings report, or None when it has none."""
+    lines = [line.strip() for line in content.decode("utf-8", "replace").splitlines() if line.strip()]
+    if len(lines) < 3:
+        return None
+    found = [rx.match(line) for rx, line in zip(FINDINGS_HEADER, lines)]
+    if not all(found):
+        return None
+    return {"verdict": found[0].group(1), "blocking": int(found[1].group(1)),
+            "advisories": found[2].group(1)}
 
 
 def findings_ref_error(value, root):
@@ -643,6 +664,197 @@ def agent_name(prefix: str, task_id: str, existing=()) -> str:
         name = base[: 32 - len(suffix)] + suffix
         n += 1
     return name
+
+
+BRIEF_TEMPLATE_PATH = (Path(__file__).resolve().parents[1] / "skills" / "herdr-orchestration"
+                       / "references" / "brief-template.md")
+BRIEF_BLOCK_RE = re.compile(r"^```brief:([a-z0-9-]+)\n(.*?)\n```$", re.M | re.S)
+BRIEF_TOKEN_RE = re.compile(r"<[A-Za-z][^<>\s]{0,40}>")
+# Left for the worker; the adapter's attempt context supplies the first three.
+BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>",
+                                 "<outcome>", "<n>", "<artifact-list-json>"})
+BRIEF_OPTIONS = ("focus_file", "findings", "artifact_class", "prd_cap", "no_workflow", "tier",
+                 "prior_handoff")
+_BRIEF_WORK_BLOCKS = ("workspace", "routing", "ground-rules")
+BRIEF_PHASES = {
+    "plan": {"prefix": "plan", "emit": "plan", "lessons": "lessons-open-worker", "todo": True,
+             "requires": ("artifact_class",), "allows": ("focus_file", "prd_cap", "no_workflow"),
+             "blocks": ("intro-plan", "task", "plan-produce", *_BRIEF_WORK_BLOCKS, "close-plan")},
+    "implement": {"prefix": "impl", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
+                  "requires": (), "allows": ("focus_file", "no_workflow"),
+                  "blocks": ("intro-work", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "close-implement")},
+    "repair": {"prefix": "repair", "emit": "implement", "lessons": "lessons-open-worker", "todo": False,
+               "requires": ("focus_file", "findings"), "allows": ("no_workflow",),
+               "blocks": ("intro-repair", "task", "repair-findings", "artifacts", *_BRIEF_WORK_BLOCKS,
+                          "close-implement")},
+    "review": {"prefix": "rev", "emit": "review", "lessons": "lessons-open-review", "todo": False,
+               "requires": ("focus_file",), "allows": ("no_workflow",),
+               "blocks": ("intro-review", "task", "review-task", "artifacts", *_BRIEF_WORK_BLOCKS,
+                          "close-review")},
+    "ship": {"prefix": "ship", "emit": "ship", "lessons": "lessons-open-ship", "todo": False,
+             "requires": ("focus_file",), "allows": ("tier", "prior_handoff"),
+             "blocks": ("intro-ship", "task", "ship")},
+}
+
+
+def brief_blocks(text):
+    """The template's `brief:<name>` fenced blocks, by name."""
+    blocks = {}
+    for name, body in BRIEF_BLOCK_RE.findall(text):
+        if name in blocks:
+            raise ValueError(f"duplicate brief block: {name}")
+        blocks[name] = body
+    return blocks
+
+
+BRIEF_ROUTES = (("plan", "planner"), ("impl", "implementation"), ("review", "reviewer"),
+                ("plan-review", "plan_reviewer"), ("mech", "mechanical"), ("think", "think"))
+
+
+def _brief_fill(text, values):
+    """One pass over `<name>` tokens; inserted values are never re-filled."""
+    return BRIEF_TOKEN_RE.sub(lambda m: values.get(m.group(0)[1:-1], m.group(0)), text)
+
+
+def _brief_git(worktree, *args):
+    try:
+        return context_git(worktree, *args)
+    except (subprocess.SubprocessError, OSError) as exc:
+        _require(False, f"git {' '.join(args[:2])} failed in the task worktree: {exc}")
+
+
+def _brief_routing(runtime, config):
+    routes = config.get("routes", {})
+    lines = []
+    for label, role in BRIEF_ROUTES:
+        try:
+            route = agent_runtime.resolve_route(runtime, role,
+                                                config={"routes": routes, "provisional": True})
+        except agent_runtime.RouteError:
+            route = {}
+        if route.get("ready") is True:
+            lines.append(f"- {label}: {route['model']} / {route.get('effort') or 'inherit'}")
+        else:
+            lines.append(f"- {label}: unavailable / -")
+    return "\n".join(lines)
+
+
+def _todo_body(repo_root, todo_id):
+    """The todo's text without frontmatter, from pending/ then completed/, or None."""
+    _require(valid_task_id(todo_id), "task record has an invalid todo_id")
+    for state in ("pending", "completed"):
+        path = Path(repo_root) / ".todos" / state / f"{todo_id}.md"
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            if text.startswith("---\n"):
+                end = text.find("\n---\n", 4)
+                text = text[end + 5:] if end != -1 else text
+            return text.strip()
+    return None
+
+
+GITHUB_REMOTE_RE = re.compile(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+                              r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+
+
+def _brief_ship_values(rd, record, ns, head, blocks, config):
+    """PR, live base and tier values for a ship brief."""
+    pr = record.get("pr_number")
+    _require(str(pr).isdigit() and int(pr) > 0, "ship needs pr_number on the task record")
+    _require(record.get("review_head_sha") == head, "ship needs review_head_sha equal to the worktree HEAD")
+    remote = _brief_git(record["worktree"], "config", "--get", "remote.origin.url")
+    match = GITHUB_REMOTE_RE.match(remote)
+    _require(match is not None, "ship needs a GitHub origin remote")
+    base_ref = record["base_ref"]
+    _require(base_ref.startswith("origin/"), "ship needs base_ref of the form origin/<branch>")
+    out = _brief_git(record["worktree"], "ls-remote", "origin", f"refs/heads/{base_ref[len('origin/'):]}")
+    live = out.split()[0] if out else ""
+    _require(bool(SHA40_RE.fullmatch(live)), f"ls-remote found no live tip for {base_ref}")
+    if ns.tier == "delta":
+        _require(ns.prior_handoff is not None, "--tier delta requires --prior-handoff")
+        try:
+            findings_bytes(ns.prior_handoff, state_root())
+        except ValueError as exc:
+            _require(False, f"--prior-handoff {exc}")
+        delta = (config.get("ship") or {}).get("delta") or {}
+        tier = _brief_fill(blocks["ship-tier-delta"], {
+            "prior_handoff": ns.prior_handoff, "head_sha": head,
+            "delta_files": str(delta.get("max_files", 5)), "delta_lines": str(delta.get("max_lines", 150))})
+    else:
+        _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
+        tier = blocks["ship-tier-full"]
+    task_id = record["task_id"]
+    return {"pr_number": str(int(pr)), "pr_repo": f"{match.group(1)}/{match.group(2)}",
+            "live_base_sha": live, "tier-lines": tier,
+            "ship_launch_dir": str(rd / "artifacts" / task_id / "ship-<launch_id>") + "/",
+            "ship_report": str(rd / "tasks" / f"{task_id}.ship.md")}
+
+
+def render_brief(rd, record, ns, repo_root):
+    """(agent, brief text) for ns.phase; refuses through _require."""
+    spec = BRIEF_PHASES.get(ns.phase)
+    _require(spec is not None, f"unknown phase {ns.phase!r}; use one of {', '.join(BRIEF_PHASES)}")
+    for opt in BRIEF_OPTIONS:
+        flag = "--" + opt.replace("_", "-")
+        given = getattr(ns, opt) not in (None, False)
+        _require(not given or opt in spec["requires"] + spec["allows"],
+                 f"{flag} does not apply to phase {ns.phase}")
+        _require(given or opt not in spec["requires"], f"phase {ns.phase} requires {flag}")
+    _require(ns.prd_cap is None or ns.prd_cap >= 1, "--prd-cap must be at least 1")
+    for key in ("worktree", "branch", "base_ref", "base_sha", "title", "workspace_id"):
+        _require(_nonempty_str(record.get(key)), f"task record lacks {key}")
+    blocks = brief_blocks(BRIEF_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    needed = (*spec["blocks"], spec["lessons"], "lessons", "opt-in-granted", "opt-in-withheld")
+    if ns.phase == "ship":
+        needed += ("ship-tier-full", "ship-tier-delta")
+    missing = [name for name in needed if name not in blocks]
+    _require(not missing, f"brief template lacks blocks: {', '.join(missing)}")
+    worktree, task_id = record["worktree"], record["task_id"]
+    head = _brief_git(worktree, "rev-parse", "HEAD")
+    existing = {w.get("agent") for w in record.get("workers") or [] if isinstance(w, dict)}
+    agent = agent_name(spec["prefix"], record["branch"].rsplit("/", 1)[-1], existing)
+    _require(AGENT_NAME_RE.fullmatch(agent), f"agent name {agent!r} is not a valid herdr name")
+    focus = Path(ns.focus_file).read_text(encoding="utf-8").strip() if ns.focus_file else ""
+    todo = None
+    if spec["todo"] and record.get("todo_id") is not None:
+        todo = _todo_body(repo_root, record["todo_id"])
+    if spec["todo"]:
+        _require(bool(focus or todo), f"phase {ns.phase} needs the todo body or --focus-file")
+    artifacts = [a for a in record.get("plan_artifacts") or [] if isinstance(a, dict)]
+    config = read_config(rd)
+    values = {
+        "agent-name": agent, "task_id": task_id, "repo_slug": ns.repo_slug,
+        "title": record["title"], "branch": record["branch"], "worktree_path": worktree,
+        "base_ref": record["base_ref"], "base_sha": record["base_sha"], "head_sha": head,
+        "phase": ns.phase, "emit_phase": spec["emit"], "workspace_id": record["workspace_id"],
+        "core-command": f'python3 "{Path(__file__).resolve()}"',
+        "core-context": (f'--repo-path "{repo_root}" --runtime {ns.runtime}'
+                         + (" --personal" if ns.personal else "")),
+        "routing-lines": _brief_routing(ns.runtime, config),
+        "workflow-opt-in-line": blocks["opt-in-withheld" if ns.no_workflow else "opt-in-granted"],
+        "artifact-lines": "\n".join(f"- {a.get('kind')}: {a.get('path')} (sha256 {a.get('sha256')})"
+                                    for a in artifacts) or "- none recorded",
+        "contract_path": record.get("contract_path") or "none pinned",
+        "account_payload": str(rd),
+        "findings_path": str(rd / "artifacts" / task_id / "review-<launch_id>" / "findings.md"),
+        "fast-path-line": "",
+        "prd-cap": str(ns.prd_cap or 2),
+        "artifact-class": ns.artifact_class or "",
+    }
+    if ns.findings is not None:
+        try:
+            findings_bytes(ns.findings, state_root())
+        except ValueError as exc:
+            _require(False, f"--findings {exc}")
+        values["findings_ref"] = ns.findings
+    if ns.phase == "ship":
+        values.update(_brief_ship_values(rd, record, ns, head, blocks, config))
+    values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"], values)
+    text = "\n\n".join(_brief_fill(blocks[name], values) for name in spec["blocks"])
+    left = set(BRIEF_TOKEN_RE.findall(text)) - BRIEF_WORKER_FIELDS - {"<task-body>"}
+    _require(not left, f"brief template left unfilled tokens: {', '.join(sorted(left))}")
+    body = "\n\n".join(part for part in (focus, todo) if part)
+    return agent, text.replace("<task-body>", body, 1) + "\n"
 
 
 def branch_name(user: str, task_id: str, slug: str) -> str:
@@ -3441,6 +3653,109 @@ def pending_action(f) -> str:
     return "none"
 
 
+# One entry per checkin_rules name: (kind, template). A run entry's template
+# is the adapter verb; ask and read templates take {head7} and {ws}.
+NEXT_ACTIONS = {
+    "confirm-plan": ("run", "advance"),
+    "confirm-review": ("run", "accept-review"),
+    "exit-idle-worker": ("run", "settle"),
+    "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
+    "dispatch-review": ("read", "SKILL.md section 5"),
+    "stale-review-reset": ("read", "SKILL.md section 4 (stale-review-reset)"),
+    "unblocked": ("read", "SKILL.md section 9 (blocked -> in-progress)"),
+    "mech-ledger": ("read", "SKILL.md section 4 (run-mech worker)"),
+    "ship": ("read", "SKILL.md section 6 (ship step)"),
+    "unknown": ("read", "SKILL.md section 4 (full reconciliation)"),
+    "changes-requested": ("ask", "Review at {head7} requested changes: render a repair brief "
+                                 "(SKILL.md section 5 step 6), or return the task to design?"),
+    "blocked": ("ask", "Worker in {ws} is blocked: read its pane and answer it, or stop it?"),
+    "abandoned-candidate": ("ask", "Workspace {ws} and its worktree are gone with no completion: "
+                                   "record abandoned?"),
+    "paused": ("ask", "Attempt paused at {head7}: relaunch, re-brief, or stop?"),
+    "failed": ("ask", "Attempt failed at {head7}: repair, relaunch, or record failed?"),
+}
+ADAPTER_PATH = Path(__file__).resolve().parent / "herdr_dispatch.py"
+
+
+def _command(script, verb, *args) -> str:
+    return " ".join(shlex.quote(str(a)) for a in ("python3", script, verb, *args))
+
+
+def next_line(task, facts, ctx):
+    """The `next:` line under one check-in task line, or None for no action."""
+    action = facts["action"]
+    if action == "none":
+        return None
+    kind, template = NEXT_ACTIONS[action]
+    if kind != "run":
+        head7 = (facts.get("head") or "unknown")[:7]
+        return f"  next: {kind} {template.format(head7=head7, ws=facts.get('ws'))}"
+    account = ["--runtime", ctx["runtime"]] + (["--personal"] if ctx["personal"] else [])
+    fenced = ["--session", ctx["session"], "--fence", str(ctx["fence"])]
+    if template == "settle":
+        args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
+                "--workspace-id", facts["idle_ws"], "--cwd", task.get("worktree") or "",
+                "--launch-id", facts["idle_launch"], *account]
+    else:
+        args = ["--repo-slug", ctx["repo_slug"], "--repo-path", ctx["repo_path"], *account,
+                *fenced, "--task-id", facts["task_id"]]
+    return f"  next: run {_command(ADAPTER_PATH, template, *args)}"
+
+
+def checkin_report(ns, rd):
+    """The check-in lines as (line, task, facts); task and facts are None on
+    a non-task line. `checkin` and `next` print the same lines."""
+    rows = []
+
+    def emit(line, task=None, facts=None):
+        rows.append((line, task, facts))
+
+    poll, reason = _checkin_poll(ns)
+    if poll is None:
+        emit(f"poll: failed ({reason})")
+    payload_root = state_root().parent
+    changed = poll is None
+    now_ns = time.time_ns()
+    for tf in task_record_files(rd / "tasks"):
+        try:
+            task = json.loads(read_payload_text(tf))
+        except (OSError, ValueError):
+            emit(f"unreadable-task {tf.name}")
+            changed = True
+            continue
+        if not isinstance(task, dict):
+            emit(f"unreadable-task {tf.name}")
+            changed = True
+            continue
+        if not ns.all and task.get("status") in CHECKIN_TERMINAL:
+            continue
+        f = checkin_facts(rd, task, poll, payload_root)
+        if f["action"] != "none":
+            changed = True
+        for name in f["unreadable"]:
+            emit(f"unreadable-record {name}")
+            changed = True
+        for kind in f["unverifiable"]:
+            emit(f"unverifiable-evidence {f['task_id']} {kind}")
+            changed = True
+        emit(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
+             f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
+             f"dirty={f['dirty']} done={f['done']} review={f['review']} "
+             f"hint={f['hint']} action={f['action']} wake={f['wake']}", task, f)
+        if task.get("status") == "review-dispatched":
+            d = review_deadline(rd, task, now_ns)
+            if d["state"] in ("overdue", "expired"):
+                emit(f"review-overdue {f['task_id']} state={d['state']} "
+                     f"launch={d['launch']} remaining={d['remaining']}")
+                changed = True
+    due = rollover_due(rd, ns.session)
+    if due:
+        emit(f"rollover-due used_pct={due[0]} threshold={due[1]}")
+        changed = True
+    emit(f"changed: {'yes' if changed else 'no'}")
+    return rows
+
+
 def _utc_stamp(value):
     """value when it is a core UTC timestamp exactly as now_iso writes it,
     else None. The round trip rejects unpadded forms strptime accepts
@@ -3620,6 +3935,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
     poll_agents = poll.get("agents", {}) if isinstance(poll, dict) else {}
     idle_settled = False
+    idle_launch = idle_ws = None
     ship_handoffs = ship_handoff_launches(rd, tid, task)
     for index, row in enumerate(workers):
         if not isinstance(row, dict) or not _nonempty_str(row.get("agent")):
@@ -3637,6 +3953,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                                    ship_report=ship_report_ns(rd, tid),
                                    ship_handoffs=ship_handoffs):
             idle_settled = True
+            idle_launch, idle_ws = row.get("launch_id"), row.get("workspace_id")
             break
     impl_ws = phase_workspace(task, "implement")
     plan_ws = phase_workspace(task, "plan")
@@ -3688,6 +4005,13 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                 continue
     hint = fold_status(events).get("last_hint") or "none"
 
+    stop = task.get("stop_recorded")
+    stop_recorded = bool(done and isinstance(stop, dict)
+                         and _nonempty_str(stop.get("launch_id"))
+                         and _nonempty_str(stop.get("ts"))
+                         and stop["launch_id"] == done.get("launch_id")
+                         and stop["ts"] == done.get("ts"))
+
     facts = {
         "task_id": tid, "status": status, "ws": ws, "live": live,
         "head": head, "ahead": ahead, "dirty": dirty,
@@ -3707,11 +4031,14 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # has no `paused` STATUS, so a status-based gate is vacuous and a
         # stale record from a superseded attempt would fire forever; nothing
         # in the core deletes done.json on relaunch.
+        # A stop the director recorded (stop_recorded names this record) is handled.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "idle_settled": idle_settled,
+        "idle_launch": idle_launch, "idle_ws": idle_ws,
         "ship_pending": ship_pending(task),
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES
+                         and not stop_recorded
                          and attempt_matches(task, done, done_phase,
                                              phase_workspace(task, done_phase))
                          else None),
@@ -4692,9 +5019,11 @@ def _rollover(ns) -> int:
         held = tx.check(ns.session, ns.fence)
         other = read_rollover_pending(rd)
         busy = other is not None and marker_live(other, ns.session, ns.fence)
+        saved = True
         if held and not busy:
+            saved = append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
+        if held and not busy and saved:
             created = time.time()
-            append_carry_decisions(rd, ns.carry, hid, ns.session, ns.fence)
             write_json_atomic(Path(rd) / ROLLOVER_PENDING_FILE, {
                 "v": 1, "token": token, "pane": new_pane, "from_session": ns.session,
                 "from_fence": ns.fence, "from_pane": pane, "carry": ns.carry,
@@ -4706,6 +5035,9 @@ def _rollover(ns) -> int:
         close(new_pane)
         print(f"rollover: rollover in progress for pane {other['pane']}")
         return 1
+    if not saved:
+        print("rollover: carry notes not saved; this session keeps the lease")
+        return failed("carry-unsaved", hid, new_pane, close_pane=True)
     scope_kind = ((_PAYLOAD_SELECTION.get() or {}).get("scope") or {}).get("kind")
     try:
         run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
@@ -4752,14 +5084,69 @@ def decision_id():
 
 
 def append_decision(rd, *recs):
-    """Append decision-log records as one write, so a batch is never interleaved."""
-    data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in recs)
-    append_payload(Path(rd) / DECISIONS_FILE, data.encode("utf-8"))
+    """Append decision-log records as one write, so a batch is never interleaved.
+    A torn last line (no newline) gets one first, so it cannot swallow this
+    batch; every writer holds the owner lock, so the check cannot race."""
+    path = Path(rd) / DECISIONS_FILE
+    data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in recs).encode("utf-8")
+    try:
+        tail = read_payload_bytes(path)[-1:]
+    except FileNotFoundError:
+        tail = b""
+    if tail not in (b"", b"\n"):
+        data = b"\n" + data
+    append_payload(path, data)
+
+
+LESSON_PHASES = ("plan", "implement", "repair", "review", "ship", "mech", "director")
+
+
+def harvest_lesson_lines(text, task_id, phase):
+    """Kept LESSON lines for one task and phase (references/lesson-harvest.md step 2)."""
+    tag = f"LESSON: [{task_id} {phase}]"
+    found, cur = [], None
+    for raw in text.splitlines():
+        s = raw.strip()
+        body = s[2:].lstrip() if s.startswith("- ") else s
+        if body.startswith("LESSON:"):
+            if cur:
+                found.append(cur)
+            cur = body
+        elif cur is not None and s and raw[:1] in (" ", "\t"):
+            cur += " " + s
+        else:
+            if cur:
+                found.append(cur)
+            cur = None
+    if cur:
+        found.append(cur)
+    return [f for f in found
+            if (f == tag or f.startswith(tag + " ")) and f[len(tag):].strip() != "none"]
+
+
+def append_lessons(rd, task_id, phase, source, text):
+    """Append the kept lines the ledger lacks as one batch.
+    -> (kept lines, number appended, whether the source had none)."""
+    kept = harvest_lesson_lines(text, task_id, phase)
+    path = Path(rd) / "tasks" / f"{task_id}.lessons.md"
+    try:
+        present = set(read_payload_text(path).splitlines())
+    except FileNotFoundError:
+        present = set()
+    note = f"- note: no LESSON line found ({source})"
+    new = [line for line in kept if line not in present]
+    if (kept and not new) or (not kept and note in present):
+        return kept, 0, not kept
+    body = "\n".join(new if kept else [note])
+    append_payload(path, f"## {now_iso()} {source}\n{body}\n".encode("utf-8"))
+    return kept, len(new), not kept
 
 
 def read_decisions(rd):
-    """Parsed v1 dict lines in file order; bad lines are skipped, a missing
-    file is an empty log, and any other read failure propagates."""
+    """Parsed v1 dict lines in file order. A bad line is skipped, and so is a
+    record whose id, or a retire's retires, is not a string (live_decisions
+    hashes both). A missing file is an empty log; any other read failure
+    propagates."""
     try:
         text = read_payload_text(Path(rd) / DECISIONS_FILE)
     except FileNotFoundError:
@@ -4770,8 +5157,11 @@ def read_decisions(rd):
             rec = json.loads(line)
         except ValueError:
             continue
-        if isinstance(rec, dict) and rec.get("v") == 1:
-            out.append(rec)
+        if not isinstance(rec, dict) or rec.get("v") != 1 or not isinstance(rec.get("id"), str):
+            continue
+        if rec.get("event") == "retire" and not isinstance(rec.get("retires"), str):
+            continue
+        out.append(rec)
     return out
 
 
@@ -4831,7 +5221,7 @@ def decisions_block(entries, repo_path, show_all=False):
 
     def omit(k):
         return (f"({k} older omitted; full list: python3 ~/.claude/hooks/"
-                f"herdr_orch_core.py decisions --repo-path {repo_path} --all)")
+                f"herdr_orch_core.py decisions --repo-path {shlex.quote(repo_path)} --all)")
 
     full = "\n".join([header] + lines)
     if len(full) <= DECISIONS_BLOCK_MAX:
@@ -4850,7 +5240,9 @@ def decisions_block(entries, repo_path, show_all=False):
 def append_carry_decisions(rd, carry, batch, session, fence):
     """Record a rollover's carry notes in the decisions log: one carry-batch
     line (always, so an empty carry expires the prior batch) plus one entry
-    per 500-character chunk of each non-blank carry line."""
+    per 500-character chunk of each non-blank carry line. Returns False,
+    with a warning on stderr, on any failed append: a successor would
+    otherwise serve the previous batch as current, so rollover refuses."""
     base = {"v": 1, "ts": now_iso(), "session": session, "fence": fence}
     recs = [{**base, "id": decision_id(), "event": "carry-batch", "batch": batch}]
     for line in carry.splitlines():
@@ -4860,7 +5252,15 @@ def append_carry_decisions(rd, carry, batch, session, fence):
             text = chunk if i == 0 else f"(cont.) {chunk}"
             recs.append({**base, "id": decision_id(), "event": "decision", "task": None,
                          "source": "carry", "batch": batch, "text": text})
-    append_decision(rd, *recs)
+    try:
+        append_decision(rd, *recs)
+    except (OSError, ValueError) as exc:
+        # stderr: rollover's last stdout line is the director's outcome.
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        print(f"[WARNING] rollover: carry notes not saved to {Path(rd) / DECISIONS_FILE} "
+              f"({reason})", file=sys.stderr)
+        return False
+    return True
 
 
 def _note_decision(ns) -> int:
@@ -5274,6 +5674,11 @@ def _main(argv=None) -> int:
     ck.add_argument("--agents-json", default=None)
     ck.add_argument("--workspaces-json", default=None)
     ck.add_argument("--all", action="store_true")
+    nx = add("next", "--session", "--fence")
+    nx.add_argument("--messaging-socket", default=None)
+    nx.add_argument("--agents-json", default=None)
+    nx.add_argument("--workspaces-json", default=None)
+    nx.add_argument("--all", action="store_true")
     st = add("status")
     st.add_argument("--archived", action="store_true")
     add("pending")
@@ -5295,6 +5700,13 @@ def _main(argv=None) -> int:
     w.add_argument("--undelivered-only", action="store_true")
     w.add_argument("--grace-secs", type=int, default=None)
     w.add_argument("--messaging-socket", default=None)
+    rb = add("render-brief", "--task-id", "--phase")
+    for optional in ("--focus-file", "--findings", "--prior-handoff"):
+        rb.add_argument(optional, default=None)
+    rb.add_argument("--artifact-class", choices=("advisory", "behavior"), default=None)
+    rb.add_argument("--prd-cap", type=int, default=None)
+    rb.add_argument("--tier", choices=("full", "delta"), default=None)
+    rb.add_argument("--no-workflow", action="store_true")
     vc = add("verify-contract", "--task-id", "--worktree")
     vc.add_argument("--contract", default=None)
     vc.add_argument("--allow-unpinned", action="store_true")
@@ -5307,6 +5719,7 @@ def _main(argv=None) -> int:
     pt.add_argument("--apply", action="store_true")
     pt.add_argument("--session", default=None)
     pt.add_argument("--fence", type=int, default=None)
+    add("append-lessons", "--task-id", "--phase", "--source", fenced=True)
     nd = add("note-decision", fenced=True)
     nd.add_argument("--text", required=True)
     scope_group = nd.add_mutually_exclusive_group(required=True)
@@ -5401,6 +5814,21 @@ def _main(argv=None) -> int:
         )
     if ns.cmd == "rollover":
         return _rollover(ns)
+    if ns.cmd == "append-lessons":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.phase in LESSON_PHASES, f"--phase must be one of {', '.join(LESSON_PHASES)}")
+        _require(ns.source.strip() and not any(ch in ns.source for ch in "\n\r\x00"),
+                 "--source must be one non-blank line")
+        text = sys.stdin.buffer.read().decode("utf-8", "replace")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd) as tx:
+            if not tx.check(ns.session, ns.fence):
+                print("owner: stale-fence")
+                return 1
+            kept, appended, note = append_lessons(rd, ns.task_id, ns.phase, ns.source, text)
+        print(json.dumps({"appended": appended, "lines": kept, "note": note}, sort_keys=True))
+        return 0
     if ns.cmd == "note-decision":
         return _note_decision(ns)
     if ns.cmd == "retire-decision":
@@ -5949,6 +6377,11 @@ def _main(argv=None) -> int:
                         evidence = findings_bytes(ns.findings_ref, state_root())
                     except ValueError as exc:
                         _require(False, f"findings-ref {exc}")
+                    # Director-dispatched reviews only: lead reviews keep their own briefs.
+                    if os.environ.get("HERDR_ENV") == "1" and getattr(ns, "binding", None) is None:
+                        summary = findings_summary(evidence)
+                        _require(summary is not None and summary["verdict"] == ns.outcome
+                                 and summary["blocking"] == ns.blocking_count, FINDINGS_HEADER_HELP)
                     done["findings_sha256"] = hashlib.sha256(evidence).hexdigest()
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
@@ -7184,57 +7617,39 @@ def _main(argv=None) -> int:
             "pr": summary["pr"],
         }, separators=(",", ":")))
         return 0
-    if ns.cmd == "checkin":
+    if ns.cmd in ("checkin", "next"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        if ns.cmd == "next":
+            _require(ns.repo_path is not None and ns.runtime is not None,
+                     "next requires --repo-path and --runtime")
         rd = repo_dir(ns.repo_slug)
         if not refresh_owner(rd, ns.session, ns.fence, ns.messaging_socket):
             print("owner: stale-fence")
             return 1
         acked = undelivered_blocks(rd)
         prune_context_records(keep=ns.session)
-        poll, reason = _checkin_poll(ns)
-        if poll is None:
-            print(f"poll: failed ({reason})")
-        payload_root = state_root().parent
-        changed = poll is None
-        now_ns = time.time_ns()
-        for tf in task_record_files(rd / "tasks"):
-            try:
-                task = json.loads(read_payload_text(tf))
-            except (OSError, ValueError):
-                print(f"unreadable-task {tf.name}")
-                changed = True
+        ctx = None
+        if ns.cmd == "next":
+            ctx = {"repo_slug": ns.repo_slug, "runtime": ns.runtime, "personal": ns.personal,
+                   "repo_path": _PAYLOAD_SELECTION.get()["context"]["root"],
+                   "session": ns.session, "fence": ns.fence}
+        for line, task, facts in checkin_report(ns, rd):
+            if ctx and line.startswith("changed: "):
+                print("next: run " + _command(Path(__file__).resolve(), "present-task",
+                                              "--repo-slug", ns.repo_slug, "--session", ns.session,
+                                              "--fence", ns.fence, "--all", "--apply"))
+            print(line)
+            if ctx is None:
                 continue
-            if not isinstance(task, dict):
-                print(f"unreadable-task {tf.name}")
-                changed = True
-                continue
-            if not ns.all and task.get("status") in CHECKIN_TERMINAL:
-                continue
-            f = checkin_facts(rd, task, poll, payload_root)
-            if f["action"] != "none":
-                changed = True
-            for name in f["unreadable"]:
-                print(f"unreadable-record {name}")
-                changed = True
-            for kind in f["unverifiable"]:
-                print(f"unverifiable-evidence {f['task_id']} {kind}")
-                changed = True
-            print(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
-                  f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
-                  f"dirty={f['dirty']} done={f['done']} review={f['review']} "
-                  f"hint={f['hint']} action={f['action']} wake={f['wake']}")
-            if task.get("status") == "review-dispatched":
-                d = review_deadline(rd, task, now_ns)
-                if d["state"] in ("overdue", "expired"):
-                    print(f"review-overdue {f['task_id']} state={d['state']} "
-                          f"launch={d['launch']} remaining={d['remaining']}")
-                    changed = True
-        due = rollover_due(rd, ns.session)
-        if due:
-            print(f"rollover-due used_pct={due[0]} threshold={due[1]}")
-            changed = True
-        print(f"changed: {'yes' if changed else 'no'}")
+            extra = None
+            if facts is not None:
+                extra = next_line(task, facts, ctx)
+            elif line.startswith("review-overdue "):
+                extra = "  next: read references/review-dispatch-details.md (Review deadline bound)"
+            elif line.startswith("rollover-due "):
+                extra = "  next: read SKILL.md section 1a"
+            if extra:
+                print(extra)
         write_drop_ack(rd, acked)
         return 0
     if ns.cmd == "pending":
@@ -7558,6 +7973,28 @@ def _main(argv=None) -> int:
             rd, ns.interval, ns.heartbeat_secs or 1800, ns.debounce_secs,
             ns.exit_on_signal, ns.since_epoch,
         )
+    if ns.cmd == "render-brief":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.repo_path is not None and ns.runtime is not None,
+                 "render-brief requires --repo-path and --runtime")
+        rd = repo_dir(ns.repo_slug)
+        record = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+        _require(isinstance(record, dict) and record.get("task_id") == ns.task_id,
+                 "task record does not match --task-id")
+        repo_root = _PAYLOAD_SELECTION.get()["context"]["root"]
+        agent, text = render_brief(rd, record, ns, repo_root)
+        data = text.encode("utf-8")
+        path = rd / "tasks" / f"{ns.task_id}.{agent}.brief.md"
+        parent, name = open_state_parent(coordination.payload_path(str(path)))
+        try:
+            atomic_bytes_at(parent, name, data)
+        finally:
+            os.close(parent)
+        print(json.dumps({"agent": agent, "brief_path": str(path), "bytes": len(data),
+                          "emit_phase": BRIEF_PHASES[ns.phase]["emit"], "phase": ns.phase,
+                          "sha256": hashlib.sha256(data).hexdigest()}, sort_keys=True))
+        return 0
     if ns.cmd == "verify-contract":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")

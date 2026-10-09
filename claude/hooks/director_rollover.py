@@ -27,6 +27,7 @@ director re-runs its preflight instead of acting unfenced.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -89,11 +90,11 @@ def decisions_text(cwd, no_carry):
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=TIMEOUT_SECS, check=False)
     except (OSError, subprocess.SubprocessError):
-        return DECISIONS_WARNING.format(cwd=cwd)
+        return DECISIONS_WARNING.format(cwd=shlex.quote(cwd))
     if result.returncode == 3:
         return ""
     if result.returncode != 0:
-        return DECISIONS_WARNING.format(cwd=cwd)
+        return DECISIONS_WARNING.format(cwd=shlex.quote(cwd))
     return result.stdout.strip()
 
 

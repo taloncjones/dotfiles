@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# dotfiles-test-env - Run one command with the herdr pane environment scrubbed.
+#
+# Usage: dotfiles-test-env CMD [ARGS...]    e.g. bin/dotfiles-test-env sh zsh/codex-account.test.sh
+#
+# The one way to run a suite or a contract check from a herdr pane; never
+# hand-write an `env -u` list. bin/dotfiles-tests sources this file, so a full
+# run and a single command see the same environment as CI. HOME, TMPDIR,
+# CLAUDE_CONFIG_DIR, the rest of PATH and the cwd are kept.
+
+set -u
+
+# A function so its helpers are local: a caller's exported `name` or `i`
+# must survive the scrub.
+dotfiles_scrub_test_env() {
+    local name path_rest path_entry scrubbed_path= path_started= i
+
+    # The suites are hermetic against real STATE but were not hermetic against the
+    # caller's ENVIRONMENT. Any account selector makes account_scope ignore
+    # CLAUDE_CONFIG_DIR and resolve account_root to a real account dir, which is
+    # not where any fixture lives -- so a plain local run produced dozens of
+    # failures that a scrubbed run did not, and the standing workaround was to
+    # remember the flag. CI never sets these, so unsetting here is also what makes
+    # a local run mean the same thing as the CI run.
+    #
+    # The WHOLE table, not the two that were noticed first. CLAUDE_PERSONAL_ONLY
+    # outranks CLAUDE_CONFIG_DIR and is the one this repo's own CLAUDE.md tells
+    # the user to export, so leaving it set took the guard suite from 237/0 to
+    # 179/58 -- and the red cases reported rc=0 where a deny was asserted, so a
+    # genuine fail-open regression would have been indistinguishable from
+    # environment noise. The rest relocate a root or a scope id the same way.
+    unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
+    unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
+
+    # The herdr pane identity. The stop gate reads HERDR_ACCOUNT_ID as strict
+    # native mode, and the gate and emit verbs compare HERDR_PANE_ID with the
+    # fixture's pane, so a run from inside a herdr pane gated fixture attempts
+    # against the real pane (18 gate cases red in claude-hooks.test.sh). CI
+    # never sets these.
+    # HERDR_BOUNDED_CHILD would make every gate refusal case fail open in a reviewer seat.
+    # By prefix: the fixed list this replaced missed HERDR_SOCKET_PATH and
+    # HERDR_BIN_PATH, and herdr may add more.
+    for name in $(compgen -e); do
+        case "$name" in HERDR_*) unset "$name" ;; esac
+    done
+
+    # An armed pane runs agents through the gh shim. BASH_ENV re-sources
+    # bin/herdr-shims/path.sh in every child bash, and a .../bin/herdr-shims PATH
+    # entry alone makes zsh/codex-account.zsh add a launch argument
+    # (codex-account.test.sh went from 41/0 to 8/33). Suites need neither, and
+    # never a live GitHub credential; CI has none. The walk keeps empty entries.
+    unset BASH_ENV GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+    path_rest="$PATH:"
+    while [ -n "$path_rest" ]; do
+        path_entry="${path_rest%%:*}"
+        path_rest="${path_rest#*:}"
+        case "$path_entry" in */bin/herdr-shims | */bin/herdr-shims/) continue ;; esac
+        if [ -n "$path_started" ]; then scrubbed_path="$scrubbed_path:$path_entry"; else scrubbed_path="$path_entry"; path_started=1; fi
+    done
+    PATH="$scrubbed_path"
+
+    # An op-env agent session (bin/op-env) exports git overrides: an HTTPS
+    # GIT_CONFIG_SYSTEM and GIT_CONFIG_COUNT signing entries. Suites must see
+    # the same plain git as CI.
+    i=0
+    while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ] 2>/dev/null; do
+        unset "GIT_CONFIG_KEY_$i" "GIT_CONFIG_VALUE_$i"
+        i=$((i + 1))
+    done
+    unset GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM OP_ENV_FILE OP_ENV_ACTIVE
+}
+dotfiles_scrub_test_env
+unset -f dotfiles_scrub_test_env
+
+# Sourced by bin/dotfiles-tests: scrub that shell and return to it.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    [ "$#" -gt 0 ] || { echo "usage: dotfiles-test-env CMD [ARGS...]" >&2; exit 2; }
+    exec "$@"
+fi

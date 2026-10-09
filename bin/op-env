@@ -21,11 +21,13 @@ while [ -L "$src" ]; do
     case "$src" in /*) ;; *) src="$dir/$src" ;; esac
 done
 DOTFILES="$(cd -P "$(dirname "$src")/.." && pwd)"
-OP_ENV_BIN="$DOTFILES/bin/op-env"
 HTTPS_GITCONFIG="$DOTFILES/git/agent-https.gitconfig"
 SIGN_PROGRAM="$DOTFILES/bin/op-env-sign"
 SIGNING_SOCK="${OP_ENV_SIGNING_SOCK:-$HOME/.local/state/dotfiles/op-env-signing.sock}"
 OP_TIMEOUT="${OP_ENV_OP_TIMEOUT:-20}"
+# Set at command scope after an empty reset: command scope is read last, so
+# no global or repo-local credential helper ever receives GH_TOKEN.
+GH_HELPER='!f() { test "$1" = get && test -n "$GH_TOKEN" && printf '\''username=x-access-token\npassword=%s\n'\'' "$GH_TOKEN"; }; f'
 
 err() { printf '%s\n' "$1" >&2; }
 
@@ -77,10 +79,10 @@ unquote() {
     printf '%s' "$v"
 }
 
-# Sets OPE_TOKEN, OPE_SIGNING_KEY, OPE_SIGNING_PUBKEY, OPE_SIGNING_TTL.
+# Sets OPE_TOKEN, OPE_SIGNING_KEY, OPE_SIGNING_PUBKEY, OPE_SIGNING_TTL, OPE_ALLOW.
 read_op_env() {
     local f="$1" line key value n=0 mode
-    OPE_TOKEN="" OPE_SIGNING_KEY="" OPE_SIGNING_PUBKEY="" OPE_SIGNING_TTL=""
+    OPE_TOKEN="" OPE_SIGNING_KEY="" OPE_SIGNING_PUBKEY="" OPE_SIGNING_TTL="" OPE_ALLOW=""
     if [ -L "$f" ] || [ ! -f "$f" ]; then fail_rule "op.env is not a regular file: $f"; return 1; fi
     if [ ! -O "$f" ]; then fail_rule "op.env is not owned by $(id -un): $f"; return 1; fi
     mode="$(file_mode "$f")"
@@ -100,6 +102,7 @@ read_op_env() {
             OP_SIGNING_KEY) OPE_SIGNING_KEY="$value" ;;
             OP_SIGNING_PUBKEY) OPE_SIGNING_PUBKEY="$value" ;;
             OP_SIGNING_TTL) OPE_SIGNING_TTL="$value" ;;
+            OP_ENV_ALLOW) OPE_ALLOW="$value" ;;
             *) fail_rule "op.env line $n has unknown key $key"; return 1 ;;
         esac
     done <"$f"
@@ -109,6 +112,33 @@ read_op_env() {
         case "$OPE_SIGNING_PUBKEY" in ssh-*|sk-*) ;; *) fail_rule "OP_SIGNING_KEY is set but OP_SIGNING_PUBKEY is missing (rerun setup-op --signing-key)"; return 1 ;; esac
     fi
     return 0
+}
+
+# A project.env name is accepted when it is an uppercase identifier ending in
+# _TOKEN, _KEY, _SECRET, _PASSWORD or _PAT, or when op.env lists it in
+# OP_ENV_ALLOW=NAME1,NAME2. The floor names below stay refused even then.
+is_floor_name() {
+    case "$1" in
+        PATH|HOME|SHELL|ENV|IFS|SHELLOPTS|BASHOPTS) return 0 ;;
+        BASH_*|PS[0-4]|PROMPT*|LD_*|DYLD_*|GIT_*|OP_*|CLAUDE_*) return 0 ;;
+    esac
+    return 1
+}
+
+is_allowed_name() {
+    local name="$1" item
+    [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+    is_floor_name "$name" && return 1
+    case "$name" in
+        *_TOKEN|*_KEY|*_SECRET|*_PASSWORD|*_PAT) return 0 ;;
+    esac
+    local IFS=, rc=1
+    set -f
+    for item in $OPE_ALLOW; do
+        [ "$item" = "$name" ] && rc=0
+    done
+    set +f
+    return "$rc"
 }
 
 # Sets PE_NAMES to the variable names project.env assigns.
@@ -122,6 +152,14 @@ read_project_env() {
         name="${line%%=*}"
         if [ "$name" = "$line" ] || [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             fail_rule "project.env line $n is not NAME=op://..."
+            return 1
+        fi
+        if is_floor_name "$name"; then
+            fail_rule "project.env line $n names a reserved variable"
+            return 1
+        fi
+        if ! is_allowed_name "$name"; then
+            fail_rule "project.env line $n name is not allowed (uppercase NAME ending _TOKEN, _KEY, _SECRET, _PASSWORD or _PAT, or listed in OP_ENV_ALLOW)"
             return 1
         fi
         value="$(unquote "${line#*=}")"
@@ -157,14 +195,23 @@ sq() {
     printf "'%s'" "${s//$q/$r}"
 }
 
-# Runs under `op run`: print the resolved names as shell exports.
-cmd_emit() {
-    local name
-    for name in "$@"; do
-        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 2
-        [ -n "${!name+x}" ] || continue
-        printf 'export %s=%s\n' "$name" "$(sq "${!name}")"
+# Reads `env -0` run under `op run` and prints the listed names as exports.
+# env is no shell, so nothing but op can have set a listed name.
+emit_resolved() {
+    local entry name
+    while IFS= read -r -d '' entry; do
+        name="${entry%%=*}"
+        if has_name "$name" "${PE_NAMES[@]}"; then
+            printf 'export %s=%s\n' "$name" "$(sq "${entry#*=}")"
+        fi
     done
+    return 0
+}
+
+# Prints one command-scope git config entry and advances the caller's count.
+emit_config() {
+    printf 'export GIT_CONFIG_KEY_%d=%s GIT_CONFIG_VALUE_%d=%s\n' "$count" "$1" "$count" "$(sq "$2")"
+    count=$((count + 1))
 }
 
 has_name() {
@@ -175,7 +222,8 @@ has_name() {
 }
 
 cmd_shell_exports() {
-    local cwd="$1" opfile penv resolved count resolved_ok=1
+    local cwd="$1" opfile penv resolved count first name resolved_ok=1
+    local -a unset_args
     opfile="$(locate_op_env "$cwd")"
     [ -n "$opfile" ] || return 0
     read_op_env "$opfile" || return 0
@@ -184,12 +232,22 @@ cmd_shell_exports() {
     if [ -n "$penv" ]; then
         read_project_env "$penv" || return 0
     fi
+    count="${GIT_CONFIG_COUNT:-0}"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    first="$count"
     if [ "${#PE_NAMES[@]}" -gt 0 ]; then
+        # op starts without the listed names, so every listed name env -0
+        # reports is one op run set, never one inherited from the caller.
+        unset_args=()
+        for name in "${PE_NAMES[@]}"; do unset_args+=(-u "$name"); done
         if resolved="$(OP_SERVICE_ACCOUNT_TOKEN="$OPE_TOKEN" bounded "$OP_TIMEOUT" \
-            op run --no-masking --env-file "$penv" -- "$OP_ENV_BIN" _emit "${PE_NAMES[@]}")"; then
+            env "${unset_args[@]}" op run --no-masking --env-file "$penv" -- env -0 | emit_resolved
+            exit "${PIPESTATUS[0]}")"; then
             printf '%s\n' "$resolved"
             if has_name GH_TOKEN "${PE_NAMES[@]}"; then
                 printf 'export GIT_CONFIG_SYSTEM=%s\n' "$(sq "$HTTPS_GITCONFIG")"
+                emit_config credential.https://github.com.helper ""
+                emit_config credential.https://github.com.helper "$GH_HELPER"
             fi
         else
             resolved_ok=0
@@ -197,14 +255,12 @@ cmd_shell_exports() {
         fi
     fi
     if [ -n "$OPE_SIGNING_KEY" ]; then
-        count="${GIT_CONFIG_COUNT:-0}"
-        [[ "$count" =~ ^[0-9]+$ ]] || count=0
-        printf 'export GIT_CONFIG_KEY_%d=gpg.format GIT_CONFIG_VALUE_%d=ssh\n' "$count" "$count"
-        printf 'export GIT_CONFIG_KEY_%d=gpg.ssh.program GIT_CONFIG_VALUE_%d=%s\n' \
-            $((count + 1)) $((count + 1)) "$(sq "$SIGN_PROGRAM")"
-        printf 'export GIT_CONFIG_KEY_%d=user.signingkey GIT_CONFIG_VALUE_%d=%s\n' \
-            $((count + 2)) $((count + 2)) "$(sq "key::$OPE_SIGNING_PUBKEY")"
-        printf 'export GIT_CONFIG_COUNT=%d\n' $((count + 3))
+        emit_config gpg.format ssh
+        emit_config gpg.ssh.program "$SIGN_PROGRAM"
+        emit_config user.signingkey "key::$OPE_SIGNING_PUBKEY"
+    fi
+    if [ "$count" != "$first" ]; then
+        printf 'export GIT_CONFIG_COUNT=%d\n' "$count"
     fi
     printf 'export OP_ENV_FILE=%s\n' "$(sq "$opfile")"
     # Status reads this as "credentials resolved": a failed op run clears any
@@ -238,7 +294,9 @@ start_agent() {
     local out pid
     agent_alive && return 0
     rm -f "$SIGNING_SOCK"
-    if ! out="$(ssh-agent -a "$SIGNING_SOCK" -s 2>/dev/null)"; then
+    # The daemon outlives the session: give it PATH only, never the
+    # session's resolved credentials.
+    if ! out="$(env -i PATH="$PATH" ssh-agent -a "$SIGNING_SOCK" -s 2>/dev/null)"; then
         agent_alive
         return
     fi
@@ -295,15 +353,18 @@ cmd_sign() {
 
 report() { printf '%-10s%s\n' "$1" "$2"; }
 
-signing_active() {
+# True when the command-scope git config holds key $1 with value $2.
+has_command_config() {
     local i=0
     while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
         local k="GIT_CONFIG_KEY_$i" v="GIT_CONFIG_VALUE_$i"
-        [ "${!k:-}" = gpg.ssh.program ] && [ "${!v:-}" = "$SIGN_PROGRAM" ] && return 0
+        [ "${!k:-}" = "$1" ] && [ "${!v:-}" = "$2" ] && return 0
         i=$((i + 1))
     done
     return 1
 }
+
+signing_active() { has_command_config gpg.ssh.program "$SIGN_PROGRAM"; }
 
 cmd_status() {
     local cwd="$1" opfile penv active=0
@@ -334,6 +395,8 @@ cmd_status() {
     fi
     if ! has_name GH_TOKEN ${PE_NAMES[@]+"${PE_NAMES[@]}"}; then
         report "[INFO]" "push: not configured (project.env has no GH_TOKEN)"
+    elif [ "${GIT_CONFIG_SYSTEM:-}" = "$HTTPS_GITCONFIG" ] && ! has_command_config credential.https://github.com.helper "$GH_HELPER"; then
+        report "[X]" "push: this session predates the credential helper change; relaunch it"
     elif [ "${GIT_CONFIG_SYSTEM:-}" = "$HTTPS_GITCONFIG" ]; then
         report "[OK]" "push: HTTPS with GH_TOKEN, active in this shell"
     else
@@ -375,7 +438,6 @@ verb="$1"
 shift
 case "$verb" in
     sign) cmd_sign "$@"; exit ;;
-    _emit) cmd_emit "$@"; exit ;;
 esac
 cwd="$PWD"
 if [ "${1:-}" = --cwd ]; then

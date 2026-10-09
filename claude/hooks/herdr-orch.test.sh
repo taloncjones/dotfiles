@@ -1706,17 +1706,18 @@ python3 claude/hooks/herdr_legacy_fixture.py watch --repo-slug "$S" \
 SH
 
 check "SKILL.md pins the every-probe sample capture and the safe-mode probe line" <<'SH'
-SKILL="claude/skills/herdr-orchestration/SKILL.md"
+SKILL="claude/skills/herdr-orchestration/references/legacy-wrappers.md"
+MAIN="claude/skills/herdr-orchestration/SKILL.md"
 rg -q -F 'probe-samples.jsonl' "$SKILL"
 rg -q -F 'diagnostic sample for every probe, whatever `CLS` is' "$SKILL"
 ind=$(grep -n -F -- '- `indeterminate` (no `claude`' "$SKILL" | head -1 | cut -d: -f1)
 app=$(grep -n -F -- '- After the map is written or the launches are aborted, append a' "$SKILL" | head -1 | cut -d: -f1)
 [ -n "$ind" ] && [ -n "$app" ] && [ "$app" -gt "$ind" ]
-! rg -q -F 'If `CLS` is not `available`' "$SKILL"
+! rg -q -F 'If `CLS` is not `available`' "$SKILL" "$MAIN"
 rg -q -F '|| true`' "$SKILL"
 rg -q -F -- "PROBE_JSON=\"\$(claude --model fable --safe-mode --max-turns 1 -p 'Reply with the single word: ok' --output-format json </dev/null)\"" "$SKILL"
-! rg -q -F 'claude --model fable -p' "$SKILL"
-! rg -q 'PROBE_JSON=.*(mktemp|cd )' "$SKILL"
+! rg -q -F 'claude --model fable -p' "$SKILL" "$MAIN"
+! rg -q 'PROBE_JSON=.*(mktemp|cd )' "$SKILL" "$MAIN"
 SH
 
 check "validate_messaging_socket: canonical dirs, pid basename, /private alias, rejects" <<PY
@@ -2905,16 +2906,16 @@ SH
 
 check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
-grep -q '| Mechanical worker (`mech`)' "$S"
-grep -Fq -- 'route --runtime <claude|codex> --role mechanical --risk normal' "$S"
-grep -q 'Legacy Claude wrapper' "$S"
-grep -q 'run-mech --repo-slug' "$S"
-grep -q '"haiku":true' "$S"                                  # probe writes the fourth alias
-grep -q 'mech-caps --repo-slug' "$S"
-grep -q 'mech-contract --repo-slug' "$S"
-grep -q 'Launch base' "$S"                                   # base_sha = post-contract HEAD
-grep -q 'wrapper lost' "$S"                                  # mech liveness table
-grep -q '_totals' "$S"
+grep -q '| Mechanical worker (`mech`)' "$R/legacy-wrappers.md"
+grep -Fq -- 'route --runtime <claude|codex> --role mechanical --risk normal' "$R/kickoff.md"
+grep -q 'Legacy Claude wrapper' "$R/legacy-wrappers.md"
+grep -q 'run-mech --repo-slug' "$R/legacy-wrappers.md"
+grep -q '"haiku":true' "$R/legacy-wrappers.md"                                  # probe writes the fourth alias
+grep -q 'mech-caps --repo-slug' "$R/kickoff.md"
+grep -q 'mech-contract --repo-slug' "$R/kickoff.md"
+grep -q 'Launch base' "$R/kickoff.md"                                   # base_sha = post-contract HEAD
+grep -q 'wrapper lost' "$R/legacy-wrappers.md"                                  # mech liveness table
+grep -q '_totals' "$R/legacy-wrappers.md"
 grep -q '"mech": {' "$R/state-layout.md"
 grep -q '\.spend\.jsonl' "$R/state-layout.md"
 grep -q '"haiku": true' "$R/state-layout.md"
@@ -2926,28 +2927,28 @@ SH
 
 check "docs pin effort routing, banner verb, deep think, and Workflow routing" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
-grep -q 'routing-table --repo-slug' "$S"                     # one snapshot per dispatch
-grep -q 'One snapshot per dispatch' "$S"
-grep -q -- '--effort \$EFFORT' "$S"                          # launch line
-grep -q 'classify-banner --model' "$S"
+grep -q 'routing-table --repo-slug' "$R/dispatch-adapter.md" "$R/legacy-wrappers.md"                     # one snapshot per dispatch
+grep -q 'One snapshot per dispatch' "$R/dispatch-adapter.md"
+grep -q -- '--effort \$EFFORT' "$R/legacy-wrappers.md"                          # launch line
+grep -q 'classify-banner --model' "$R/dispatch-adapter.md"
 grep -q 'effort-mismatch' "$S"
-grep -q 'not availability data' "$S"                         # never disable-model on effort-mismatch
-grep -q 'Deep-think escalation' "$S"
-grep -q 'run-think --repo-slug' "$S"
-grep -q 'think-caps --repo-slug' "$S"
-for t in 'Ambiguous triage' 'Milestone/epic decomposition' 'Novel incident' 'Not eligible'; do grep -q "$t" "$S"; done
-grep -q 'one live escalation per repo' "$S"
-grep -q 'daily_budget_usd' "$S"
-grep -q 'escalation deferred' "$S"
-grep -q '_think' "$S"
-grep -q 'Workflow' "$S" && grep -q 'in-turn helper work' "$S"
-grep -q 'Precedence with the user' "$S"
+grep -q 'not availability data' "$R/dispatch-adapter.md"                         # never disable-model on effort-mismatch
+grep -q 'Deep-think escalation' "$R/legacy-wrappers.md" "$R/triage.md"
+grep -q 'run-think --repo-slug' "$R/legacy-wrappers.md"
+grep -q 'think-caps --repo-slug' "$R/legacy-wrappers.md"
+for t in 'Ambiguous triage' 'Milestone/epic decomposition' 'Novel incident' 'Not eligible'; do grep -q "$t" "$R/legacy-wrappers.md" "$R/triage.md"; done
+grep -q 'one live escalation per repo' "$R/legacy-wrappers.md"
+grep -q 'daily_budget_usd' "$R/legacy-wrappers.md"
+grep -q 'escalation deferred' "$R/legacy-wrappers.md" "$R/triage.md"
+grep -q '_think' "$R/legacy-wrappers.md"
+grep -q 'Workflow' "$S" && grep -q 'in-turn helper work' "$R/workflow-routing.md"
+grep -q 'Precedence with the user' "$R/workflow-routing.md"
 grep -q 'route --step implementation-review' "$S"
 grep -q -- '--provisional' "$S"
 grep -q 'review-change' "$S"
 grep -q 'task-local readiness' "$S"
-grep -q 'sized review deadline' "$S"
-! grep -q '600_000_000_000' "$S"
+grep -q 'sized review deadline' "$R/review-dispatch-details.md"
+! grep -q '600_000_000_000' "$S" "$R/review-dispatch-details.md"
 grep -q 'outcome: changes-requested' "$S"
 grep -q 'outcome: approved' "$S"
 grep -q 'Workflow opt-in: granted by the user' "$R/brief-template.md"
@@ -3348,8 +3349,8 @@ PY
 
 check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
-if grep -q 'The director never merges, pushes, or opens a PR' "$S"; then exit 1; fi
-if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S"; then exit 1; fi
+if grep -q 'The director never merges, pushes, or opens a PR' "$S" "$R/director-launch.md"; then exit 1; fi
+if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S" "$R/director-launch.md"; then exit 1; fi
 grep -q '^## 6a\. Director merge (personal repositories)' "$S"
 grep -Fq 'merge-authority --repo-slug' "$S"
 grep -Fq 'merge-ready --repo-slug' "$S"
@@ -3373,9 +3374,9 @@ grep -Fq 'merge-refused' "$S"
 grep -Fq 'base-conflict' "$S"
 grep -Fq 'changes-requested' "$S"
 grep -Fq 'Workers never carry merge authority' "$S"
-grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$S"
-grep -Fq 'Bash(gh pr:*)' "$S"
-grep -Fq 'accepted prompt' "$S"
+grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$R/director-launch.md"
+grep -Fq 'Bash(gh pr:*)' "$R/director-launch.md"
+grep -Fq 'accepted prompt' "$R/director-launch.md"
 grep -Fq 'ship_launch_id' "$R/state-layout.md"
 grep -Fq 'teardown_blocked' "$R/state-layout.md"
 grep -Fq '"merge_commit_sha"' "$R/state-layout.md"
@@ -3391,25 +3392,25 @@ grep -Fq 'CHANGES, INCOMPLETE' "$R/brief-template.md"
 SH
 
 check "docs pin the carry-forward proof for merge-main-only heads" <<'SH'
-S="claude/skills/herdr-orchestration/SKILL.md"
-if grep -Fq 'rev-list --no-merges <reviewed_head>..HEAD' "$S"; then exit 1; fi
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+if grep -Fq 'rev-list --no-merges <reviewed_head>..HEAD' "$S" "$R/ship-carry-forward.md"; then exit 1; fi
 grep -Fq 'GATE_REPORT="$SKILL_DIR/../co-review/scripts/gate_report.py"' "$S"
-grep -Fq '"$GATE_REPORT" carry-forward --repo <worktree>' "$S"
-grep -Fq -- '--report-sha256 <report_sha256> --expected-sha256 <expected_sha256>' "$S"
-grep -Fq 'never dispatch a gate for that head' "$S"
+grep -Fq '"$GATE_REPORT" carry-forward --repo <worktree>' "$R/ship-carry-forward.md"
+grep -Fq -- '--report-sha256 <report_sha256> --expected-sha256 <expected_sha256>' "$R/ship-carry-forward.md"
+grep -Fq 'never dispatch a gate for that head' "$R/ship-carry-forward.md"
 SH
 
 check "docs pin delta dispatch, forced full, and relaunch-is-full" <<'SH'
-S="claude/skills/herdr-orchestration/SKILL.md"
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 L="claude/skills/herdr-orchestration/references/state-layout.md"
 grep -Fq 'the handoff report has `class` `delta`' "$S"
 grep -Fq '(section 6a step 0 owns it), except rule (c)' "$S"
 grep -Fq 'every such relaunch brief carries `herdr-ship-brief: tier=full`' "$S"
-grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$S"
-grep -Fq 'herdr-ship-brief: tier=delta' "$S"
-grep -Fq 'herdr-ship-prior-handoff:' "$S"
-grep -Fq 'herdr-ship-delta-head:' "$S"
-grep -Fq 'herdr-ship-delta-caps:' "$S"
+grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-brief: tier=delta' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-prior-handoff:' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-delta-head:' "$R/ship-carry-forward.md"
+grep -Fq 'herdr-ship-delta-caps:' "$R/ship-carry-forward.md"
 grep -Fq 'section 6 rule (c) dispatches a full gate' "$S"
 grep -Fq '"delta": {"max_files": 5, "max_lines": 150}' "$L"
 SH
@@ -3418,19 +3419,19 @@ check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state l
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 P="claude/skills/post-merge/SKILL.md"
 grep -q '^## Lessons step (<lessons-step>)$' "$R/brief-template.md"
-grep -q '^## Director-authored repair and ship briefs$' "$R/brief-template.md"
+grep -q '^## Repair and ship brief variants$' "$R/brief-template.md"
 [ "$(grep -c '<lessons-step>' "$R/brief-template.md")" -ge 6 ]
 grep -Fq 'at most 160 characters' "$R/brief-template.md"
 if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
 if grep -Eq '^[[:space:]]*LESSON:' "$R/brief-template.md"; then exit 1; fi
 grep -q '^### Lesson harvest$' "$S"
-grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$S"
-grep -Fq 'tasks/<task_id>.lessons.md' "$S"
+grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$R/lesson-harvest.md"
+grep -Fq 'tasks/<task_id>.lessons.md' "$R/lesson-harvest.md"
 grep -Fq 'skip the Lesson harvest' "$S"
-grep -Fq 'through every following indented' "$S"
-if grep -Fq 'to the end of the line' "$S"; then exit 1; fi
+grep -Fq 'through every following indented' "$R/lesson-harvest.md"
+if grep -Fq 'to the end of the line' "$S" "$R/lesson-harvest.md"; then exit 1; fi
 grep -Fq 'before the verdict or stale-reset' "$S"
-grep -Fq 'see references/state-layout.md,' "$S"
+grep -Fq 'see references/state-layout.md,' "$R/lesson-harvest.md"
 grep -Fq 'does not guarantee one physical row' "$R/brief-template.md"
 grep -Fq 'tasks/<task_id>.lessons.md' "$P"
 grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
@@ -12006,7 +12007,7 @@ def read(path):
 def section(text, start, end):
     i = text.index(start)
     return text[i:text.index(end, i + len(start))]
-herdr = read("claude/skills/herdr-orchestration/SKILL.md")
+herdr = read("claude/skills/herdr-orchestration/SKILL.md") + "\n" + read("claude/skills/herdr-orchestration/references/posting.md")
 director = read("claude/agents/director.md")
 cc = read("claude/skills/co-review/SKILL.md")
 cx = read("codex/skills/co-review/SKILL.md")
@@ -12054,7 +12055,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 447
+assert t.count("\n") <= 586
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -12093,8 +12094,268 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 447
+assert t.count("\n") <= 586
 PY
+
+check "render-brief: the template holds every block the phase table names" <<PY
+$LOAD
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+blocks = c.brief_blocks(t)
+need = {"lessons", "opt-in-granted", "opt-in-withheld", "ship-tier-full", "ship-tier-delta"}
+for spec in c.BRIEF_PHASES.values():
+    need.update(spec["blocks"])
+    need.add(spec["lessons"])
+missing = sorted(need - set(blocks))
+assert not missing, missing
+assert str(c.BRIEF_TEMPLATE_PATH.resolve()) == os.path.realpath("claude/skills/herdr-orchestration/references/brief-template.md")
+spaced = [n for n, body in blocks.items() if re.search(r"<[A-Za-z][^<>]*\s[^<>]*>", body)]
+assert not spaced, spaced  # the token scan only sees space-free tokens
+try:
+    c.brief_blocks("\`\`\`brief:a\nx\n\`\`\`\n\`\`\`brief:a\ny\n\`\`\`\n")
+    raise SystemExit("duplicate block accepted")
+except ValueError:
+    pass
+PY
+
+BRIEF_FIXTURE=$(mktemp); export BRIEF_FIXTURE
+cat > "$BRIEF_FIXTURE" <<'PYFIX'
+import hashlib, importlib.util, json, os, re, subprocess, tempfile
+CORE = os.path.abspath("claude/hooks/herdr_orch_core.py")
+tmp = os.path.realpath(tempfile.mkdtemp())
+home = os.path.join(tmp, "home")
+repo = os.path.join(home, "Git", "personal", "project")
+os.environ.update(HOME=home, HERDR_COORDINATION_ROOT=os.path.join(tmp, "coord"),
+                  GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                  GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                  GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+os.environ.pop("CLAUDE_CONFIG_DIR", None)
+def git(cwd, *a):
+    return subprocess.run(["git", "-C", cwd, *a], check=True, capture_output=True, text=True).stdout.strip()
+def commit(cwd, name):
+    open(os.path.join(cwd, name), "w").write(name + "\n")
+    git(cwd, "add", name); git(cwd, "commit", "-q", "-m", name)
+    return git(cwd, "rev-parse", "HEAD")
+origin = os.path.join(tmp, "origin.git")
+subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+os.makedirs(repo); git(repo, "init", "-q", "-b", "main")
+A = commit(repo, "a.txt")
+gh_url = "https://github.com/acme/widget.git"
+git(repo, "remote", "add", "origin", gh_url)
+git(repo, "config", "url." + origin + ".insteadOf", gh_url)
+git(repo, "push", "-q", "origin", "main")
+other = os.path.join(tmp, "other")
+subprocess.run(["git", "clone", "-q", origin, other], check=True)
+C = commit(other, "c.txt"); git(other, "push", "-q", "origin", "main")
+suffix = "a-deliberately-long-branch-suffix-for-the-cap"
+branch = "talon/td-render-x/" + suffix
+git(repo, "checkout", "-q", "-b", branch)
+B = commit(repo, "b.txt")
+os.makedirs(os.path.join(repo, ".todos", "pending"))
+open(os.path.join(repo, ".todos", "pending", "td-render-x.md"), "w").write(
+    "---\ntitle: Render fixture\n---\n\n## Problem\n\nFIXTURE-TODO-BODY\n")
+spec = importlib.util.spec_from_file_location("core", CORE)
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+slug = c._context_slug(c.repository_context(repo))
+rd = os.path.join(home, ".claude", "herdr-orch", slug)
+art = os.path.join(rd, "artifacts", "td-render-x", "p1"); os.makedirs(art)
+open(os.path.join(art, "spec.md"), "w").write("spec\n")
+spec_sha = hashlib.sha256(b"spec\n").hexdigest()
+os.makedirs(os.path.join(rd, "tasks"))
+findings = os.path.join(rd, "artifacts", "td-render-x", "review-L1", "findings.md")
+os.makedirs(os.path.dirname(findings))
+open(findings, "w").write("Verdict: changes-requested\nBlocking: 1\nAdvisories: none\n\nFIXTURE-FINDING\n")
+taken = c.agent_name("impl", suffix)
+record = {"v": 1, "task_id": "td-render-x", "repo_slug": slug, "kind": "todo", "todo_id": "td-render-x",
+          "title": "Render fixture", "branch": branch, "worktree": repo, "workspace_id": "w9",
+          "base_ref": "origin/main", "base_sha": A, "status": "reviewed", "review_head_sha": B,
+          "pr_number": 77, "contract_path": "claude/contracts/td-render-x-contract.json",
+          "contract_sha256": "0" * 64,
+          "plan_artifacts": [{"kind": "spec", "path": os.path.join(art, "spec.md"), "sha256": spec_sha}],
+          "workers": [{"agent": taken, "phase": "implement", "launch_id": taken + "-000000000000"}]}
+task_file = os.path.join(rd, "tasks", "td-render-x.json")
+def put(rec):
+    open(task_file, "w").write(json.dumps(rec))
+put(record)
+focus_text = "FIXTURE-FOCUS-TEXT quotes <task-body> and <lessons-step> verbatim"
+focus = os.path.join(tmp, "focus.md"); open(focus, "w").write(focus_text + "\n")
+WORKER = {"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>", "<outcome>", "<n>", "<artifact-list-json>"}
+def render(*extra):
+    return subprocess.run(["python3", CORE, "render-brief", "--repo-slug", slug, "--repo-path", repo,
+                           "--runtime", "claude", "--task-id", "td-render-x", *extra],
+                          capture_output=True, text=True)
+def rendered(*extra):
+    p = render(*extra)
+    assert p.returncode == 0, (extra, p.stderr)
+    out = json.loads(p.stdout)
+    return out, open(out["brief_path"]).read()
+def common(phase, out, brief):
+    scanned = brief.replace(focus_text, "")
+    assert not (set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", scanned)) - WORKER), phase
+    assert "LESSON: [" not in scanned and "<task-body>" not in scanned, phase
+    assert len(out["agent"]) <= 32 and c.AGENT_NAME_RE.fullmatch(out["agent"]), out
+    assert out["agent"] != taken, out
+    assert os.path.dirname(out["brief_path"]) == os.path.join(rd, "tasks"), out
+    assert hashlib.sha256(brief.encode()).hexdigest() == out["sha256"], phase
+    for needle in (A, B, repo, branch):
+        assert needle in brief, (phase, needle)
+PYFIX
+
+check "render-brief: plan and implement briefs carry the record and keep focus text verbatim" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "plan", "--focus-file", focus, "--artifact-class", "advisory")
+common("plan", out, brief)
+assert f"`{out['agent']}`" in brief and focus_text in brief and "FIXTURE-TODO-BODY" in brief
+assert "ARTIFACT_CLASS=advisory" in brief and "[td-render-x plan]" in brief and "--phase plan" in brief
+assert "- impl: sonnet / medium" in brief and "- mech: unavailable / -" in brief
+assert "Workflow opt-in: granted by the user" in brief
+assert "Keep the turn alive while your own run finishes" in brief
+out, brief = rendered("--phase", "implement")
+common("implement", out, brief)
+assert "FIXTURE-TODO-BODY" in brief and spec_sha in brief and "td-render-x-contract.json" in brief
+assert "--phase implement" in brief and "[td-render-x implement]" in brief
+again, _ = rendered("--phase", "implement")
+assert again["sha256"] == out["sha256"], "not deterministic"
+_, withheld = rendered("--phase", "implement", "--no-workflow")
+assert "Workflow opt-in: withheld for this task" in withheld
+PY
+
+check "render-brief: refusals write nothing" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+def refused(*extra):
+    before = sorted(os.listdir(os.path.join(rd, "tasks")))
+    p = render(*extra)
+    assert p.returncode == 2, (extra, p.returncode, p.stderr)
+    assert sorted(os.listdir(os.path.join(rd, "tasks"))) == before, extra
+refused("--phase", "plan", "--focus-file", focus)
+refused("--phase", "implement", "--findings", findings)
+refused("--phase", "bogus")
+os.rename(os.path.join(repo, ".todos", "pending", "td-render-x.md"), os.path.join(tmp, "parked.md"))
+refused("--phase", "implement")
+out, brief = rendered("--phase", "implement", "--focus-file", focus)
+assert focus_text in brief
+PY
+
+check "render-brief: repair and review briefs name the findings, artifacts and emit phase" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "repair", "--focus-file", focus, "--findings", findings)
+common("repair", out, brief)
+assert f"`{out['agent']}`" in brief and findings in brief and focus_text in brief
+assert "FIXTURE-TODO-BODY" not in brief and spec_sha in brief
+assert "--phase implement" in brief and "[td-render-x repair]" in brief
+assert "never merge\nmain into the branch" in brief
+out, brief = rendered("--phase", "review", "--focus-file", focus)
+common("review", out, brief)
+assert os.path.join(rd, "artifacts", "td-render-x", "review-<launch_id>", "findings.md") in brief
+assert "Verdict: approved" in brief and "Blocking: <n>" in brief and "Advisories: none" in brief
+assert "emit-review" in brief and "[td-render-x review]" in brief and spec_sha in brief
+outside = os.path.join(tmp, "outside.md"); open(outside, "w").write("x\n")
+p = render("--phase", "repair", "--focus-file", focus, "--findings", outside)
+assert p.returncode == 2, p.stderr
+p = render("--phase", "repair", "--focus-file", focus)
+assert p.returncode == 2, p.stderr
+PY
+
+check "render-brief: ship brief names the live base and no agent" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "ship", "--focus-file", focus)
+common("ship", out, brief)
+assert out["agent"] not in brief and c.valid_task_id(out["agent"])
+assert re.search(r"Live base: origin/main @ " + C, brief) and re.search(r"Task base: origin/main @ " + A, brief)
+assert "herdr-ship-brief: stop-after-gate" in brief and "herdr-ship-brief: tier=full" in brief
+assert "#77" in brief and "acme/widget" in brief and "ship.json" in brief
+assert os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") in brief
+assert "[td-render-x ship]" in brief and focus_text in brief
+handoff = os.path.join(rd, "artifacts", "td-render-x", "ship-S0", "ship.json")
+os.makedirs(os.path.dirname(handoff)); open(handoff, "w").write("{}\n")
+out, brief = rendered("--phase", "ship", "--focus-file", focus, "--tier", "delta", "--prior-handoff", handoff)
+assert "herdr-ship-brief: tier=delta" in brief and "herdr-ship-delta-caps: 5/150" in brief
+assert f"herdr-ship-prior-handoff: {handoff}" in brief and f"herdr-ship-delta-head: {B}" in brief
+PY
+
+check "render-brief: ship brief defines report_path as the gate report in the launch directory" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "ship", "--focus-file", focus)
+flat = " ".join(brief.split())
+launch_dir = os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") + "/"
+ship_report = os.path.join(rd, "tasks", "td-render-x.ship.md")
+assert f"set co-review's `RUN_DIR` to `{launch_dir}run`" in flat, flat
+assert ("`report_path` is the gate's `run/report.json` inside the launch directory and "
+        f"`expected_path` its `run/expected.json`, never `{ship_report}`.") in flat, flat
+PY
+
+check "render-brief: ship refuses without a PR, on a moved head, or delta without a handoff" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+def refused(*extra):
+    p = render(*extra)
+    assert p.returncode == 2, (extra, p.returncode, p.stderr)
+refused("--phase", "ship", "--focus-file", focus, "--tier", "delta")
+refused("--phase", "ship")
+put(dict(record, pr_number=None)); refused("--phase", "ship", "--focus-file", focus)
+put(dict(record, review_head_sha=A)); refused("--phase", "ship", "--focus-file", focus)
+put(record)
+out, _ = rendered("--phase", "ship", "--focus-file", focus)
+PY
+
+HEADER_FIXTURE=$(mktemp); export HEADER_FIXTURE
+cat > "$HEADER_FIXTURE" <<'HELPER'
+header_fixture() {
+    LF_REPO=$(mktemp -d)
+    git -C "$LF_REPO" init -q
+    git -C "$LF_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+    git -C "$LF_REPO" remote add origin "$1"
+    LF_SLUG=$(python3 -c 'import sys; sys.path.insert(0, "claude/hooks"); import herdr_orch_core as c; print(c.repo_slug(sys.argv[1]))' "$1")
+    root=$(mktemp -d); CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+    f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session S --host h --pid 1)
+    SHA40=$(printf 'a%.0s' $(seq 1 40))
+    CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug "$LF_SLUG" --session S --fence "$f" --task-id td-h \
+      --json '{"task_id":"td-h","base_sha":"'"$SHA40"'","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'"}]}'
+    FR="$root/herdr-orch/$LF_SLUG/artifacts/td-h/review-L2/findings.md"
+    mkdir -p "$(dirname "$FR")"
+    REVIEW_JSON="$root/herdr-orch/$LF_SLUG/tasks/td-h.review.json"
+}
+header_emit() {   # $1 outcome, $2 blocking count
+    HERDR_ENV=1 HERDR_WORKSPACE_ID=w9 HERDR_PANE_ID=pane9 CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
+      --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --runtime claude --task-id td-h --workspace w9 \
+      --agent rev-td-h --outcome "$1" --reviewed-head-sha "$SHA40" --blocking-count "$2" \
+      --launch-id L2 --pane-id pane9 --source-head-sha "$SHA40" --findings-ref "$FR"
+}
+HELPER
+
+check "emit-review in herdr refuses findings without the summary header" <<'SH'
+. "$HEADER_FIXTURE"; header_fixture https://example.com/repo-hdr1.git
+printf 'No blocking findings. Inspected: fixture diff.\n' > "$FR"
+rc=0; header_emit approved 0 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+grep -q 'Verdict:' "$ERRFILE"
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit-review in herdr refuses a summary header that disagrees with the verdict" <<'SH'
+. "$HEADER_FIXTURE"; header_fixture https://example.com/repo-hdr2.git
+printf 'Verdict: approved\nBlocking: 0\nAdvisories: none\n\nInspected: fixture diff.\n' > "$FR"
+rc=0; header_emit changes-requested 0 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+rc=0; header_emit approved 1 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit-review in herdr accepts a matching summary header" <<'SH'
+. "$HEADER_FIXTURE"; header_fixture https://example.com/repo-hdr3.git
+printf '\nVerdict: changes-requested\nBlocking: 2\nAdvisories: tidy names; add a test\n\nBody.\n' > "$FR"
+header_emit changes-requested 2
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["outcome"] == "changes-requested" and rec["blocking_count"] == 2, rec
+' "$REVIEW_JSON"
+SH
 
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
 import importlib.util, json, os, sys, tempfile
@@ -12373,6 +12634,182 @@ assert facts["idle_settled"] is False, facts
 assert facts["action"] != "exit-idle-worker", facts["action"]
 PY
 
+check "next: confirm-review prints a ready accept-review command" <<PY
+$LOAD
+import shlex
+adapter = os.path.join(os.path.dirname(os.path.realpath("claude/hooks/herdr_orch_core.py")), "herdr_dispatch.py")
+ctx = {"repo_slug": "slug-x", "repo_path": "/r/p q", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+facts = {"task_id": "td-a", "action": "confirm-review", "head": "a" * 40, "ws": "w1",
+         "idle_launch": None, "idle_ws": None}
+line = c.next_line({"worktree": "/w"}, facts, ctx)
+assert line.startswith("  next: run "), line
+argv = shlex.split(line[len("  next: run "):])
+assert argv == ["python3", adapter, "accept-review", "--repo-slug", "slug-x", "--repo-path", "/r/p q",
+                "--runtime", "claude", "--session", "S", "--fence", "7", "--task-id", "td-a"], argv
+ctx["personal"] = True
+facts["action"] = "confirm-plan"
+argv = shlex.split(c.next_line({"worktree": "/w"}, facts, ctx)[len("  next: run "):])
+assert argv[2] == "advance" and argv[7:10] == ["--runtime", "claude", "--personal"], argv
+facts["action"] = "none"
+assert c.next_line({"worktree": "/w"}, facts, ctx) is None
+PY
+
+check "next: exit-idle-worker prints a settle command for the idle row" <<PY
+$LOAD
+import shlex
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+rev = {"phase": "review", "workspace_id": "w1", "runtime": "claude", "launch_id": "R",
+       "pane_id": "w1:p2", "source_head_sha": h, "agent": "rev-x"}
+impl = dict(rev, phase="implement", launch_id="I", pane_id="w1:p1", agent="impl-x")
+rec = {k: rev[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(dict(rec, task_id="PROJ-1", outcome="changes-requested")))
+task = {"v": 1, "task_id": "PROJ-1", "status": "changes-requested", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl, rev]}
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "rev-x", "pane_id": "w1:p2", "agent_status": "done"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_launch"] == "R" and facts["idle_ws"] == "w1", facts
+facts["action"] = "exit-idle-worker"
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+argv = shlex.split(c.next_line(task, facts, ctx)[len("  next: run "):])
+assert argv[2:] == ["settle", "--repo-slug", "slug-x", "--task-id", "PROJ-1", "--session", "S",
+                    "--fence", "7", "--workspace-id", "w1", "--cwd", task["worktree"],
+                    "--launch-id", "R", "--runtime", "claude"], argv
+poll["agents"]["w1"][0]["agent_status"] = "working"
+quiet = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert quiet["idle_launch"] is None and quiet["idle_ws"] is None, quiet
+PY
+
+check "next: changes-requested prints an ask line" <<PY
+$LOAD
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+facts = {"task_id": "td-a", "action": "changes-requested", "head": "abcdef0123" + "0" * 30,
+         "ws": "w1", "idle_launch": None, "idle_ws": None}
+assert c.next_line({}, facts, ctx) == ("  next: ask Review at abcdef0 requested changes: render a repair "
+    "brief (SKILL.md section 5 step 6), or return the task to design?"), c.next_line({}, facts, ctx)
+facts.update(action="paused", head=None)
+assert c.next_line({}, facts, ctx) == "  next: ask Attempt paused at unknown: relaunch, re-brief, or stop?"
+facts["action"] = "dispatch-review"
+assert c.next_line({}, facts, ctx) == "  next: read SKILL.md section 5"
+PY
+
+check "next: output is checkin output plus next lines" <<'PY'
+import os, re, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+fence = subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                        "--session", "S", "--host", "h", "--pid", str(os.getpid())],
+                       capture_output=True, text=True, check=True).stdout.strip()
+a, w = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(a, "w").write('{"result":{"agents":[]}}'); open(w, "w").write('{"result":{"workspaces":[]}}')
+base = ["--repo-slug", slug, "--session", "S", "--fence", fence, "--agents-json", a, "--workspaces-json", w]
+ck = subprocess.run(["python3", CORE, "checkin", *base], capture_output=True, text=True)
+nx = subprocess.run(["python3", CORE, "next", *base, "--repo-path", repo, "--runtime", "claude"],
+                    capture_output=True, text=True)
+assert ck.returncode == 0 and nx.returncode == 0, (ck.stderr, nx.stderr)
+lines = nx.stdout.splitlines()
+assert [l for l in lines if not re.match(r"^ *next: ", l)] == ck.stdout.splitlines(), (lines, ck.stdout)
+assert lines[-1].startswith("changed: ") and lines[-2].startswith("next: run python3 "), lines
+assert " present-task " in lines[-2] and lines[-2].endswith(" --all --apply"), lines[-2]
+task_line = next(i for i, l in enumerate(lines) if l.startswith("td-render-x "))
+if " action=none " not in lines[task_line]:
+    assert re.match(r"^  next: (run|ask|read) ", lines[task_line + 1]), lines
+PY
+
+check "next: a quiet repo prints only the present-task line" <<'PY'
+import os, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+os.remove(task_file)
+fence = subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                        "--session", "S", "--host", "h", "--pid", str(os.getpid())],
+                       capture_output=True, text=True, check=True).stdout.strip()
+a, w = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(a, "w").write('{"result":{"agents":[]}}'); open(w, "w").write('{"result":{"workspaces":[]}}')
+nx = subprocess.run(["python3", CORE, "next", "--repo-slug", slug, "--repo-path", repo, "--runtime", "claude",
+                     "--session", "S", "--fence", fence, "--agents-json", a, "--workspaces-json", w],
+                    capture_output=True, text=True)
+assert nx.returncode == 0, nx.stderr
+lines = nx.stdout.splitlines()
+assert len(lines) == 2 and lines[0].startswith("next: run python3 ") and lines[1] == "changed: no", lines
+PY
+
+check "next: stale fence prints owner: stale-fence and exits 1" <<'PY'
+import os, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                "--session", "S", "--host", "h", "--pid", str(os.getpid())], capture_output=True, check=True)
+a, w = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(a, "w").write('{"result":{"agents":[]}}'); open(w, "w").write('{"result":{"workspaces":[]}}')
+nx = subprocess.run(["python3", CORE, "next", "--repo-slug", slug, "--repo-path", repo, "--runtime", "claude",
+                     "--session", "S", "--fence", "999", "--agents-json", a, "--workspaces-json", w],
+                    capture_output=True, text=True)
+assert nx.returncode == 1 and nx.stdout == "owner: stale-fence\n", (nx.returncode, nx.stdout)
+PY
+
+check "next: refuses without --repo-path and --runtime" <<'PY'
+import os, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+fence = subprocess.run(["python3", CORE, "claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                        "--session", "S", "--host", "h", "--pid", str(os.getpid())],
+                       capture_output=True, text=True, check=True).stdout.strip()
+base = ["python3", CORE, "next", "--repo-slug", slug, "--session", "S", "--fence", fence]
+assert subprocess.run(base + ["--runtime", "claude"], capture_output=True).returncode == 2
+assert subprocess.run(base + ["--repo-path", repo], capture_output=True).returncode == 2
+PY
+
+check "append-lessons: appends new tagged lines once" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'noise\nLESSON: [td-a plan] first lesson\nLESSON: [td-a plan] none\nLESSON: [td-ab plan] other task\nLESSON: [td-a review] other phase\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"appended": 1, "lines": ["LESSON: [td-a plan] first lesson"], "note": False}, d'
+test "$(grep -c '^## .* pane w1:p1 (plan)$' "$RD/tasks/td-a.lessons.md")" = 1
+grep -qx 'LESSON: \[td-a plan\] first lesson' "$RD/tasks/td-a.lessons.md"
+before=$(cat "$RD/tasks/td-a.lessons.md")
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["appended"] == 0 and d["lines"] == ["LESSON: [td-a plan] first lesson"], d'
+test "$(cat "$RD/tasks/td-a.lessons.md")" = "$before"
+SH
+
+check "append-lessons: joins wrapped rows and drops none" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+mkdir -p "$root/herdr-orch/slug-x/tasks"
+printf 'LESSON: [td-a review] wrapped\n   continuation row\n\nLESSON: [td-a review]   none\n- LESSON: [td-a review] bullet form\nafter\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase review --source "findings L1" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["lines"] == ["LESSON: [td-a review] wrapped continuation row", "LESSON: [td-a review] bullet form"] and d["appended"] == 2, d'
+SH
+
+check "append-lessons: notes an empty source once" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'nothing tagged here\n' > "$root/src"
+out=$($CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src")
+printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"appended": 0, "lines": [], "note": True}, d'
+$CLI append-lessons --repo-slug slug-x --session S --fence "$F" --task-id td-a --phase plan --source "pane w1:p1 (plan)" < "$root/src" >/dev/null
+test "$(grep -cx -- '- note: no LESSON line found (pane w1:p1 (plan))' "$RD/tasks/td-a.lessons.md")" = 1
+test "$(grep -c '^## ' "$RD/tasks/td-a.lessons.md")" = 1
+SH
+
+check "append-lessons: stale fence writes nothing" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+$CLI claim-owner --repo-slug slug-x --session S --host h --pid 1 >/dev/null
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks"
+printf 'LESSON: [td-a plan] x\n' > "$root/src"
+rc=0; out=$($CLI append-lessons --repo-slug slug-x --session S --fence 999 --task-id td-a --phase plan --source s < "$root/src") || rc=$?
+test "$rc" = 1 && test "$out" = "owner: stale-fence"
+test ! -e "$RD/tasks/td-a.lessons.md"
+SH
+
 check "checkin_action: exit-idle-worker ranks after every transition" <<PY
 $LOAD
 f = {"status": "in-progress", "poll_ok": True, "head": "a" * 40, "worktree_exists": True,
@@ -12381,6 +12818,48 @@ assert c.checkin_action(f) == "exit-idle-worker", c.checkin_action(f)
 assert c.checkin_action(dict(f, done_outcome="failed")) == "failed"
 assert c.checkin_action(dict(f, reviewed=True)) == "confirm-review"
 assert c.checkin_action(dict(f, status="merged")) == "none"
+PY
+
+check "checkin_facts: a recorded stop reports exit-idle-worker instead of paused or failed" <<PY
+$LOAD
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+row = {"phase": "implement", "runtime": "claude", "workspace_id": "w1", "pane_id": "w1:p1",
+       "launch_id": "i1", "source_head_sha": "a" * 40, "agent": "impl-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "b" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+idle = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": "idle"}]}}
+gone = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {}, "agents": {"w1": []}}
+payload = c.state_root().parent
+stamp = "2026-10-01T00:00:00Z"
+for outcome in ("paused", "failed"):
+    open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(
+        dict(row, task_id="PROJ-1", outcome=outcome, ts=stamp)))
+    act = lambda t, p: c.checkin_facts(rd, t, p, payload)["action"]
+    rec = lambda lid, ts: dict(task, stop_recorded={"launch_id": lid, "ts": ts})
+    assert act(task, idle) == outcome
+    assert act(rec("other", stamp), idle) == outcome
+    assert act(rec("i1", "2026-09-30T00:00:00Z"), idle) == outcome, "a reprompted stop needs a fresh record"
+    assert act(dict(task, stop_recorded="i1"), idle) == outcome
+    assert act(rec("i1", stamp), idle) == "exit-idle-worker", act(rec("i1", stamp), idle)
+    assert act(rec("i1", stamp), gone) == "none"
+for bad in (None, 7):
+    done = dict(row, task_id="PROJ-1", outcome="paused")
+    if bad is not None:
+        done["ts"] = bad
+    open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(done))
+    marker = {"launch_id": "i1"} if bad is None else {"launch_id": "i1", "ts": bad}
+    assert c.checkin_facts(rd, dict(task, stop_recorded=marker), idle, payload)["action"] == "paused", bad
+PY
+
+check "docs: section 4 records a stop with stop_recorded" <<'PY'
+import re
+flat = lambda p: re.sub(r"\s+", " ", open(p).read())
+skill = flat("claude/skills/herdr-orchestration/SKILL.md")
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+assert "stop_recorded" in sec4, "section 4 tells the director to record the stop"
+assert "stop_recorded" in flat("claude/skills/herdr-orchestration/references/state-layout.md")
 PY
 
 check "row_settlement: plan-confirmed and review-approved fire on their evidence" <<PY
@@ -12517,11 +12996,25 @@ assert "personal_repository" in ship, "SKILL.md ship step derives merge from per
 assert "personal_repository" in layout, "state-layout derives merge from personal_repository"
 assert "back to the human for merge" not in skill, "stale hand-back text removed"
 assert "human merges; `/post-merge`" not in skill, "stale reviewed-row text removed"
-assert "In the review phase the review agent and director never push or open PRs" in skill, "review-phase scope added"
+assert "In the review phase the review agent and director never push or open PRs" in open("claude/skills/herdr-orchestration/references/review-dispatch-details.md").read(), "review-phase scope added"
 assert "human merge gate" not in open("claude/skills/herdr-orchestration/references/dispatch-mechanism.md").read(), "dispatch-mechanism stale text removed"
 assert "pr_number" in ship and "gh pr list" in ship, "ship step is re-entrant"
 assert "--repo <owner/repo>" in ship, "gh lines name the repo"
 PY
+
+check "docs: SKILL.md names every reference file and every named reference exists" <<'PY'
+import os, re
+d = "claude/skills/herdr-orchestration"
+skill = open(d + "/SKILL.md", encoding="utf-8").read()
+named = set(re.findall(r"references/([A-Za-z0-9_.-]+\.md)", skill))
+files = {f for f in os.listdir(d + "/references") if f.endswith(".md")}
+assert named == files, ("named but missing", sorted(named - files), "present but unnamed", sorted(files - named))
+PY
+
+check "docs: SKILL.md stays at or under 67000 bytes" <<'SH'
+n=$(wc -c < claude/skills/herdr-orchestration/SKILL.md)
+[ "$n" -le 67000 ]
+SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

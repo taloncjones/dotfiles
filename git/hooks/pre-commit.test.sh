@@ -63,6 +63,11 @@ if grep -q "Potential secret detected (OpenAI key)" "$TMP/out"; then
 else
     fail "block names the matched pattern"
 fi
+if grep -qF "$OPENAI_LIKE" "$TMP/out"; then
+    fail "OpenAI-style key is never printed"
+else
+    pass "OpenAI-style key is never printed"
+fi
 
 # 2. AWS-style access key blocks.
 new_repo
@@ -159,6 +164,8 @@ fi
 # 10. project.env must hold op:// references only.
 LIT_LIKE="lit$(printf 'z%.0s' $(seq 1 16))"
 new_repo
+# op.env at the root marks an op-env project; only there are literals refused.
+: >"$TMP/repo/op.env"
 printf '# refs\nGH_TOKEN=op://V/gh/token\nCLOUDFLARE_API_TOKEN=%s\n' "$LIT_LIKE" >"$TMP/repo/project.env"
 git -C "$TMP/repo" add project.env
 if run_hook; then
@@ -203,12 +210,51 @@ fi
 
 # 22. A service-account token pasted into any file blocks the commit.
 new_repo
-printf 'note = %s\n' "ops_$(printf 'k%.0s' $(seq 1 30))" >"$TMP/repo/notes.txt"
+OPS_NOTE="ops_$(printf 'k%.0s' $(seq 1 30))"
+printf 'note = %s\n' "$OPS_NOTE" >"$TMP/repo/notes.txt"
 git -C "$TMP/repo" add notes.txt
 if run_hook; then
     fail "staged service-account token blocks commit"
 else
     pass "staged service-account token blocks commit"
+fi
+if grep -qF "$OPS_NOTE" "$TMP/out"; then
+    fail "service-account token is never printed"
+else
+    pass "service-account token is never printed"
+fi
+
+# 23. Without op.env a project.env is not an op-env file: literals commit.
+new_repo
+printf 'PORT=3000\n' >"$TMP/repo/project.env"
+git -C "$TMP/repo" add project.env
+if run_hook; then
+    pass "literal project.env commits in a project without op.env"
+else
+    fail "literal project.env commits in a project without op.env"
+fi
+
+# 24. A linked worktree finds op.env at its main checkout root.
+new_repo
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$TMP/repo" commit -q --allow-empty -m seed
+: >"$TMP/repo/op.env"
+git -C "$TMP/repo" worktree add -q "$TMP/wt" -b wt
+printf 'PORT=3000\n' >"$TMP/wt/project.env"
+git -C "$TMP/wt" add project.env
+if (cd "$TMP/wt" && ECC_SKIP_GIT_HOOKS=0 ECC_SKIP_PRECOMMIT=0 "$HOOK_SRC") >"$TMP/out" 2>&1; then
+    fail "literal project.env is refused from a linked worktree of an opted-in project"
+else
+    pass "literal project.env is refused from a linked worktree of an opted-in project"
+fi
+
+# 25. A match at the top of a diff larger than a pipe buffer still blocks.
+new_repo
+{ printf 'note = %s\n' "$OPS_NOTE"; seq 1 20000 | sed 's/^/filler line /'; } >"$TMP/repo/big.txt"
+git -C "$TMP/repo" add big.txt
+if run_hook; then
+    fail "a token at the top of a large staged file blocks commit"
+else
+    pass "a token at the top of a large staged file blocks commit"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

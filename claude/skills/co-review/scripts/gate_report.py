@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -976,10 +977,19 @@ def main(argv: list[str] | None = None) -> int:
     copy_parser = sub.add_parser("copy-prior")
     for flag in ("--report", "--expected", "--report-sha256", "--expected-sha256", "--out"):
         copy_parser.add_argument(flag, required=True)
+    invalidate_parser = sub.add_parser("invalidate")
+    invalidate_parser.add_argument("--expected", required=True)
     check_parser = sub.add_parser("base-check")
     for flag in ("--repo", "--expected", "--head", "--live-base"):
         check_parser.add_argument(flag, required=True)
     args = parser.parse_args(argv)
+    if args.command == "invalidate":
+        try:
+            Path(args.expected).unlink(missing_ok=True)
+        except OSError as error:
+            print(json.dumps({"error": str(error)}), file=sys.stderr)
+            return 1
+        return 0
     if args.command == "base-check":
         try:
             expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))

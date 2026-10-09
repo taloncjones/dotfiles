@@ -69,6 +69,7 @@ STATE_ROOT/
       <task_id>.review.json           # review worker verdict (separate file)
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
+      <task_id>.<agent>.brief.md      # rendered worker brief (render-brief); inert text, safe to delete
       <task_id>.lessons.md            # lesson ledger, director-written, append-only (see Lesson ledger)
       orch-edits.jsonl                # tasks/orch-edits.jsonl bounded edit-marker audit
     bindings/
@@ -250,9 +251,11 @@ repo-wide, `text` at most 500 characters), `retire-decision` (fenced;
 `event: retire`, `retires: <id>`), and the `rollover` verb's carry (inside
 the marker's owner transaction: one `event: carry-batch` line with
 `batch: <handover id>`, then one `source: carry` decision per 500-character
-chunk). A decision is live unless a retire names it, its task is failed,
+chunk); if that append fails for any reason, the verb warns on stderr, refuses the
+handover (`handover-failed`, reason `carry-unsaved`) and this lease stays. An append first adds a newline
+when the file ends in a torn line. A decision is live unless a retire names it, its task is failed,
 abandoned, merged or archived, or it is a carry entry whose batch is not the
-last `carry-batch`. Unparseable lines and other versions are skipped. The
+last `carry-batch`. Unparseable lines, other versions, and entries of the wrong shape (a non-string `text`, `ts`, `id` or `retires`) are skipped one by one. The
 `decisions --repo-path <P> [--no-carry] [--all]` verb prints the live entries
 (newest kept, 3000 characters unless `--all`); the SessionStart hook injects
 that block.
@@ -512,6 +515,7 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "review_head_sha": null,
   "review_outcome": null,
   "retired_review_launch_ids": [],
+  "stop_recorded": null,
   "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
@@ -544,6 +548,13 @@ prior list (append-only), and each new id must name a `phase: review` row.
 A write that changes a non-null `review_head_sha` retires the latest
 review launch on its own. The director adds the stopped launch at a
 sized-deadline stop. Bound `write-task` and `reset-task` refuse the key.
+
+`stop_recorded` (`{"launch_id", "ts"}`, or absent) names the done record of
+a paused or failed plan or implement attempt the director has recorded.
+While it equals the current done record's `launch_id` and `ts`, check-in
+reports no `paused` or `failed` action for that record, so the stopped
+row's idle agent surfaces as `exit-idle-worker`. `write-task` does not
+validate it: a value that matches nothing leaves the action firing.
 
 The examples above include legacy rows. Every new native dispatch has
 `launch_id`, `phase`, `runtime`, `workspace_id`, `pane_id`, and
@@ -1038,7 +1049,8 @@ done
 
 `tasks/<task_id>.lessons.md` holds the rule lessons and harvest notes for one
 task (SKILL.md section 4, Lesson harvest); lessons that name a fixable defect
-go to todos instead. Only the director writes it, by convention and only while
+go to todos instead. The transition verbs write every line here through
+`append-lessons`; the director files a defect line in its todo as well. Only the director writes it, by convention and only while
 it holds the owner fence, at the check-in that reads a completion record or a
 review findings file and in the turn it handles friction itself. The file is
 append-only: each batch is one shell append (`>>`) of a

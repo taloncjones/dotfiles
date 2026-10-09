@@ -27,8 +27,8 @@ is the staging tier, not an archive.
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
   clean: retry once with defensive review framing before counting the seat.
-- (2026-09) Never change or fix one instance in isolation: name the failure
-  class or consumer set, grep every sibling site, and run their suites too.
+- (2026-10) Never fix one instance in isolation: name the failure class, grep
+  every sibling site and test for the changed literal, run each owning suite.
 - (2026-09) A protected main makes a local merge unshippable: open the PR
   first, so the co-review gate runs against it, then merge there.
 - (2026-09) A completion-enforcing hook is not user consent: hold the gated
@@ -44,10 +44,12 @@ is the staging tier, not an archive.
   the repair worker emits: a superseded attempt row refuses its emit-done.
 - (2026-09) Re-read a PR body against the final head before posting it: wording
   written mid-fix (record-only vs asserted, tip sha vs bench sha) drifts.
-- (2026-09) A contract pinned before a long-lived branch ships goes stale when
-  main moves: after any main merge re-run the whole gate, never one check.
-- (2026-10) Each review round re-runs CI, lint and format, re-reads the head and
-  re-derives any carried finding's scope; prior results are not evidence.
+- (2026-09) The commit guard rejects the bare word "claude" in a commit message:
+  write "substitute seat" or "work config" up front, not after a block.
+- (2026-10) After a review round or main merge, re-gate and re-read the head
+  unless carry-forward or a delta round applies; prior results are not evidence.
+- (2026-10) Before reviewing, confirm the briefed checkout exists and its HEAD
+  (a frozen snapshot: its tree) matches the brief; name the checkout reviewed.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
 - (2026-09) Never brief a Claude substitute on a recorded Codex quota premise:
@@ -64,7 +66,5 @@ is the staging tier, not an archive.
 - (2026-10) Never pass `-c commit.gpgsign=false`; a locked signer means pause.
 - (2026-10) A suite outside the brief that fails in a worker pane: rerun it on
   the base tree first, and blame the change only if the base passes.
-- (2026-10) A fast-path contract runs the owning suite of every edited module
-  and greps tests for the changed literal; a one-file scope hides pinned tests.
 - (2026-10) An auto-mode worker cannot edit rules or principles files (the
   self-modification classifier refuses); route those edits to a manual session.
