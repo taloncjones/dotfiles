@@ -17,8 +17,10 @@ tracked, or untracked and not gitignored; paths with a `.todos` component
 and paths under STATE_ROOT are exempt. Edit/Write use tool_input.file_path;
 Bash targets are shell redirections (quote-aware raw scan, heredoc bodies
 dropped), `sed -i`/`perl -i` operands, `tee` operands, `cp`/`install`
-destinations, `mv` sources and destinations, `rm`/`rmdir` operands, and
-one level of `sh -c` (a combined flag cluster like `-lc`/`-ec` counts).
+destinations, `mv` sources and destinations, `rm`/`rmdir` operands, git work-tree
+writes (`commit`, `merge`, `cherry-pick`, `reset` and the rest of
+GIT_WRITE_SUBCOMMANDS; the target is the --work-tree or -C directory, else
+the cwd), and one level of `sh -c` (a combined flag cluster like `-lc`/`-ec` counts).
 
 Escape hatch: `herdr_orch_core.py allow-edit` mints
 STATE_ROOT/<slug>/orch-edit-allow.json under a live fence. The hook honours
@@ -28,8 +30,7 @@ reserved claim-then-count in tasks/orch-edits.jsonl so parallel tool calls
 cannot overshoot. Every guarded attempt (allowed or refused) is appended to
 that log, best effort, after the decision.
 
-Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
-`checkout`/`stash`/`restore`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
+Accepted holes (allow): scripts and functions, `python -c`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
 `rsync`, `dd`, editors, `xargs`, process substitution, targets built from
 `$VAR`/`$(...)`/globs, a heredoc with no terminator, git calls past the
 10-second budget, NotebookEdit/MultiEdit, `awk`/`gawk -i inplace` (cycle-3
@@ -89,6 +90,12 @@ BLOCKED = "Blocked: orch-edit-guard"
 SENTINEL_RE = re.compile(r"__ORCH_REDIR_(\d+)__\Z")
 WORD_STOP = " \t\n;&|()<>"
 SHELL_WRAPPERS = ("sh", "bash", "zsh", "dash")
+# Subcommands that change a work tree; `stash list|show` are reads.
+GIT_WRITE_SUBCOMMANDS = frozenset({
+    "commit", "merge", "cherry-pick", "revert", "rebase", "am", "apply", "reset",
+    "stash", "restore", "checkout", "switch", "pull", "rm", "mv", "clean",
+})
+GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace")
 
 
 class Budget:
@@ -1044,6 +1051,35 @@ def rm_operands(words):
     return ops
 
 
+def git_write_targets(words):
+    """[path] the git invocation writes (--work-tree, else the -C chain, else
+    "."), or [] for a subcommand that does not change a work tree."""
+    chdir, work_tree, i = "", None, 1
+    while i < len(words):
+        word = words[i]
+        if word in GIT_VALUE_OPTIONS:
+            if i + 1 >= len(words):
+                return []
+            if word == "-C":
+                chdir = os.path.join(chdir, words[i + 1])
+            elif word == "--work-tree":
+                work_tree = words[i + 1]
+            i += 2
+            continue
+        if word.startswith("--work-tree="):
+            work_tree = word.split("=", 1)[1]
+        elif not word.startswith("-"):
+            break
+        i += 1
+    if i >= len(words) or words[i] not in GIT_WRITE_SUBCOMMANDS:
+        return []
+    if words[i] == "stash" and i + 1 < len(words) and words[i + 1] in ("list", "show"):
+        return []
+    if work_tree is not None:
+        return [os.path.join(chdir, work_tree)]
+    return [chdir or "."]
+
+
 def cd_target_candidates(words, cwd, home):
     """The set of cwds the shell might be in after a `cd`: one, when the
     target can be confirmed a real directory; {target, cwd} otherwise --
@@ -1170,6 +1206,9 @@ def bash_targets(command, cwd, home, depth=0):
         elif head in ("rm", "rmdir"):
             for c in cwds:
                 found.extend((c, w) for w in rm_operands(words))
+        elif head == "git":
+            for c in cwds:
+                found.extend((c, w) for w in git_write_targets(words))
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:

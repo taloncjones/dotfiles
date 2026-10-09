@@ -569,6 +569,19 @@ PY
 then printf 'PASS  H3 canonical_target swallows RecursionError and skips only that target\n'; PASS=$((PASS + 1))
 else printf 'FAIL  H3 canonical_target swallows RecursionError and skips only that target\n' >&2; FAIL=$((FAIL + 1)); fi
 
+# --- G: git work-tree writes are writes ---------------------------------
+hook_case "G git commit in the repo denied" deny Bash "git commit -m x" "$R" "$SID_A"
+hook_case "G git -C repo merge denied" deny Bash "git -C $R merge main" "$N" "$SID_A"
+hook_case "G cd then git cherry-pick denied" deny Bash "cd $R && git cherry-pick abc123" "$N" "$SID_A"
+hook_case "G --work-tree reset --hard denied" deny Bash "git --work-tree=$R --git-dir=$R/.git reset --hard" "$N" "$SID_A"
+hook_case "G git push allowed" allow Bash "git push origin main" "$R" "$SID_A"
+hook_case "G git worktree remove allowed" allow Bash "git worktree remove $S/wt" "$R" "$SID_A"
+hook_case "G git stash list allowed" allow Bash "git stash list" "$R" "$SID_A"
+hook_case "G git log allowed" allow Bash "git log --oneline -3" "$R" "$SID_A"
+hook_case "G git commit outside any work tree allowed" allow Bash "git commit -m x" "$N" "$SID_A"
+hook_case "G git -C variable target allowed (accepted gap)" allow Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
+hook_case "G plain session git commit allowed" allow Bash "git commit -m x" "$R" "$SID_C"
+
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
 marker() {
@@ -590,6 +603,16 @@ second_line_has() {   # LABEL SUBSTRING: second stderr line of the last run
         printf 'FAIL  %s: %s\n' "$1" "$(sed -n 2p "$FIX/err")" >&2; FAIL=$((FAIL + 1))
     fi
 }
+
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+if run "$(payload Bash "$SID_A" "git commit -m x" "$R")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 0 ] && [ ! -s "$FIX/err" ] && [ "$(audit_count orch-edit-claim)" = 1 ] \
+        && [ "$(audit_count orch-edit-allowed)" = 1 ]; then
+    printf 'PASS  G git commit under a marker allowed and spends one write\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  G git commit under a marker allowed and spends one write (rc=%s claims=%s)\n' "$rc" "$(audit_count orch-edit-claim)" >&2; FAIL=$((FAIL + 1))
+fi
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
 
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 hook_case "AC5 valid marker allows Edit tracked" allow Edit "$R/tracked.txt" "$R" "$SID_A"
@@ -1267,6 +1290,8 @@ git -C "$R" worktree add -q -b leadbr2 "$LWS2" >/dev/null 2>&1
 lead_setup "$SID_C" "$LWS"
 hook_case "LG lead edit inside its workspace allowed" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
 hook_case "LG lead edit of the main checkout denied" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "G lead git commit inside its workspace allowed" allow Bash "git commit -m x" "$LWS" "$SID_C"
+hook_case "G lead git -C main checkout commit denied" deny Bash "git -C $R commit -m x" "$LWS" "$SID_C"
 hook_case "AC-G lead inside workspace: new nested file allowed" allow Write "$LWS/sub/deep/new.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead inside workspace: nested dir allowed" allow Write "$LWS/nested/x.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead outside: sibling workspace denied" deny Write "$LWS2/wsfile.txt" "$LWS2" "$SID_C"
