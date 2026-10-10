@@ -492,6 +492,13 @@ elif args[:2] == ["agent", "list"]:
     print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
 elif args[:2] == ["pane", "list"]:
     ws = args[args.index("--workspace") + 1]
+    closed_path = Path(os.environ["FAKE_PANES"] + ".closed")
+    if closed_path.exists() and ws in json.loads(closed_path.read_text()):
+        # Live herdr 0.9.1 reply for a closed or unknown workspace (probe 2026-10-09).
+        print(json.dumps({"error": {"code": "workspace_not_found",
+                                    "message": f"workspace {ws} not found"},
+                          "id": "cli:pane:list"}), file=sys.stderr)
+        raise SystemExit(1)
     panes = [p for p in json.loads(Path(os.environ["FAKE_PANES"]).read_text())
              if p["workspace_id"] == ws]
     print(json.dumps({"id": "fake", "result": {"type": "pane_list", "panes": panes}}))
@@ -526,6 +533,24 @@ elif args[:2] == ["agent", "send-keys"]:
         raise SystemExit(1)
     if mode in ("exit-menu", "exit-timeout-menu") and args[3:] == ["1", "enter"]:
         apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
+elif args[:2] == ["workspace", "close"]:
+    ws = args[2]
+    closed_path = Path(os.environ["FAKE_PANES"] + ".closed")
+    closed = json.loads(closed_path.read_text()) if closed_path.exists() else []
+    closed_path.write_text(json.dumps(closed + [ws]))
+    # Live herdr forgets the workspace too, so a later `workspace get` misses it.
+    wpath = Path(os.environ["FAKE_WORKSPACES"])
+    spaces = (json.loads(wpath.read_text()) if wpath.exists() else
+              [{"workspace_id": workspace, "label": "td-a",
+                "worktree": {"checkout_path": cwd}}])
+    wpath.write_text(json.dumps([w for w in spaces if w["workspace_id"] != ws]))
+    ppath = Path(os.environ["FAKE_PANES"])
+    ppath.write_text(json.dumps([p for p in json.loads(ppath.read_text())
+                                 if p["workspace_id"] != ws]))
+    apath = Path(os.environ["FAKE_AGENTS"])
+    apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                 if a.get("workspace_id") != ws]))
+    print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
 elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
     wpath = Path(os.environ["FAKE_WORKSPACES"])
     spaces = (json.loads(wpath.read_text()) if wpath.exists() else
@@ -1734,6 +1759,92 @@ def test_settle_keeps_the_last_pane_on_a_duplicated_pane_entry():
         fx.close()
 
 
+def test_settle_after_workspace_close_reports_absent():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        fx.settle_state([ship], "reviewed", [], [])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        Path(fx.env["FAKE_PANES"] + ".closed").write_text(json.dumps(["w1"]))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert result["agent"] == "absent" and result["pane"] == "absent", result
+        assert not [c for c in fx.calls() if c[:2] in (["pane", "close"], ["workspace", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_gate_only_root_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        first = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        second = settle_row("ship", "ship-td-a-000000000002", "w1:p2", head)
+        fx.settle_state([first, second], "reviewed", [], [pane("w1:p1"), pane("w1:p2")])
+        for row in (first, second):
+            launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{row['launch_id']}"
+            launch_dir.mkdir(parents=True)
+            (launch_dir / "ship.json").write_text(
+                json.dumps({"launch_id": row["launch_id"], "verdict": "CHANGES"}))
+        result = fx.settle(first["launch_id"])
+        # The later ship row supersedes the first, which still releases its pane.
+        assert result["status"] == "settled" and result["reason"] == "superseded", result
+        assert result["pane"] == "closed", result
+        assert ["pane", "close", "w1:p1"] in fx.calls(), fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["workspace", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_gate_only_workspace_with_workspace_close():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        fx.settle_state([ship], "reviewed", [], [pane("w1:p1")])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert result["agent"] == "absent" and result["pane"] == "workspace-closed", result
+        assert ["workspace", "close", "w1"] in fx.calls(), fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        # Live herdr cannot relabel a closed workspace; the label result is
+        # best-effort and never fails settle (`_task_label_result`).
+        assert result["label"]["status"] != "applied", result
+        again = fx.settle(ship["launch_id"])
+        assert again["status"] == "settled" and again["pane"] == "absent", again
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_gate_only_workspace_with_a_foreign_checkout():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        fx.settle_state([ship], "reviewed", [], [pane("w1:p1")])
+        Path(fx.env["FAKE_WORKSPACES"]).write_text(json.dumps(
+            [{"workspace_id": "w1", "label": "td-a",
+              "worktree": {"checkout_path": "/elsewhere"}}]))
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled", result
+        assert result["pane"] == "kept-workspace-unverified", result
+        assert not [c for c in fx.calls() if c[:2] in (["pane", "close"], ["workspace", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member():
     fx = Fixture()
     try:
@@ -2644,6 +2755,62 @@ def test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json():
         assert f"launch_id={launch_id} phase=ship" in prompt, prompt
         for absent in ("emit-done", "emit-review", "herdr_orch_core.py"):
             assert absent not in prompt, (absent, prompt)
+    finally:
+        herdr_dispatch.uuid.uuid4 = original_uuid4
+        fixture.close()
+
+
+def test_ship_launch_refuses_a_pane_a_non_ship_row_used():
+    fixture = Fixture()
+    try:
+        head = core.repository_context(fixture.repo)["head"]
+        task = json.loads(fixture.task_file.read_text())
+        task.update(status="reviewed",
+                    workers=[settle_row("implement", "impl-td-a-000000000001", "w1:p1", head)])
+        fixture.task_file.write_text(json.dumps(task))
+        before = fixture.task_file.read_text()
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        try:
+            herdr_dispatch.launch(
+                repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+                workspace_id="w1", pane_id="w1:p1", phase="ship", agent="ship-td-a",
+                route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+                prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+                start_timeout_ms=4000, prompt_timeout_ms=1000,
+            )
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "a ship launch needs its own pane: split one in the task workspace", exc
+        else:
+            raise AssertionError("a ship launch into an implement pane was accepted")
+        assert fixture.task_file.read_text() == before
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
+def test_ship_launch_accepts_a_pane_only_ship_rows_used():
+    fixture = Fixture()
+    original_uuid4 = herdr_dispatch.uuid.uuid4
+    try:
+        head = core.repository_context(fixture.repo)["head"]
+        prior = settle_row("ship", "ship-td-a-000000000009", "w1:p1", head)
+        task = json.loads(fixture.task_file.read_text())
+        task.update(status="reviewed", workers=[prior])
+        fixture.task_file.write_text(json.dumps(task))
+        herdr_dispatch.uuid.uuid4 = lambda: herdr_dispatch.uuid.UUID(int=0)
+        launch_id = "ship-td-a-000000000000"
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = launch_id
+        result = herdr_dispatch.launch(
+            repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", pane_id="w1:p1", phase="ship", agent="ship-td-a",
+            route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+            prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+            start_timeout_ms=4000, prompt_timeout_ms=1000,
+        )
+        rows = fixture.worker_records()
+        assert result["launch_id"] == launch_id, result
+        assert [r["launch_id"] for r in rows] == [prior["launch_id"], launch_id], rows
     finally:
         herdr_dispatch.uuid.uuid4 = original_uuid4
         fixture.close()
@@ -5024,6 +5191,10 @@ for name, test in (
     ("settle keeps a pane when agent_not_running but the agent stays listed", test_settle_keeps_a_pane_when_agent_not_running_but_the_agent_stays_listed),
     ("settle never sends keys when agent_not_found but the agent stays listed", test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed),
     ("settle keeps the last pane on a duplicated pane entry", test_settle_keeps_the_last_pane_on_a_duplicated_pane_entry),
+    ("settle after workspace close reports absent", test_settle_after_workspace_close_reports_absent),
+    ("settle closes a gate-only root pane", test_settle_closes_a_gate_only_root_pane),
+    ("settle closes a gate-only workspace with workspace close", test_settle_closes_a_gate_only_workspace_with_workspace_close),
+    ("settle keeps a gate-only workspace with a foreign checkout", test_settle_keeps_a_gate_only_workspace_with_a_foreign_checkout),
     ("settle keeps a pane when the agent list has a null member", test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member),
     ("settle keeps a pane when an agent member lacks a pane id", test_settle_keeps_a_pane_when_an_agent_member_lacks_a_pane_id),
     ("settle closes a pane beside an unnamed agent in another workspace", test_settle_closes_a_pane_beside_an_unnamed_agent_in_another_workspace),
@@ -5073,6 +5244,8 @@ for name, test in (
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
     ("a ship launch names its agent after its launch id and points at ship.json", test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json),
+    ("ship launch refuses a pane a non-ship row used", test_ship_launch_refuses_a_pane_a_non_ship_row_used),
+    ("ship launch accepts a pane only ship rows used", test_ship_launch_accepts_a_pane_only_ship_rows_used),
     ("a ship launch fits a long task id in the agent name limit", test_ship_launch_fits_a_long_task_id_in_the_agent_name_limit),
     ("a ship launch refuses a writable sandbox, a Codex runtime or an odd agent", test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent),
     ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
