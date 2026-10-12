@@ -389,6 +389,9 @@ links_shared_workflow_surfaces() (
     [ "$(readlink "$tmp_home/.codex/hooks/git_remote_guard.py")" = "$PWD/claude/hooks/git_remote_guard.py" ] || return 1
     [ "$(readlink "$tmp_home/.codex/hooks/planning_artifact_guard.py")" = "$PWD/claude/hooks/planning_artifact_guard.py" ] || return 1
     [ "$(rg -c 'command = .*planning_artifact_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/signer_guard.py")" = "$PWD/claude/hooks/signer_guard.py" ] || return 1
+    [ "$(rg -c 'command = .*signer_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    rg -q 'matcher = ".*\|shell\|.*"' "$tmp_home/.codex/config.toml" || return 1
     python3 - "$tmp_home/.codex/config.toml" <<'PY' || return 1
 import sys
 import tomllib
