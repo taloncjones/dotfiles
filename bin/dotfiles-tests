@@ -86,6 +86,7 @@ sh claude/skills/handoff/scripts/tests/handoff_test.sh
 sh claude/hooks/handoff-notice.test.sh
 sh claude/hooks/herdr-pending-notice.test.sh
 sh claude/hooks/director-rollover.test.sh
+sh claude/hooks/director-delegate-hint.test.sh
 sh claude/skills/co-review/scripts/tests/review_test.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh

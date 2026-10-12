@@ -335,13 +335,13 @@ while its worktree exists; an `abandoned` task has no workspace left to
 sweep, and `merged` sweeps in section 6a.
 
 `stale-review-reset` also fires for a `completed` task pinned at HEAD: a
-review dispatch interrupted between its `review_head_sha` write and its
-`review-dispatched` write (nothing reserved, a launch not accepted, or an
-accepted launch whose status write was lost). The remedy is the same
+review dispatch interrupted after `dispatch-gate` reserved the pin but before
+`review-dispatched` landed (a launch not accepted, or an accepted launch
+whose status write was lost). The remedy is the same
 stale-verdict reset: `write-task` the full record with `review_head_sha:
 null` and the status unchanged. That write retires the latest review
 launch (`retired_review_launch_ids`), and the next check-in reports
-`dispatch-review`, which re-runs section 5 from its preflight.
+`dispatch-review`; run section 5's `dispatch-gate` again.
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
@@ -514,51 +514,30 @@ Independence comes from a **fresh review agent** with clean context, distinct
 from the implementation session. It runs the bounded single-seat
 `review-change` skill and never edits its subject.
 
-Guard: `python3 "$CORE" status` reports `completed` and
-`python3 "$CORE" should-dispatch-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
-exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
-recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
-exits 1. Rely on this verb, never re-derive the guard by hand.
-
-**Reviewer-dispatch preflight (one review agent at a time).** Run the
-adapter's `sweep` verb
-(`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
-for the task workspace first; it settles every row of the task in that workspace: it exits stale
-reviewers whose verdict is recorded or retired, ship workers whose handoff
-is recorded, and superseded implement and repair workers, and closes their
-panes and dead shells,
-subject to the same kept-occupied and confirmed-exit-menu limits as
-`settle` above. Then confirm zero live review agents as before: reconcile live
-`herdr agent` state for this task's workspace and stop any `rev-<...>` agent
-already running in it by its recorded agent and pane identity (do **not** `herdr
-workspace close`, which would tear down the shared task worktree). There must be
-zero live review agents before you start one. Strict attempt validation rejects late writes; stopping the old reviewer
-also avoids wasting work and preserves one live reviewer per task.
+Write the focus file (intended behavior, what to check, affected callers;
+`references/kickoff.md`), then run one command:
+`python3 "$DISPATCH" dispatch-gate --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --task-id <task_id> --phase review --focus-file <file>`.
+It refuses (exit 2) unless `should-dispatch-review` passes at live HEAD and
+the worktree is clean and ahead of base. It then runs the adapter's `sweep`
+for this workspace, which exits stale reviewers, ship workers whose handoff
+is recorded, and superseded implement and repair workers (exit 3 while a
+reviewer stays live; never `herdr workspace close`). It renders the reviewer
+brief, splits a fresh pane off the implement pane, resolves
+`route --step implementation-review` and launches it read-only, and only then writes
+`review-dispatched`, `review_head_sha` and the index role `review`, so a
+failed launch leaves nothing to reset. Exit 3 names the step left
+(`references/dispatch-adapter.md`). Never rebuild these steps by hand.
 
 Helper sessions a reviewer spawns, and which of them may emit: read
 `references/review-dispatch-details.md` before trusting any review-pane state.
 
-1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
-   HEAD SHA as the intended `review_head_sha`.
-2. **Reuse the task's own worktree/workspace** (`<ws_id>`, the impl phase's),
-   but launch the reviewer in a fresh self-owned `pane split` there. Its recorded
-   pane is the exact timeout target; never reuse the implementation root pane.
-   There is no `worktree open` and no new workspace. Do not resume the implementer while review
-   is pending. A `worktree open` here: `references/review-dispatch-details.md`.
-3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 6 snippet), then reserve and launch a
-   fresh review attempt through the adapter. This derives
-   `development_reviewer` (Claude Sonnet/high or Codex Sol/high) from the
-   selected runtime. `--provisional` is permitted only when availability or
-   effort capability is indeterminate; retain that observation as unknown and
-   block any result whose `ready` field remains false. Set the
-   workspace index to `role: review`; preserve implementation completion and
-   record `review_head_sha`. Set `review-dispatched` only when dispatch is
-   accepted. Finish this dispatch through its `review-dispatched` write before
-   running any check-in pass; a check-in between the pin and that write
-   reports `stale-review-reset` for your own dispatch. A failed attempt is visible and retryable. The sized
-   review deadline formula: `references/review-dispatch-details.md`.
-   Refresh both agent and
-   workspace display metadata.
+1. Do not resume the implementer while review is pending. A `worktree open`
+   here: `references/review-dispatch-details.md`.
+2. A `--provisional` route stays unknown evidence: block any result whose
+   `ready` field remains false. The sized review deadline formula:
+   `references/review-dispatch-details.md`.
+3. Run the verb's `follow_up` lines: the deadline timer below and, for a
+   Jira task, step 4.
 
    **Deadline timer.** Right after the dispatch, and at every preflight,
    run `python3 "$CORE" review-deadlines --repo-slug <slug>`. For each
@@ -726,25 +705,17 @@ remains. Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
 `handoff_state` is `current`, the handoff report has `class` `delta`, and
-its verdict is not `APPROVE`; that brief carries
-`herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
-(section 6a step 0 owns it), except rule (c). Rule (a) with a
-`ship_launch_id` already set means that run stopped before writing
-`ship.json`: relaunch at most once per reviewed head, and
-every such relaunch brief carries `herdr-ship-brief: tier=full`. Relaunch
-only when `ship_relaunch_head` differs from `review_head_sha`,
-and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
-(every other field carried), so the budget is spent before any worker
-can start and an interrupted relaunch parks the task. Otherwise report
-the stopped run, park the task, and stop. To dispatch, render the brief
-(section 2 step 7, `--phase ship`, with `--tier delta --prior-handoff
-<ship.json>` for a delta gate), then launch through the adapter:
-`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent <agent from render-brief> --prompt-file <brief_path> --route-json <route> ...`
-(the same fields as any launch; resolve the route with
-`route --runtime claude --role reviewer`). The adapter refuses any other
-runtime or sandbox, starts the herdr agent under the returned
-`launch_id`, and tells the worker its launch directory. Right after it
-returns, `write-task` the full record with `ship_launch_id: <launch_id>`.
+its verdict is not `APPROVE`;
+every such relaunch brief carries `herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
+(section 6a step 0 owns it), except rule (c). Dispatch with
+`python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
+It refuses a live or unknown pinned agent. For a pinned run with no
+`ship.json` (it stopped before the gate wrote it), it relaunches at most
+once per reviewed head: it refuses when `ship_relaunch_head` equals
+`review_head_sha`, otherwise writes `ship_relaunch_head` before launching
+(so an interrupted relaunch parks the task) and forces `tier=full`. It
+launches read-only on `claude`, pins `ship_launch_id`, then settles the old
+pinned row.
 Decide from the pin alone: a ship row the pin does not name has no
 authority and is never adopted. A ship launch is never reprompted;
 further gate work is a fresh launch. Every
@@ -917,9 +888,15 @@ review dispatch of a Jira-kind task).
   case run
   `python3 "$CORE" allow-edit --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --minutes 5 --max-edits 3 --note "<what was approved>"`
   AFTER the approval and in the same turn, make the edit, and name it in
-  the turn summary. The marker is bounded three ways (minutes, write
-  budget, this repo only) and every guarded attempt under it, and every
-  refusal, is recorded in `tasks/orch-edits.jsonl`.
+  the turn summary. A git work-tree write (`commit`, `merge`, `cherry-pick`,
+  `reset` and the like) is a write and spends marker budget, one unit per
+  distinct repository per Bash call (chained git commands share a unit). A marker is
+  for director maintenance (teardown, lessons, gate sync) or an
+  owner-requested direct edit, never task implementation; test runs,
+  builds and investigations go to a worker or an Explore/general-purpose
+  subagent. The marker is bounded three ways (minutes, write budget, this
+  repo only) and every guarded attempt under it, and every refusal, is
+  recorded in `tasks/orch-edits.jsonl`.
 - The director pushes the task branch and opens its PR in the section 6
   ship step, runs every `gh` read and non-post write itself, and never
   hands a `gh` command to the owner. It merges through section 6a: without

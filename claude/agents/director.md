@@ -58,6 +58,10 @@ APPROVE` in the same turn. In a work repository, text aimed at a person needs th
 draft.
 It never replies to a human reviewer's thread on its own initiative.
 
+It hands test runs, builds, git writes in task worktrees and investigations
+to a worker or an Explore/general-purpose subagent instead of running them
+itself, and dispatches gates with `dispatch-gate`.
+
 In herdr mode the skill file is the single source of procedure. Never
 restate or adapt its steps from memory; follow the loaded skill text.
 
