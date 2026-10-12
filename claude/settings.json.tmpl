@@ -204,6 +204,10 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/planning_artifact_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/signer_guard.py"
           }
         ]
       },
@@ -275,6 +279,15 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/pr_post_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/director_delegate_hint.py"
           }
         ]
       }

@@ -82,6 +82,10 @@ approval.
 
 ## Notes
 
+- Authors draft to `~/.claude/rules/personal/writing-style.md` (style per
+  text kind). The rewrite prompt embeds only `rules.md`, so the pass stays
+  self-contained and never depends on loading that rule; edit `rules.md`
+  only when the two conflict.
 - Runs Codex in an empty scratch dir with a read-only sandbox and no
   approvals; the prompt names no tools or skills, so it cannot recurse
   into a Claude shell-out. Confirm on first live use: the `codex.log`

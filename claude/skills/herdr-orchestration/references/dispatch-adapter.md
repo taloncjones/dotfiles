@@ -181,6 +181,33 @@ role, runtime/model and status separately; presentation failure is
 visible but never changes completion state. Lead-scoped records are not
 labelled.
 
+## Gate dispatch (sections 5 and 6)
+
+`python3 "$DISPATCH" dispatch-gate --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> [--personal] --session <id> --fence <fence> --task-id <task> --phase review|ship --focus-file <file> [--tier full|delta] [--prior-handoff <ship.json>]`
+dispatches a first gate or a re-dispatch in one command.
+
+- Guards (exit 2, nothing written, no herdr call):
+  - review: `should-dispatch-review`, a clean worktree, HEAD ahead of
+    `base_sha`, an implement row and a ready `implementation-review` route;
+  - ship: `status: reviewed` at HEAD, a ready `reviewer` route, a pinned agent
+    that is gone or not `working`, and the once-per-head relaunch budget.
+- Review steps: `sweep`, `render-brief`, `pane split --no-focus` off the
+  implement pane, `launch --sandbox read-only`, one `write-task --present`
+  (`review-dispatched` and `review_head_sha`), then `write-index` (role
+  `review`). Ship steps: `render-brief`, the `ship_relaunch_head` write (a
+  stopped run only), the pane split, the read-only launch, the
+  `ship_launch_id` write, then `settle` of the old pinned row (`superseded`).
+- Output: `{status: dispatched, phase, task_id, launch_id, agent, pane_id,
+brief_path, head_sha, follow_up[, settle]}`. Run each `follow_up` line
+  (the `review-deadlines` timer; Jira In Review).
+- Exit 3 is `incomplete` with `step`:
+  - Up to `launch`: no gate field was written; close the named pane and
+    re-run.
+  - `write-task` after a launch: write the record by hand with the reported
+    `launch_id`, or retire the reviewer through the review timeout path.
+  - `write-index`: run `write-index` by hand.
+  - An unsettled `settle` row: re-run `settle`.
+
 ## Director transitions (sections 2a and 5)
 
 `python3 "$DISPATCH" accept-review` and `python3 "$DISPATCH" advance` take

@@ -58,6 +58,25 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+GOOD_TEST = {"command": "sh tests/run.sh", "exit_code": 0, "result": "12 passed"}
+
+
+def seat_text(name: str, prefix: str = "evidence", **overrides) -> str:
+    """Seat report prose ending in one valid co-review-seat block, with overrides."""
+    body = {
+        "seat": name,
+        "verdict": "APPROVE",
+        "findings": [],
+        "coverage": {
+            "architecture": {key: "seen" for key in AXES},
+            "checklist": {key: "seen" for key in CHECKLIST},
+        },
+        "tests": [GOOD_TEST],
+    }
+    body.update(overrides)
+    return f"{name} {prefix}\n\n```co-review-seat\n{json.dumps(body)}\n```\n"
+
+
 class GateReportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -92,7 +111,7 @@ class GateReportTests(unittest.TestCase):
     def _report(self):
         seats = {}
         for name in ("claude", "codex", "breaker", "verifier"):
-            seat = self._write(f"{name}.txt", f"{name} evidence\n")
+            seat = self._write(f"{name}.txt", seat_text(name))
             seats[name] = {
                 "status": "complete",
                 **seat,
@@ -152,7 +171,7 @@ class GateReportTests(unittest.TestCase):
         self.report["class"] = "light"
         seats = {}
         for name, runtime in zip(("codex", "verifier"), runtimes):
-            seat = self._write(f"{name}.txt", f"{name} evidence\n")
+            seat = self._write(f"{name}.txt", seat_text(name))
             seats[name] = {"status": "complete", **seat, "runtime": runtime,
                            "model": "unknown", "effort": "unknown"}
         self.report["seats"] = seats
@@ -161,7 +180,7 @@ class GateReportTests(unittest.TestCase):
     def _lessons(self, diff_text: str, runtime: str = "claude"):
         self.expected["class"] = "lessons"
         self.report["class"] = "lessons"
-        seat = self._write("verifier.txt", "verifier evidence\n")
+        seat = self._write("verifier.txt", seat_text("verifier"))
         self.report["seats"] = {"verifier": {"status": "complete", **seat, "runtime": runtime,
                                              "model": "unknown", "effort": "unknown"}}
         self.report["preconditions"]["diff"] = self._write("review.diff", diff_text)
@@ -725,10 +744,165 @@ class GateReportTests(unittest.TestCase):
 
     def test_runner_seat_quoting_notice_approves(self):
         body = json.dumps({"runtime": "codex", "status": "success",
-                           "result": f"# Review\n\nQuoted: {LIMIT_NOTICE}",
+                           "result": seat_text("codex", prefix=f"Quoted: {LIMIT_NOTICE}"),
                            "errors": []})
         self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
         self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def _set_seat(self, name: str, text: str, native: bool = False):
+        if native:
+            entry = self._write(f"{name}.native.md", text)
+        else:
+            body = json.dumps({"runtime": "codex", "status": "success", "result": text})
+            entry = self._write(f"{name}.runtime.json", body)
+        self.report["seats"][name].update(entry)
+
+    def _seat_reasons(self, name: str):
+        result = self.verdict()
+        return result, [r for r in result["reasons"] if r.startswith(f"seat {name} structured")]
+
+    def test_runner_seat_with_block_approves(self):
+        self._set_seat("codex", seat_text("codex"))
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_native_seat_with_block_approves(self):
+        self._set_seat("breaker", seat_text("breaker"), native=True)
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_native_seat_without_block_is_missing(self):
+        self._set_seat("breaker", "plain native review\n", native=True)
+        result, reasons = self._seat_reasons("breaker")
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(reasons, ["seat breaker structured report is missing"])
+
+    def test_trailing_note_without_block_is_missing(self):
+        note = ("The monitor has expired; the suite already finished at 182 passed, "
+                "0 failed. My review verdict stays **APPROVE**.")
+        self._set_seat("claude", note)
+        result, reasons = self._seat_reasons("claude")
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(reasons, ["seat claude structured report is missing"])
+
+    def test_runner_result_that_is_not_text_is_missing(self):
+        body = json.dumps({"runtime": "codex", "status": "success", "result": None})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        _, reasons = self._seat_reasons("codex")
+        self.assertEqual(reasons, ["seat codex structured report is missing"])
+
+    def test_two_blocks_are_ambiguous(self):
+        self._set_seat("verifier", seat_text("verifier") * 2)
+        result, reasons = self._seat_reasons("verifier")
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(reasons, ["seat verifier structured report is ambiguous"])
+
+    def test_invalid_blocks_name_the_first_failing_key(self):
+        short_coverage = seat_text("codex")
+        good_cov = json.loads(short_coverage.split("```co-review-seat\n")[1].split("\n```")[0])["coverage"]
+        no_fb = json.loads(json.dumps(good_cov))
+        del no_fb["checklist"]["functional_behavior"]
+        finding = {"id": "f1", "severity": "minor", "disposition": "refuted",
+                   "scenario": "s", "evidence": "e"}
+        cases = (
+            ("body", "x\n```co-review-seat\n[]\n```\n"),
+            ("body", "x\n```co-review-seat\nnot json\n```\n"),
+            ("body", "x\n```co-review-seat\n"
+                     + json.dumps({"seat": "codex", "verdict": "MAYBE"}) + "\n```\n"),
+            ("seat", seat_text("claude")),
+            ("verdict", seat_text("codex", verdict="MAYBE")),
+            ("findings", seat_text("codex", findings=[{"id": "x"}])),
+            ("findings", seat_text("codex", findings=[{**finding, "severity": "huge"}])),
+            ("findings", seat_text("codex", findings=[finding, finding])),
+            ("coverage", seat_text("codex", coverage=no_fb)),
+            ("coverage", seat_text("codex", coverage={"architecture": good_cov["architecture"]})),
+            ("tests", seat_text("codex", tests=[{**GOOD_TEST, "command": ""}])),
+            ("tests", seat_text("codex", tests=[{**GOOD_TEST, "exit_code": True}])),
+            ("tests", seat_text("codex", tests=[{**GOOD_TEST, "extra": 1}])),
+            ("tests", seat_text("codex", tests="ran it")),
+        )
+        for key, text in cases:
+            with self.subTest(key=key, text=text[:60]):
+                self._set_seat("codex", text)
+                result, reasons = self._seat_reasons("codex")
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertEqual(reasons, [f"seat codex structured report is invalid: {key}"])
+
+    def test_block_with_valid_findings_is_accepted(self):
+        finding = {"id": "f1", "severity": "minor", "disposition": "refuted",
+                   "scenario": "s", "evidence": "e"}
+        self._set_seat("codex", seat_text("codex", findings=[finding]))
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_failed_runner_seat_gets_no_structured_reason(self):
+        body = json.dumps({"runtime": "codex", "status": "error", "result": None, "errors": ["boom"]})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        _, reasons = self._seat_reasons("codex")
+        self.assertEqual(reasons, [])
+
+    def test_digest_mismatch_gets_no_structured_reason(self):
+        (self.root / "codex.txt").write_text("changed, no block\n", encoding="utf-8")
+        result, reasons = self._seat_reasons("codex")
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("seat codex artifact digest does not match", result["reasons"])
+        self.assertEqual(reasons, [])
+
+    def test_seat_without_tests_blocks_functional_behavior(self):
+        self._set_seat("codex", seat_text("codex", tests=[]))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            result["reasons"],
+            ["coverage functional_behavior lacks test evidence from seat codex"])
+
+    def test_every_seat_without_tests_is_named_in_seat_order(self):
+        for name in ("verifier", "claude"):
+            self._set_seat(name, seat_text(name, tests=[]))
+        self.assertEqual(self.verdict()["reasons"], [
+            "coverage functional_behavior lacks test evidence from seat claude",
+            "coverage functional_behavior lacks test evidence from seat verifier"])
+
+    def test_accepted_nonmaterial_gap_admits_a_seat_without_tests(self):
+        self._set_seat("codex", seat_text("codex", tests=[]))
+        self.report["coverage"]["checklist"]["functional_behavior"] = {
+            "gap": {"material": False, "reason": "docs-only change"},
+            "accepted_by": "owner"}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "APPROVE")
+        self.assertIn("coverage functional_behavior has an accepted nonmaterial gap",
+                      result["reasons"])
+
+    def test_material_functional_behavior_gap_stays_incomplete(self):
+        self._set_seat("codex", seat_text("codex", tests=[]))
+        self.report["coverage"]["checklist"]["functional_behavior"] = {
+            "gap": {"material": True, "reason": "no suite"}, "accepted_by": "owner"}
+        self.assertEqual(self.verdict()["reasons"],
+                         ["coverage functional_behavior has a material gap"])
+
+    def test_light_seat_without_block_is_missing(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n")
+        self._set_seat("verifier", "no block here\n", native=True)
+        _, reasons = self._seat_reasons("verifier")
+        self.assertEqual(reasons, ["seat verifier structured report is missing"])
+
+    def test_lessons_verifier_without_tests_lacks_evidence(self):
+        self._lessons(LESSONS_DIFF)
+        self._set_seat("verifier", seat_text("verifier", tests=[]), native=True)
+        self.assertEqual(self.verdict()["reasons"], [
+            "coverage functional_behavior lacks test evidence from seat verifier"])
+
+    def test_substituted_seat_needs_a_block(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+        self._set_seat("codex", "no block\n", native=True)
+        _, reasons = self._seat_reasons("codex")
+        self.assertEqual(reasons, ["seat codex structured report is missing"])
+
+    def test_schema_describes_the_seat_report(self):
+        shape = gate.schema()["seat_report"]
+        self.assertEqual(shape["fence"], "co-review-seat")
+        self.assertEqual(shape["keys"], ["seat", "verdict", "findings", "coverage", "tests"])
+        self.assertIn("co-review-seat", gate.schema()["seat_artifact_must_show"])
 
     def test_schema_states_seat_artifact_rule(self):
         text = gate.schema()["seat_artifact_must_show"]

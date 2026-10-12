@@ -320,7 +320,9 @@ section of the failure-class rubric, and
 declared threat model. Every prompt also names the frozen diff path
 (`$RUN_DIR/frozen.diff`) and the seat's own snapshot root as the frozen
 worktree for reading files outside the diff. The verifier also receives finder artifact
-paths/digests and known blockers. Every native packet and runner prompt also
+paths/digests and known blockers. Every native packet and runner prompt
+appends `claude/skills/co-review/references/seat-report.md` verbatim after the rubric.
+Every native packet and runner prompt also
 carries a `## CI evidence` section: the line
 `ci.json: $RUN_DIR/ci.json sha256=<sha256 from ci-envelope.json>` and the
 file's content; a local no-PR review, which has no CI files, writes
@@ -420,7 +422,8 @@ into `findings` with `category: "structure"` and their `proposed_layout`, as
 
 Fill the seat entries from the actual runtime artifacts for `CLASS`; the
 light `verifier` entry records runtime `claude` and the `codex` entry records
-runtime `codex`, as the evaluator requires. Paths are report relative. Do not
+runtime `codex`, as the evaluator requires. Paths are report relative. Copy each seat's findings and
+coverage from its `co-review-seat` block. The coordinator never writes a `co-review-seat` block for a seat. Do not
 substitute coordinator prose for a missing or unsuccessful runtime
 completion. Then verify, evaluate, and clean up:
 

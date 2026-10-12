@@ -257,7 +257,7 @@ expect_same "UNOWNED-LIVE alone: audit exits 0" 0 "$RC"
 has_line "UNOWNED-LIVE reported as info" "$EVI/unowned.out" \
     "[INFO] UNOWNED-LIVE  $H/custom-aliases -> $SRC/zsh/aliases.zsh (inside checkout $SRC; shared dir, not judged)"
 
-ln -s "$SRC/claude/CLAUDE.md" "$H/.claude/stale.md"
+ln -s "$SRC/claude/global-instructions.md" "$H/.claude/stale.md"
 audit_ro "$EVI/one.out" "$H"
 expect_same "one owned-dir orphan: audit exits 1" 1 "$RC"
 has_line "one owned-dir orphan: summary" "$EVI/one.out" \
@@ -300,7 +300,7 @@ EXPECT_ORPHANS="[X]  ORPHAN-DANGLING $H/.config/oldtool/conf -> $SRC/oldtool/con
 [X]  ORPHAN-DANGLING $H/bin/retired-abs -> $SRC/bin/retired-abs (missing inside checkout $SRC)
 [X]  ORPHAN-DANGLING $H/bin/via-ok -> $CO/dotfiles-b/okdir/gone (missing inside checkout $CO/dotfiles-b)
 [X]  ORPHAN-DANGLING $H/bin/retired-rel -> ../co/dotfiles-b/bin/gone (missing inside checkout $CO/dotfiles-b)
-[X]  ORPHAN-LIVE     $H/.claude/stale.md -> $SRC/claude/CLAUDE.md (inside checkout $SRC; not in the installer map)
+[X]  ORPHAN-LIVE     $H/.claude/stale.md -> $SRC/claude/global-instructions.md (inside checkout $SRC; not in the installer map)
 [X]  ORPHAN-LIVE     $H/.codex/skills/stale-abs -> $SRC/claude/skills/todos (inside checkout $SRC; not in the installer map)
 [X]  ORPHAN-LIVE     $H/.codex/skills/stale-rel -> ../../co/dotfiles-b/claude/skills/present (inside checkout $CO/dotfiles-b; not in the installer map)"
 expect_same "fixtures: exact orphan findings" \
@@ -330,11 +330,11 @@ fi
 
 mkdir -p "$HC/bin"
 ln -s "$SRC/bin/retired-abs" "$HC/bin/retired-abs"
-ln -s "$SRC/claude/CLAUDE.md" "$HC/.claude/stale.md"
+ln -s "$SRC/claude/global-instructions.md" "$HC/.claude/stale.md"
 audit_ro "$EVI/cloud-orphans.out" "$HC" --cloud
 expect_same "cloud orphan: audit exits 1" 1 "$RC"
 has_line "cloud: owned-dir orphan reported" "$EVI/cloud-orphans.out" \
-    "[X]  ORPHAN-LIVE     $HC/.claude/stale.md -> $SRC/claude/CLAUDE.md (inside checkout $SRC; not in the installer map)"
+    "[X]  ORPHAN-LIVE     $HC/.claude/stale.md -> $SRC/claude/global-instructions.md (inside checkout $SRC; not in the installer map)"
 if grep -qF -- "$HC/bin/retired-abs" "$EVI/cloud-orphans.out"; then
     fail "cloud: ~/bin is outside the cloud scan"
 else

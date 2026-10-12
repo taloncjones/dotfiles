@@ -154,7 +154,7 @@ assert "Codex AGENTS defines default skill routing" \
 assert "Codex AGENTS no longer routes to retired ECC skills" \
     sh -c "! rg -q 'ecc:' codex/AGENTS.md"
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
-    sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
+    sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/global-instructions.md"
 
 project_skill_bridge_is_complete() {
     [ -L .agents/skills ] || return 1
@@ -389,6 +389,9 @@ links_shared_workflow_surfaces() (
     [ "$(readlink "$tmp_home/.codex/hooks/git_remote_guard.py")" = "$PWD/claude/hooks/git_remote_guard.py" ] || return 1
     [ "$(readlink "$tmp_home/.codex/hooks/planning_artifact_guard.py")" = "$PWD/claude/hooks/planning_artifact_guard.py" ] || return 1
     [ "$(rg -c 'command = .*planning_artifact_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/signer_guard.py")" = "$PWD/claude/hooks/signer_guard.py" ] || return 1
+    [ "$(rg -c 'command = .*signer_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    rg -q 'matcher = ".*\|shell\|.*"' "$tmp_home/.codex/config.toml" || return 1
     python3 - "$tmp_home/.codex/config.toml" <<'PY' || return 1
 import sys
 import tomllib

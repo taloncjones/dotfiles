@@ -492,6 +492,13 @@ elif args[:2] == ["agent", "list"]:
     print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
 elif args[:2] == ["pane", "list"]:
     ws = args[args.index("--workspace") + 1]
+    closed_path = Path(os.environ["FAKE_PANES"] + ".closed")
+    if closed_path.exists() and ws in json.loads(closed_path.read_text()):
+        # Live herdr 0.9.1 reply for a closed or unknown workspace (probe 2026-10-09).
+        print(json.dumps({"error": {"code": "workspace_not_found",
+                                    "message": f"workspace {ws} not found"},
+                          "id": "cli:pane:list"}), file=sys.stderr)
+        raise SystemExit(1)
     panes = [p for p in json.loads(Path(os.environ["FAKE_PANES"]).read_text())
              if p["workspace_id"] == ws]
     print(json.dumps({"id": "fake", "result": {"type": "pane_list", "panes": panes}}))
@@ -526,6 +533,24 @@ elif args[:2] == ["agent", "send-keys"]:
         raise SystemExit(1)
     if mode in ("exit-menu", "exit-timeout-menu") and args[3:] == ["1", "enter"]:
         apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
+elif args[:2] == ["workspace", "close"]:
+    ws = args[2]
+    closed_path = Path(os.environ["FAKE_PANES"] + ".closed")
+    closed = json.loads(closed_path.read_text()) if closed_path.exists() else []
+    closed_path.write_text(json.dumps(closed + [ws]))
+    # Live herdr forgets the workspace too, so a later `workspace get` misses it.
+    wpath = Path(os.environ["FAKE_WORKSPACES"])
+    spaces = (json.loads(wpath.read_text()) if wpath.exists() else
+              [{"workspace_id": workspace, "label": "td-a",
+                "worktree": {"checkout_path": cwd}}])
+    wpath.write_text(json.dumps([w for w in spaces if w["workspace_id"] != ws]))
+    ppath = Path(os.environ["FAKE_PANES"])
+    ppath.write_text(json.dumps([p for p in json.loads(ppath.read_text())
+                                 if p["workspace_id"] != ws]))
+    apath = Path(os.environ["FAKE_AGENTS"])
+    apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                 if a.get("workspace_id") != ws]))
+    print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
 elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
     wpath = Path(os.environ["FAKE_WORKSPACES"])
     spaces = (json.loads(wpath.read_text()) if wpath.exists() else
@@ -1734,6 +1759,92 @@ def test_settle_keeps_the_last_pane_on_a_duplicated_pane_entry():
         fx.close()
 
 
+def test_settle_after_workspace_close_reports_absent():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        fx.settle_state([ship], "reviewed", [], [])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        Path(fx.env["FAKE_PANES"] + ".closed").write_text(json.dumps(["w1"]))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert result["agent"] == "absent" and result["pane"] == "absent", result
+        assert not [c for c in fx.calls() if c[:2] in (["pane", "close"], ["workspace", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_gate_only_root_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        first = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        second = settle_row("ship", "ship-td-a-000000000002", "w1:p2", head)
+        fx.settle_state([first, second], "reviewed", [], [pane("w1:p1"), pane("w1:p2")])
+        for row in (first, second):
+            launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{row['launch_id']}"
+            launch_dir.mkdir(parents=True)
+            (launch_dir / "ship.json").write_text(
+                json.dumps({"launch_id": row["launch_id"], "verdict": "CHANGES"}))
+        result = fx.settle(first["launch_id"])
+        # The later ship row supersedes the first, which still releases its pane.
+        assert result["status"] == "settled" and result["reason"] == "superseded", result
+        assert result["pane"] == "closed", result
+        assert ["pane", "close", "w1:p1"] in fx.calls(), fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["workspace", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_gate_only_workspace_with_workspace_close():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        fx.settle_state([ship], "reviewed", [], [pane("w1:p1")])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert result["agent"] == "absent" and result["pane"] == "workspace-closed", result
+        assert ["workspace", "close", "w1"] in fx.calls(), fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        # Live herdr cannot relabel a closed workspace; the label result is
+        # best-effort and never fails settle (`_task_label_result`).
+        assert result["label"]["status"] != "applied", result
+        again = fx.settle(ship["launch_id"])
+        assert again["status"] == "settled" and again["pane"] == "absent", again
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_gate_only_workspace_with_a_foreign_checkout():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p1", head)
+        fx.settle_state([ship], "reviewed", [], [pane("w1:p1")])
+        Path(fx.env["FAKE_WORKSPACES"]).write_text(json.dumps(
+            [{"workspace_id": "w1", "label": "td-a",
+              "worktree": {"checkout_path": "/elsewhere"}}]))
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled", result
+        assert result["pane"] == "kept-workspace-unverified", result
+        assert not [c for c in fx.calls() if c[:2] in (["pane", "close"], ["workspace", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member():
     fx = Fixture()
     try:
@@ -2644,6 +2755,62 @@ def test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json():
         assert f"launch_id={launch_id} phase=ship" in prompt, prompt
         for absent in ("emit-done", "emit-review", "herdr_orch_core.py"):
             assert absent not in prompt, (absent, prompt)
+    finally:
+        herdr_dispatch.uuid.uuid4 = original_uuid4
+        fixture.close()
+
+
+def test_ship_launch_refuses_a_pane_a_non_ship_row_used():
+    fixture = Fixture()
+    try:
+        head = core.repository_context(fixture.repo)["head"]
+        task = json.loads(fixture.task_file.read_text())
+        task.update(status="reviewed",
+                    workers=[settle_row("implement", "impl-td-a-000000000001", "w1:p1", head)])
+        fixture.task_file.write_text(json.dumps(task))
+        before = fixture.task_file.read_text()
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        try:
+            herdr_dispatch.launch(
+                repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+                workspace_id="w1", pane_id="w1:p1", phase="ship", agent="ship-td-a",
+                route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+                prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+                start_timeout_ms=4000, prompt_timeout_ms=1000,
+            )
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "a ship launch needs its own pane: split one in the task workspace", exc
+        else:
+            raise AssertionError("a ship launch into an implement pane was accepted")
+        assert fixture.task_file.read_text() == before
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
+def test_ship_launch_accepts_a_pane_only_ship_rows_used():
+    fixture = Fixture()
+    original_uuid4 = herdr_dispatch.uuid.uuid4
+    try:
+        head = core.repository_context(fixture.repo)["head"]
+        prior = settle_row("ship", "ship-td-a-000000000009", "w1:p1", head)
+        task = json.loads(fixture.task_file.read_text())
+        task.update(status="reviewed", workers=[prior])
+        fixture.task_file.write_text(json.dumps(task))
+        herdr_dispatch.uuid.uuid4 = lambda: herdr_dispatch.uuid.UUID(int=0)
+        launch_id = "ship-td-a-000000000000"
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = launch_id
+        result = herdr_dispatch.launch(
+            repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", pane_id="w1:p1", phase="ship", agent="ship-td-a",
+            route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+            prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+            start_timeout_ms=4000, prompt_timeout_ms=1000,
+        )
+        rows = fixture.worker_records()
+        assert result["launch_id"] == launch_id, result
+        assert [r["launch_id"] for r in rows] == [prior["launch_id"], launch_id], rows
     finally:
         herdr_dispatch.uuid.uuid4 = original_uuid4
         fixture.close()
@@ -4966,6 +5133,472 @@ def test_advance_reports_a_failed_record_write_as_incomplete():
         fx.close()
 
 
+GATE_FNS = ("sweep", "settle", "launch", "_gate_split", "_row_agent", "_core_step")
+
+
+def review_ready(fx):
+    """A completed implement attempt one commit ahead of the task base, plus a focus file."""
+    base = core.repository_context(fx.repo)["head"]
+    git = ["git", "-C", str(fx.repo)]
+    (fx.repo / "feature.txt").write_text("feature\n")
+    subprocess.run([*git, "add", "feature.txt"], check=True)
+    subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "commit", "-qm", "feat: add feature"], check=True)
+    head = core.repository_context(fx.repo)["head"]
+    task = json.loads(fx.task_file.read_text())
+    task.update(workers=[settle_row("implement", "I", "w1:p1", head)], base_sha=base,
+                base_ref="origin/main", title="Gate fixture", workspace_id="w1",
+                status="completed")
+    fx.task_file.write_text(json.dumps(task))
+    focus = fx.root / "focus.md"
+    focus.write_text("GATE-FOCUS\n")
+    return head, focus
+
+
+def run_gate(fx, phase, focus, **kw):
+    env = {**fx.env, "PATH": str(fx.root) + os.pathsep + fx.env["PATH"]}
+    return herdr_dispatch.dispatch_gate(
+        repo_slug=fx.slug, repo_path=str(fx.repo), runtime="claude", task_id="td-a",
+        session="S", fence=1, phase=phase, focus_file=str(focus),
+        herdr_cli=str(fx.bin), env=env, **kw)
+
+
+def test_dispatch_gate_review_launches_read_only_and_records_the_pin():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: calls.append(("sweep", kw["workspace_id"])) or {"status": "swept", "rows": []}
+    herdr_dispatch._gate_split = lambda cli, pane, wt, env: calls.append(("split", pane)) or "w1:p9"
+    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "rev-L1"}
+    try:
+        head, focus = review_ready(fx)
+        out = run_gate(fx, "review", focus)
+        assert [c[0] for c in calls] == ["sweep", "split", "launch"], calls
+        assert calls[0] == ("sweep", "w1") and calls[1] == ("split", "w1:p1"), calls
+        kw = calls[2][1]
+        assert (kw["phase"], kw["pane_id"], kw["workspace_id"], kw["sandbox"]) == \
+            ("review", "w1:p9", "w1", "read-only"), kw
+        assert "GATE-FOCUS" in kw["prompt"] and kw["route"]["ready"] is True, kw
+        task = json.loads(fx.task_file.read_text())
+        assert task["status"] == "review-dispatched" and task["review_head_sha"] == head, task
+        index = json.loads((fx.rd / "workspaces" / "w1.json").read_text())
+        assert index == {"repo_slug": fx.slug, "role": "review", "task_id": "td-a"}, index
+        assert out["status"] == "dispatched" and out["launch_id"] == "rev-L1", out
+        assert out["pane_id"] == "w1:p9" and out["head_sha"] == head, out
+        assert any("review-deadlines" in line for line in out["follow_up"]), out
+        assert not any(line.startswith("jira:") for line in out["follow_up"]), out
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_refuses_a_dirty_worktree_before_any_herdr_call():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: calls.append("sweep") or {"status": "swept", "rows": []}
+    try:
+        head, focus = review_ready(fx)
+        (fx.repo / "feature.txt").write_text("dirty\n")
+        try:
+            run_gate(fx, "review", focus)
+            raise AssertionError("dirty worktree dispatched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "dirty" in str(exc), exc
+        assert calls == [] and fx.calls() == [], (calls, fx.calls())
+        assert json.loads(fx.task_file.read_text())["status"] == "completed"
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_refuses_a_head_not_ahead_of_base():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["base_sha"] = head
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            run_gate(fx, "review", focus)
+            raise AssertionError("HEAD equal to base dispatched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "ahead" in str(exc), exc
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_refuses_a_stale_pin_before_launching():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.launch = lambda **kw: calls.append("launch") or {"status": "launched", "launch_id": "rev-L1"}
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["review_head_sha"] = "0" * 40
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            run_gate(fx, "review", focus)
+            raise AssertionError("a stale review pin dispatched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "review_head_sha" in str(exc), exc
+        assert calls == [] and fx.calls() == [], (calls, fx.calls())
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_refuses_when_should_dispatch_review_refuses():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["review_head_sha"] = head
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            run_gate(fx, "review", focus)
+            raise AssertionError("a pinned head dispatched again")
+        except herdr_dispatch.DispatchError as exc:
+            assert "should-dispatch-review refused" in str(exc), exc
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_refuses_a_route_that_is_not_ready():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    resolve = herdr_dispatch.agent_runtime.resolve_route
+    herdr_dispatch.agent_runtime.resolve_route = lambda *a, **k: {"ready": False}
+    herdr_dispatch.sweep = lambda **kw: calls.append("sweep") or {"status": "swept", "rows": []}
+    try:
+        head, focus = review_ready(fx)
+        try:
+            run_gate(fx, "review", focus)
+            raise AssertionError("an unready route dispatched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "route is not ready" in str(exc), exc
+        assert calls == [] and fx.calls() == [], (calls, fx.calls())
+        assert json.loads(fx.task_file.read_text())["status"] == "completed"
+    finally:
+        herdr_dispatch.agent_runtime.resolve_route = resolve
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_stops_at_sweep_while_a_reviewer_is_live():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: {"status": "swept", "rows": [
+        {"launch_id": "R0", "status": "not-settled", "reason": None}]}
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["workers"].append(settle_row("review", "R0", "w1:p2", head))
+        fx.task_file.write_text(json.dumps(task))
+        out = run_gate(fx, "review", focus)
+        assert out["status"] == "incomplete" and out["step"] == "sweep" and "R0" in out["detail"], out
+        assert calls == [], calls
+        assert json.loads(fx.task_file.read_text())["status"] == "completed"
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_launch_failure_writes_nothing_and_a_rerun_dispatches():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: {"status": "swept", "rows": []}
+    herdr_dispatch._gate_split = lambda *a: "w1:p9"
+
+    def failing(**kw):
+        raise herdr_dispatch.DispatchError("agent_not_ready")
+    herdr_dispatch.launch = failing
+    try:
+        head, focus = review_ready(fx)
+        before = fx.task_file.read_text()
+        out = run_gate(fx, "review", focus)
+        assert out["status"] == "incomplete" and out["step"] == "launch", out
+        assert out["pane_id"] == "w1:p9", out
+        assert fx.task_file.read_text() == before
+        assert not (fx.rd / "workspaces" / "w1.json").exists()
+        herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "rev-L2"}
+        again = run_gate(fx, "review", focus)
+        assert again["status"] == "dispatched" and again["launch_id"] == "rev-L2", again
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_names_the_jira_writeback_for_a_jira_task():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: {"status": "swept", "rows": []}
+    herdr_dispatch._gate_split = lambda *a: "w1:p9"
+    herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "rev-L3"}
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["kind"] = "jira"
+        fx.task_file.write_text(json.dumps(task))
+        out = run_gate(fx, "review", focus)
+        assert "jira: transition to In Review (SKILL.md section 10)" in out["follow_up"], out
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+SHIP_OLD = "ship-td-a-" + "a" * 12
+
+
+def ship_ready(fx, pinned=None, recorded=False):
+    """A reviewed task at HEAD; optionally a pinned ship row, with or without its ship.json."""
+    head, focus = review_ready(fx)
+    task = json.loads(fx.task_file.read_text())
+    task.update(status="reviewed", review_head_sha=head)
+    if pinned:
+        row = settle_row("ship", pinned, "w1:p3", head)
+        row["agent"] = herdr_dispatch.ship_agent_name(pinned)
+        task["workers"].append(row)
+        task["ship_launch_id"] = pinned
+        if recorded:
+            launch_dir = core.ship_launch_dir(fx.rd, "td-a", pinned)
+            launch_dir.mkdir(parents=True)
+            (launch_dir / "ship.json").write_text(json.dumps({"launch_id": pinned}))
+    fx.task_file.write_text(json.dumps(task))
+    return head, focus
+
+
+def ship_render(original, fx, renders, fail=None):
+    """A _core_step whose render-brief records its args and returns a canned ship
+    brief (the real one needs pr_number, a GitHub origin and git ls-remote)."""
+    brief = fx.root / "ship.brief.md"
+    brief.write_text("SHIP-BRIEF\n")
+
+    def step(verb, *args, ctx, stdin=None):
+        if verb != "render-brief":
+            return original(verb, *args, ctx=ctx, stdin=stdin)
+        renders.append(list(args))
+        if fail:
+            return False, fail
+        return True, json.dumps({"agent": "ship-td-a", "brief_path": str(brief)})
+    return step
+
+
+def test_dispatch_gate_ship_first_launch_pins_ship_launch_id():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "ship-td-a-bbbbbbbbbbbb"}
+    herdr_dispatch.settle = lambda **kw: calls.append("settle") or {"status": "settled"}
+    renders = []
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+    try:
+        head, focus = ship_ready(fx)
+        out = run_gate(fx, "ship", focus)
+        assert renders[0][renders[0].index("--phase") + 1] == "ship" and "--tier" not in renders[0], renders
+        kw = calls[1][1]
+        assert (kw["phase"], kw["sandbox"], kw["route"]["runtime"]) == ("ship", "read-only", "claude"), kw
+        assert "settle" not in calls, calls
+        task = json.loads(fx.task_file.read_text())
+        assert task["ship_launch_id"] == "ship-td-a-bbbbbbbbbbbb" and "ship_relaunch_head" not in task, task
+        assert out["status"] == "dispatched" and out["settle"] == [], out
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_stopped_run_writes_the_budget_before_launch():
+    fx = Fixture()
+    seen = {}
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    herdr_dispatch._gate_split = lambda *a: "w1:p9"
+
+    def launching(**kw):
+        seen["task"] = json.loads(fx.task_file.read_text())
+        return {"status": "launched", "launch_id": "ship-td-a-cccccccccccc"}
+    herdr_dispatch.launch = launching
+    herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled", "reason": "superseded"}
+    renders = []
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        out = run_gate(fx, "ship", focus)
+        assert seen["task"]["ship_relaunch_head"] == head, seen["task"]
+        assert renders[0][renders[0].index("--tier") + 1] == "full", renders
+        assert out["settle"] == [{"launch_id": SHIP_OLD, "status": "settled", "reason": "superseded"}], out
+        assert json.loads(fx.task_file.read_text())["ship_launch_id"] == "ship-td-a-cccccccccccc"
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_stopped_run_with_the_budget_spent_refuses():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        task = json.loads(fx.task_file.read_text())
+        task["ship_relaunch_head"] = head
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            run_gate(fx, "ship", focus)
+            raise AssertionError("a spent budget relaunched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "relaunch budget spent" in str(exc), exc
+        assert calls == [], calls
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_stopped_run_refuses_a_delta_tier():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        try:
+            run_gate(fx, "ship", focus, tier="delta", prior_handoff=str(fx.root / "ship.json"))
+            raise AssertionError("a stopped run relaunched at tier delta")
+        except herdr_dispatch.DispatchError as exc:
+            assert "full gate" in str(exc), exc
+        assert "ship_relaunch_head" not in json.loads(fx.task_file.read_text())
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_after_a_recorded_handoff_spends_no_budget():
+    fx = Fixture()
+    settled = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "idle"})
+    herdr_dispatch._gate_split = lambda *a: "w1:p9"
+    herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "ship-td-a-dddddddddddd"}
+    herdr_dispatch.settle = lambda **kw: settled.append(kw["launch_id"]) or {"launch_id": kw["launch_id"], "status": "settled", "reason": "superseded"}
+    renders = []
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded=True)
+        out = run_gate(fx, "ship", focus)
+        task = json.loads(fx.task_file.read_text())
+        assert "ship_relaunch_head" not in task and task["ship_launch_id"] == "ship-td-a-dddddddddddd", task
+        assert settled == [SHIP_OLD] and out["settle"][0]["reason"] == "superseded", out
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_refuses_a_task_that_is_not_reviewed():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    try:
+        head, focus = review_ready(fx)
+        try:
+            run_gate(fx, "ship", focus)
+            raise AssertionError("a completed task shipped")
+        except herdr_dispatch.DispatchError as exc:
+            assert "reviewed" in str(exc), exc
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_refuses_a_working_pinned_agent():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "working"})
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        try:
+            run_gate(fx, "ship", focus)
+            raise AssertionError("a live ship gate was replaced")
+        except herdr_dispatch.DispatchError as exc:
+            assert "may still be running" in str(exc), exc
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_refuses_when_herdr_cannot_say_the_pinned_agent_state():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("unknown", None)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        try:
+            run_gate(fx, "ship", focus)
+            raise AssertionError("an unknown ship agent state dispatched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "may still be running" in str(exc), exc
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_render_failure_leaves_the_budget_unspent():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, [],
+                                            fail="ship needs pr_number on the task record")
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        out = run_gate(fx, "ship", focus)
+        assert out["status"] == "incomplete" and out["step"] == "render-brief", out
+        assert "ship_relaunch_head" not in json.loads(fx.task_file.read_text())
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_cli_reaches_the_function():
+    fx = Fixture()
+    try:
+        env = {k: v for k, v in fx.env.items() if k != "HERDR_ENV"}
+        proc = subprocess.run(
+            [sys.executable, herdr_dispatch.__file__, "dispatch-gate", "--repo-slug", fx.slug,
+             "--repo-path", str(fx.repo), "--task-id", "td-a", "--session", "S", "--fence", "1",
+             "--phase", "review", "--focus-file", str(fx.root / "focus.md")],
+            capture_output=True, text=True, env=env)
+        assert proc.returncode == 2, (proc.returncode, proc.stderr)
+        assert json.loads(proc.stdout) == {
+            "status": "error", "error": "dispatch-gate requires a Herdr-managed environment"}, proc.stdout
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -5024,6 +5657,10 @@ for name, test in (
     ("settle keeps a pane when agent_not_running but the agent stays listed", test_settle_keeps_a_pane_when_agent_not_running_but_the_agent_stays_listed),
     ("settle never sends keys when agent_not_found but the agent stays listed", test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed),
     ("settle keeps the last pane on a duplicated pane entry", test_settle_keeps_the_last_pane_on_a_duplicated_pane_entry),
+    ("settle after workspace close reports absent", test_settle_after_workspace_close_reports_absent),
+    ("settle closes a gate-only root pane", test_settle_closes_a_gate_only_root_pane),
+    ("settle closes a gate-only workspace with workspace close", test_settle_closes_a_gate_only_workspace_with_workspace_close),
+    ("settle keeps a gate-only workspace with a foreign checkout", test_settle_keeps_a_gate_only_workspace_with_a_foreign_checkout),
     ("settle keeps a pane when the agent list has a null member", test_settle_keeps_a_pane_when_the_agent_list_has_a_null_member),
     ("settle keeps a pane when an agent member lacks a pane id", test_settle_keeps_a_pane_when_an_agent_member_lacks_a_pane_id),
     ("settle closes a pane beside an unnamed agent in another workspace", test_settle_closes_a_pane_beside_an_unnamed_agent_in_another_workspace),
@@ -5073,6 +5710,8 @@ for name, test in (
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
     ("a ship launch names its agent after its launch id and points at ship.json", test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json),
+    ("ship launch refuses a pane a non-ship row used", test_ship_launch_refuses_a_pane_a_non_ship_row_used),
+    ("ship launch accepts a pane only ship rows used", test_ship_launch_accepts_a_pane_only_ship_rows_used),
     ("a ship launch fits a long task id in the agent name limit", test_ship_launch_fits_a_long_task_id_in_the_agent_name_limit),
     ("a ship launch refuses a writable sandbox, a Codex runtime or an odd agent", test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent),
     ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
@@ -5149,6 +5788,25 @@ for name, test in (
     ("advance refuses a plan attempt followed by an implement row", test_advance_refuses_a_plan_attempt_followed_by_an_implement_row),
     ("advance stops at render-brief with the record written", test_advance_stops_at_render_brief_with_the_record_written),
     ("advance reports a failed record write as incomplete", test_advance_reports_a_failed_record_write_as_incomplete),
+    ("dispatch-gate review launches read-only and records the pin", test_dispatch_gate_review_launches_read_only_and_records_the_pin),
+    ("dispatch-gate review refuses a dirty worktree before any herdr call", test_dispatch_gate_review_refuses_a_dirty_worktree_before_any_herdr_call),
+    ("dispatch-gate review refuses a head not ahead of base", test_dispatch_gate_review_refuses_a_head_not_ahead_of_base),
+    ("dispatch-gate review refuses a stale pin before launching", test_dispatch_gate_review_refuses_a_stale_pin_before_launching),
+    ("dispatch-gate review refuses when should-dispatch-review refuses", test_dispatch_gate_review_refuses_when_should_dispatch_review_refuses),
+    ("dispatch-gate review refuses a route that is not ready", test_dispatch_gate_review_refuses_a_route_that_is_not_ready),
+    ("dispatch-gate review stops at sweep while a reviewer is live", test_dispatch_gate_review_stops_at_sweep_while_a_reviewer_is_live),
+    ("dispatch-gate review: a launch failure writes nothing and a re-run dispatches", test_dispatch_gate_review_launch_failure_writes_nothing_and_a_rerun_dispatches),
+    ("dispatch-gate review names the Jira writeback for a Jira task", test_dispatch_gate_review_names_the_jira_writeback_for_a_jira_task),
+    ("dispatch-gate ship: a first launch pins ship_launch_id", test_dispatch_gate_ship_first_launch_pins_ship_launch_id),
+    ("dispatch-gate ship: a stopped run writes ship_relaunch_head before the launch", test_dispatch_gate_ship_stopped_run_writes_the_budget_before_launch),
+    ("dispatch-gate ship: a spent relaunch budget refuses", test_dispatch_gate_ship_stopped_run_with_the_budget_spent_refuses),
+    ("dispatch-gate ship: a stopped run refuses a delta tier", test_dispatch_gate_ship_stopped_run_refuses_a_delta_tier),
+    ("dispatch-gate ship: a recorded handoff spends no budget", test_dispatch_gate_ship_after_a_recorded_handoff_spends_no_budget),
+    ("dispatch-gate ship refuses a task that is not reviewed", test_dispatch_gate_ship_refuses_a_task_that_is_not_reviewed),
+    ("dispatch-gate ship refuses a working pinned agent", test_dispatch_gate_ship_refuses_a_working_pinned_agent),
+    ("dispatch-gate ship refuses an unknown pinned agent state", test_dispatch_gate_ship_refuses_when_herdr_cannot_say_the_pinned_agent_state),
+    ("dispatch-gate ship: a render failure leaves ship_relaunch_head unchanged", test_dispatch_gate_ship_render_failure_leaves_the_budget_unspent),
+    ("dispatch-gate CLI reaches the function", test_dispatch_gate_cli_reaches_the_function),
 ):
     check(name, test)
 

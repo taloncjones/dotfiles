@@ -417,14 +417,15 @@ want = [
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
+    "~/.claude/hooks/signer_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template lists the Bash guards in order, planning_artifact_guard last\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, signer_guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template lists the Bash guards in order, planning_artifact_guard last\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, signer_guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -1251,6 +1252,7 @@ want_bash = [
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
+    "~/.claude/hooks/signer_guard.py",
 ]
 ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
       and ours[0]["hooks"] == [{"type": "command",
@@ -1279,6 +1281,16 @@ done
 if [ ! -f claude/rules/personal/team-roles.md ]; then
     printf 'FAIL  rules: team-roles.md missing\n' >&2
     FAIL=$((FAIL + 1))
+fi
+if [ ! -f claude/rules/personal/writing-style.md ]; then
+    printf 'FAIL  rules: writing-style.md missing\n' >&2
+    FAIL=$((FAIL + 1))
+elif [ "$(wc -l < claude/rules/personal/writing-style.md)" -gt 16 ]; then
+    printf 'FAIL  rules: writing-style.md exceeds 16 lines\n' >&2
+    FAIL=$((FAIL + 1))
+else
+    printf 'PASS  rules: writing-style.md present within 16 lines\n'
+    PASS=$((PASS + 1))
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

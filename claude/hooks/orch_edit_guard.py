@@ -17,8 +17,10 @@ tracked, or untracked and not gitignored; paths with a `.todos` component
 and paths under STATE_ROOT are exempt. Edit/Write use tool_input.file_path;
 Bash targets are shell redirections (quote-aware raw scan, heredoc bodies
 dropped), `sed -i`/`perl -i` operands, `tee` operands, `cp`/`install`
-destinations, `mv` sources and destinations, `rm`/`rmdir` operands, and
-one level of `sh -c` (a combined flag cluster like `-lc`/`-ec` counts).
+destinations, `mv` sources and destinations, `rm`/`rmdir` operands, git work-tree
+writes (`commit`, `merge`, `cherry-pick`, `reset` and the rest of
+GIT_WRITE_SUBCOMMANDS; the target is the --work-tree or -C directory, else
+the cwd), and one level of `sh -c` (a combined flag cluster like `-lc`/`-ec` counts).
 
 Escape hatch: `herdr_orch_core.py allow-edit` mints
 STATE_ROOT/<slug>/orch-edit-allow.json under a live fence. The hook honours
@@ -28,8 +30,7 @@ reserved claim-then-count in tasks/orch-edits.jsonl so parallel tool calls
 cannot overshoot. Every guarded attempt (allowed or refused) is appended to
 that log, best effort, after the decision.
 
-Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
-`checkout`/`stash`/`restore`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
+Accepted holes (allow): scripts and functions, `python -c`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
 `rsync`, `dd`, editors, `xargs`, process substitution, targets built from
 `$VAR`/`$(...)`/globs, a heredoc with no terminator, git calls past the
 10-second budget, NotebookEdit/MultiEdit, `awk`/`gawk -i inplace` (cycle-3
@@ -89,6 +90,12 @@ BLOCKED = "Blocked: orch-edit-guard"
 SENTINEL_RE = re.compile(r"__ORCH_REDIR_(\d+)__\Z")
 WORD_STOP = " \t\n;&|()<>"
 SHELL_WRAPPERS = ("sh", "bash", "zsh", "dash")
+# Subcommands that change a work tree; `stash list|show` are reads.
+GIT_WRITE_SUBCOMMANDS = frozenset({
+    "commit", "merge", "cherry-pick", "revert", "rebase", "am", "apply", "reset",
+    "stash", "restore", "checkout", "switch", "pull", "rm", "mv", "clean",
+})
+GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace")
 
 
 class Budget:
@@ -538,6 +545,17 @@ def exempt(c, state_real):
     if ".todos" in c.split("/"):
         return True
     return c == state_real or c.startswith(state_real + "/")
+
+
+def git_toplevel(c, budget):
+    """Work-tree root of the directory a git command acts in, else `c`."""
+    d = c if os.path.isdir(c) else os.path.dirname(c)
+    while d != "/" and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    rc, out = git(["rev-parse", "--show-toplevel"], d, budget)
+    if rc != 0 or not out:
+        return c
+    return os.path.realpath(out.removesuffix("\n"))
 
 
 def classify(c, budget):
@@ -1044,6 +1062,40 @@ def rm_operands(words):
     return ops
 
 
+class GitDir(str):
+    """A git invocation's directory: the command acts on its whole
+    repository, so the decision is made on that repository, not this path."""
+
+
+def git_write_targets(words):
+    """[path] the git invocation writes (--work-tree, else the -C chain, else
+    "."), or [] for a subcommand that does not change a work tree."""
+    chdir, work_tree, i = "", None, 1
+    while i < len(words):
+        word = words[i]
+        if word in GIT_VALUE_OPTIONS:
+            if i + 1 >= len(words):
+                return []
+            if word == "-C":
+                chdir = os.path.join(chdir, words[i + 1])
+            elif word == "--work-tree":
+                work_tree = words[i + 1]
+            i += 2
+            continue
+        if word.startswith("--work-tree="):
+            work_tree = word.split("=", 1)[1]
+        elif not word.startswith("-"):
+            break
+        i += 1
+    if i >= len(words) or words[i] not in GIT_WRITE_SUBCOMMANDS:
+        return []
+    if words[i] == "stash" and i + 1 < len(words) and words[i + 1] in ("list", "show"):
+        return []
+    if work_tree is not None:
+        return [GitDir(os.path.join(chdir, work_tree))]
+    return [GitDir(chdir or ".")]
+
+
 def cd_target_candidates(words, cwd, home):
     """The set of cwds the shell might be in after a `cd`: one, when the
     target can be confirmed a real directory; {target, cwd} otherwise --
@@ -1170,6 +1222,9 @@ def bash_targets(command, cwd, home, depth=0):
         elif head in ("rm", "rmdir"):
             for c in cwds:
                 found.extend((c, w) for w in rm_operands(words))
+        elif head == "git":
+            for c in cwds:
+                found.extend((c, w) for w in git_write_targets(words))
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:
@@ -1206,7 +1261,8 @@ def targets_for(payload, tool, cwd, home):
 
 
 def resolve_targets(raw, home):
-    """Canonical absolute paths, skipping anything the shell would still
+    """Marker budget unit: one per distinct canonical target per call, so
+    `git commit && git reset` in one repo costs one unit. Canonical absolute paths, skipping anything the shell would still
     expand ($VAR, backticks, globs), deduplicated by canonical path, NOT
     capped.
 
@@ -1226,6 +1282,8 @@ def resolve_targets(raw, home):
         ):
             continue
         p = canonical_target(we, c_cwd, home)
+        if p is not None and isinstance(w, GitDir):
+            p = GitDir(p)
         if p is not None and p not in paths:
             paths.append(p)
     return paths
@@ -1582,10 +1640,14 @@ def decide(payload, runtime="claude"):
     budget = Budget(GIT_BUDGET_SECS)
     guarded = []
     for p in paths:
+        if isinstance(p, GitDir):
+            # A git write changes the whole repository: judge its root, so a
+            # .todos or gitignored cwd is not an exemption.
+            p = git_toplevel(p, budget)
         if exempt(p, state_real):
             continue
         hit = classify(p, budget)
-        if hit:
+        if hit and all(g[0] != p for g in guarded):
             guarded.append((p, hit[0], hit[1]))
     if not guarded:
         return 0
