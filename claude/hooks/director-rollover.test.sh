@@ -1126,6 +1126,80 @@ assert c.rollover_launch("work") == "director 'resume director'"
 PY
 SH
 
+# The host-sleep note cases run the hook copy against a fake core whose exit
+# code (FAKE_RC) and decisions output (FAKE_DEC) the case sets.
+HOOK_FAKE_CORE='import os, sys
+if sys.argv[1] == "decisions":
+    if os.environ.get("FAKE_DEC"):
+        print("[INFO] herdr decisions: fake")
+    sys.exit(0 if os.environ.get("FAKE_DEC") else 3)
+rc = int(os.environ["FAKE_RC"])
+if rc == 0:
+    print("[INFO] herdr director rollover: fake")
+if rc == 1:
+    print("[WARNING] herdr director rollover: fake BUSY")
+sys.exit(rc)'
+export HOOK_FAKE_CORE
+
+check "hook: host-sleep note follows the lease block on clear and compact, before decisions" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+mkdir -p "$FX/h"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/h/"
+printf '%s\n' "$HOOK_FAKE_CORE" > "$FX/h/herdr_orch_core.py"
+p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$1" "$FX_REPO"; }
+h() { HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock python3 "$FX/h/director_rollover.py"; }
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+for src in clear compact; do
+    p $src | FAKE_RC=0 FAKE_DEC=1 h | ctx > "$FX/c.$src"
+    a=$(grep -n 'herdr director rollover: fake' "$FX/c.$src" | cut -d: -f1)
+    b=$(grep -n '^\[INFO\] host sleep:' "$FX/c.$src" | cut -d: -f1)
+    c=$(grep -n 'herdr decisions: fake' "$FX/c.$src" | cut -d: -f1)
+    test "$a" -lt "$b"
+    test "$b" -lt "$c"
+    grep -q 'kern.waketime' "$FX/c.$src"
+done
+SH
+
+check "hook: host-sleep note follows adopt-rollover exit 0 on a token startup" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+mkdir -p "$FX/h"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/h/"
+printf '%s\n' "$HOOK_FAKE_CORE" > "$FX/h/herdr_orch_core.py"
+p() { printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO"; }
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+p | HERDR_ROLLOVER_TOKEN=tok FAKE_RC=0 HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock \
+    python3 "$FX/h/director_rollover.py" | ctx > "$FX/c"
+grep -q '^\[INFO\] host sleep:' "$FX/c"
+SH
+
+check "hook: no host-sleep note without a lease exit 0" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+mkdir -p "$FX/h"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/h/"
+printf '%s\n' "$HOOK_FAKE_CORE" > "$FX/h/herdr_orch_core.py"
+p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"%s","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$1" "$2" "$FX_REPO"; }
+h() { HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock python3 "$FX/h/director_rollover.py"; }
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+absent() { if grep -q 'host sleep' "$1"; then echo "unexpected note in $1"; exit 1; fi; }
+p clear director | FAKE_RC=1 FAKE_DEC=1 h | ctx > "$FX/busy"
+grep -q 'fake BUSY' "$FX/busy"
+grep -q 'herdr decisions: fake' "$FX/busy"
+absent "$FX/busy"
+p clear director | FAKE_RC=2 h | ctx > "$FX/err"
+grep -q 'lease NOT re-established' "$FX/err"
+absent "$FX/err"
+test -z "$(p clear director | FAKE_RC=3 h)"
+p startup director | HERDR_ROLLOVER_TOKEN=tok FAKE_RC=1 h | ctx > "$FX/rb"
+grep -q 'fake BUSY' "$FX/rb"
+absent "$FX/rb"
+for src in startup resume; do
+    p $src director | FAKE_RC=0 FAKE_DEC=1 h | ctx > "$FX/n.$src"
+    grep -q 'herdr decisions: fake' "$FX/n.$src"
+    absent "$FX/n.$src"
+done
+test -z "$(p compact worker | FAKE_RC=0 h)"
+SH
+
 check "hook: silent on every gate failure" <<'SH'
 export PATH="$ARMED_GH_BIN:$PATH"
 H="python3 $REPO_ROOT/claude/hooks/director_rollover.py"
