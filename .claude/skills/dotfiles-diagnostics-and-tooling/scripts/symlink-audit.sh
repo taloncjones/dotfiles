@@ -78,7 +78,8 @@ row_local() { printf 'machine-local\t%s\n' "$1"; }
 emit_claude_dir() {
   local cdir="$1" name
   row_section "claude config dir: $cdir"
-  for name in CLAUDE.md operating-principles.md commands agents hooks skills rules statusline.js; do
+  row_link "$cdir/CLAUDE.md" "$DOTFILES/claude/global-instructions.md"
+  for name in operating-principles.md commands agents hooks skills rules statusline.js; do
     row_link "$cdir/$name" "$DOTFILES/claude/$name"
   done
   # Local-only audit files: the installer links them only when present.

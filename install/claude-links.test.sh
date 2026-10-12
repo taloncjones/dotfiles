@@ -983,6 +983,26 @@ if [ -L "$CFG/CLAUDE.md" ] && [ ! -L "$CFG/settings.json" ]; then
 else
     fail "link path symlinks assets but keeps settings.json a real file"
 fi
+if [ "$(readlink "$CFG/CLAUDE.md")" = "$DOTFILEDIR/claude/global-instructions.md" ] && [ -e "$CFG/CLAUDE.md" ]; then
+    pass "link path points CLAUDE.md at claude/global-instructions.md"
+else
+    fail "link path points CLAUDE.md at claude/global-instructions.md"
+fi
+OLDLINK="$TMP/cfg-old-link"
+mkdir -p "$OLDLINK"
+ln -s "$DOTFILEDIR/claude/CLAUDE.md" "$OLDLINK/CLAUDE.md"
+link_claude_config_dir "$OLDLINK" >"$TMP/link-old.out" 2>&1
+if [ "$(readlink "$OLDLINK/CLAUDE.md")" = "$DOTFILEDIR/claude/global-instructions.md" ] && [ -e "$OLDLINK/CLAUDE.md" ]; then
+    pass "relink replaces a dangling pre-rename CLAUDE.md link"
+else
+    fail "relink replaces a dangling pre-rename CLAUDE.md link"
+fi
+nested_memory="$(git ls-files | grep -iE '(^|/)claude(\.local)?\.md$' | grep -vx 'CLAUDE.md')"
+if [ -z "$nested_memory" ]; then
+    pass "no tracked CLAUDE.md below the repo root"
+else
+    fail "no tracked CLAUDE.md below the repo root: $nested_memory"
+fi
 
 ACCOUNT_HOME="$TMP/account-home"
 mkdir -p "$ACCOUNT_HOME/.claude" "$ACCOUNT_HOME/.claude-work"

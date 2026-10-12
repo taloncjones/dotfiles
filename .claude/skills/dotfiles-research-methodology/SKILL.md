@@ -170,7 +170,7 @@ dotfiles-research-frontier.
 
 Do not self-certify a mechanism or a design. This repo has an assigned
 adversary: the cross-model review pipeline (`codex-spec-review`,
-`codex-plan-review`, `co-review` -- routing in claude/CLAUDE.md "Default
+`codex-plan-review`, `co-review` -- routing in claude/global-instructions.md "Default
 Skill Routing"). A different model attacking the same claim is the cheapest
 refutation available here, and it has a track record: the tiered-orchestrate
 gate's fatal bugs were found by its own dual-model review, not by its author.
@@ -217,7 +217,7 @@ Facts date-stamped 2026-07-02. Re-verify before relying on them:
   `grep -n "deterministic" /home/user/dotfiles/bootstrap-cloud.sh` (use the
   repo-relative path `bootstrap-cloud.sh` on other checkouts).
 - Review-pipeline routing (codex-spec-review / codex-plan-review / co-review):
-  `grep -n "codex-spec-review" claude/CLAUDE.md`.
+  `grep -n "codex-spec-review" claude/global-instructions.md`.
 - Refutation rules of engagement: `grep -n "Push back" claude/operating-principles.md`.
 - Sibling skill names referenced here: `ls .claude/skills/` -- 16 skills
   planned as of 2026-07-02; names may drift.
