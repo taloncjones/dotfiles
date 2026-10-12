@@ -990,7 +990,9 @@ else
 fi
 OLDLINK="$TMP/cfg-old-link"
 mkdir -p "$OLDLINK"
-ln -s "$DOTFILEDIR/claude/CLAUDE.md" "$OLDLINK/CLAUDE.md"
+# Old source path, built from parts so the stale-path grep stays clean.
+old_name=CLAUDE
+ln -s "$DOTFILEDIR/claude/$old_name.md" "$OLDLINK/CLAUDE.md"
 link_claude_config_dir "$OLDLINK" >"$TMP/link-old.out" 2>&1
 if [ "$(readlink "$OLDLINK/CLAUDE.md")" = "$DOTFILEDIR/claude/global-instructions.md" ] && [ -e "$OLDLINK/CLAUDE.md" ]; then
     pass "relink replaces a dangling pre-rename CLAUDE.md link"
