@@ -784,7 +784,7 @@ section 4; `<ship_ws>` is the ship row's `workspace_id`; report non-`settled`.
    (every other field carried), and section 6 dispatches afresh.
    Host-sleep re-gate, else the human: same HEAD, ship launch `started` before
    `sysctl -n kern.waketime`, all reasons `runner status is not success` with
-   `timed_out` (`references/director-launch.md`).
+   `timed_out` and the seat result written after wake (`references/director-launch.md`).
 1. `APPROVE`: write `gh pr view <n> --json number,state,isDraft,mergeable,headRefOid,baseRefName,baseRefOid,statusCheckRollup`
    and `gh repo view --json nameWithOwner,defaultBranchRef` to the
    scratchpad, then
