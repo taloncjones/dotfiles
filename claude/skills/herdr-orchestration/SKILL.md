@@ -307,8 +307,10 @@ after every other action.
 
 Run the `settle --launch-id <launch>` line `next` prints for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
-means report it. `settle` never closes a workspace, its root pane (the first
-row's pane) or its last pane. It closes any other pane once every row that
+means report it. `settle` keeps its root pane (the first row's) and last pane, except in a
+gate-only workspace (every row `ship`): there it closes the workspace
+(`herdr workspace close`, never `--group`) once `workspace get` shows the
+worktree (`workspace-closed`, else `kept-workspace-unverified`). It closes any other pane once every row that
 used it is settled and releases it: a review or ship row on any settled
 reason, a plan, implement or repair row only when it is superseded, failed at
 launch, ship-reported, or its task is terminal. It also keeps a pane open
@@ -720,7 +722,7 @@ agents stay present after their work ends. Before any dispatch, and
 whenever `handoff_state` is not `none`, close a pinned ship agent that is
 present but not live, as for review panes: send `esc`, then `/exit` to
 that agent name, then close that exact pane if it
-remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
+remains. Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
 `handoff_state` is `current`, the handoff report has `class` `delta`, and
@@ -747,7 +749,8 @@ Decide from the pin alone: a ship row the pin does not name has no
 authority and is never adopted. A ship launch is never reprompted;
 further gate work is a fresh launch. Every
 ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
-its launch directory, and no merge authority.
+its launch directory, and no merge authority. Launch it in a
+`pane split` or gate-only workspace.
 The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
 gate gates the current PR base. A head behind that base is gated on its
@@ -756,12 +759,8 @@ records INCOMPLETE and the director's repair flow resolves it; no worker
 merges the base into the branch. A base that moves cleanly after the gate needs no
 re-gate: `merge-ready` re-checks it with `base-check`.
 
-Once its `ship.json` is written, the idle ship agent settles as
-`handoff-recorded`: run
-`python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <ship_launch_id>`,
-which exits it and closes its pane under the same limits as section 4.
-The manual `esc`, `/exit`, exact-pane-close path above stays for a pinned
-agent with no handoff.
+Once `ship.json` is written, section 6a settles the idle ship agent
+(`handoff-recorded`); else close it by hand.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
@@ -801,6 +800,10 @@ director-only; surfacing runs everywhere.
 `handoff_state: "current"`.** "Surface" means: report it in every
 check-in report while it holds, with no mutating retry.
 
+**Settle the gate** (CHANGES: after step 0's write; INCOMPLETE: after step 0):
+`settle --workspace-id <ship_ws> --launch-id <ship_launch_id>`, flags as
+section 4; `<ship_ws>` is the ship row's `workspace_id`; report non-`settled`.
+
 0. A handoff whose report `class` is `delta` is not handled here:
    section 6 rule (c) dispatches a full gate. Current handoff verdict
    `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
@@ -820,6 +823,7 @@ check-in report while it holds, with no mutating retry.
 2. Audit comment, exactly as ship step 5 with the handoff's `report_path`
    and `expected_path`: dedupe on `co-review-audit head=<head>`; a failure
    is reported, not a stop.
+2a. `settle --workspace-id <ship_ws> --launch-id <ship_launch_id>`.
 3. `gh pr merge <n> --squash --match-head-commit <head_sha>`. On a refusal,
    `write-task` the record with
    `merge_check: {"base_main_sha": <merge-ready base_sha>, "branch_head_sha": <head_sha>, "result": "fail", "reason": "<gh error text>", "ts": "..."}`

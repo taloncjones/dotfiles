@@ -35,11 +35,15 @@ so copy-paste is the safe default.
    repo-qualified PR `<org>/<repo>#<n>`, (c) exact title. Collapse multiple PRs for
    one ticket; treat a reopened PR listed last week as reported; match prior-week
    plain-text entries too.
-6. **Compose** each cell as a short **executive summary**, not a list of links.
-   Lead each line with the _outcome / theme_ in plain language; put Jira keys as
-   trailing references in parentheses — e.g. "Shipped test-stand tooling: event
-   schema + scanner UX (PROJ-123, PROJ-124)." Collapse related tickets into one
-   themed line. Cap **~3-4 bullets per column**; summarize rather than enumerate
+6. **Compose** each cell as a short **executive summary**, not a list of links,
+   in Google developer documentation style (the technical-text half of
+   `~/.claude/rules/personal/writing-style.md`): parallel bullets with one idea
+   each, present tense, outcomes as status words (merged, in review, blocked),
+   specific nouns over pronouns, no idioms. Lead each bullet with
+   `Topic: outcome` in plain language; put Jira keys as trailing references in
+   parentheses — e.g. "Test-stand tooling: event schema and scanner UX merged
+   (PROJ-123, PROJ-124)." Collapse related tickets into one themed line. Cap
+   **~3-4 bullets per column**; summarize rather than enumerate
    when there are more. **Ticket-reference style depends on whether the line
    summarizes the ticket:** in a summary line, render keys as **plain text**
    (`PROJ-123`) — no smart link; only when a line just _lists_ a ticket without

@@ -58,7 +58,7 @@ only one hop, so use both when a link points at another link.
 
 ```
 $ readlink -f ~/.claude/CLAUDE.md
-/home/user/dotfiles/claude/CLAUDE.md
+/home/user/dotfiles/claude/global-instructions.md
 $ ls -l ~/.claude/statusline.js
 lrwxrwxrwx 1 root root 40 Jul  2 16:42 /root/.claude/statusline.js -> /home/user/dotfiles/claude/statusline.js
 ```

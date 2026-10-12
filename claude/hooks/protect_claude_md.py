@@ -27,7 +27,7 @@ def main():
 
             if resolved_path == resolved_global:
                 print("Warning: Editing global CLAUDE.md (affects all projects).")
-                print("This file is managed by dotfiles. Edit claude/CLAUDE.md in your dotfiles repo.")
+                print("This file is managed by dotfiles. Edit claude/global-instructions.md in your dotfiles repo.")
                 # Exit 0 to allow (just warn), exit 2 to block
                 sys.exit(0)
         except Exception:

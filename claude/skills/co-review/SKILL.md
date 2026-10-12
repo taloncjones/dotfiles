@@ -40,6 +40,7 @@ root = Path(source).resolve(strict=True).parents[3] if source else (
 required = (
     "claude/skills/co-review/scripts/review.py",
     "claude/skills/co-review/scripts/gate_report.py",
+    "claude/skills/co-review/scripts/codex_quota.py",
     "claude/hooks/agent_runtime.py",
 )
 if root is None or not all((root / name).is_file() for name in required):
@@ -50,6 +51,7 @@ PYROOT
 REVIEW_HELPER="$REVIEW_ROOT/claude/skills/co-review/scripts/review.py"
 GATE_REPORT="$REVIEW_ROOT/claude/skills/co-review/scripts/gate_report.py"
 RUNNER="$REVIEW_ROOT/claude/hooks/agent_runtime.py"
+CODEX_QUOTA="$REVIEW_ROOT/claude/skills/co-review/scripts/codex_quota.py"
 ```
 
 `policy` and `schema` are the sole policy and report-schema sources. A missing
@@ -265,10 +267,19 @@ Probe every runner route the tier uses before spending seats. Each probe is a
 60-second `Reply ok` run on that seat's route and snapshot root, written under
 `RUN_DIR` (never the manifest output dir, which `cleanup` checks). The probes
 run concurrently. Any non-success probe stops co-review with the existing
-incomplete report, quoting the probe's `status`, `observation` and `errors`.
-A failed probe never switches runtime on its own; see "Substitute a failed
-Codex probe" below for the explicit, truthfully recorded operator decision
-that can. A probe is never a seat artifact.
+incomplete report, quoting the probe's `status`, `observation` and `errors`,
+unless "Substitute a failed Codex probe" below applies.
+A failed probe switches a Codex seat to Claude only through that section,
+truthfully recorded. A probe is never a seat artifact.
+
+Before the probes, read the machine-local Codex quota marker. It records a
+usage-limit window for the final summary only; no decision reads it, and every
+gate still makes its own live Codex probe. Each helper call ends in `|| true`
+so a helper fault never changes a verdict.
+
+```bash
+uv run --no-project python "$CODEX_QUOTA" check >"$RUN_DIR/codex-quota-before.json" || true
+```
 
 ```bash
 printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
@@ -295,6 +306,7 @@ if [ "$CLASS" = "full" ]; then
     --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-skeptic.json" &
 fi
 wait
+uv run --no-project python "$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-probes.json" || true
 uv run --no-project python - "$RUN_DIR"/probe-*.json <<'PY' || exit 2
 import json
 import sys
@@ -317,8 +329,10 @@ PY
 
 ### Substitute a failed Codex probe
 
-This is an explicit operator decision, made only when every failed probe is a
-Codex probe and its errors show a quota, auth or availability failure. Any
+A Codex probe that failed on a usage limit is substituted with no operator
+decision. The probe block's failure check exits 2 first; run this section
+before stopping. The explicit operator decision applies only to Codex probes that failed on
+auth or availability, and only when every failed probe is a Codex probe. Any
 failed Claude probe stops co-review, as always. A Codex seat that fails
 after its own probe succeeded is not substituted: the gate is `INCOMPLETE`,
 and a fresh gate's probe records the outage. The probe runs are never
@@ -328,10 +342,22 @@ another `RUN_DIR`. `co-review --full` is not the fallback for a Codex outage;
 the substitute rule applies in both tiers. `SUBSTITUTE` stays set for the
 seat block below.
 
-Set `SUBSTITUTE` to the literal, space-separated seats whose own Codex probe
-failed on quota, auth or availability: `codex` when `probe-codex-reviewer.json`
-failed, and (full tier) `breaker` when `probe-codex-skeptic.json` failed. Then
-run the block below, which iterates a literal word list rather than
+The helper sets `SUBSTITUTE` when every failed probe is a Codex probe that
+failed on a usage limit, no earlier attempt file exists, and every probe the
+tier launched is present. It prints the seats and exits 0, otherwise it exits 1
+and `SUBSTITUTE` stays empty. Each seat then records reason `quota`. Recovery
+is fresh-run only: after an interrupted probe or substitute sequence, leave the
+`RUN_DIR` as it is and start a fresh gate.
+
+```bash
+SUBSTITUTE=$(uv run --no-project python "$CODEX_QUOTA" substitutes --run-dir "$RUN_DIR" --class "$CLASS") || SUBSTITUTE=
+```
+
+When `SUBSTITUTE` is empty and the failures are Codex auth or availability,
+the coordinator may set it by hand to the literal, space-separated seats whose
+own Codex probe failed: `codex` when `probe-codex-reviewer.json` failed, and
+(full tier) `breaker` when `probe-codex-skeptic.json` failed. Then run the
+block below, which iterates a literal word list rather than
 `$SUBSTITUTE` itself, because the coordinator's zsh does not word-split an
 unquoted variable. A first pass refuses (exit 2), before anything moves, when
 any member seat's probe is missing or already succeeded. A second pass moves
@@ -396,6 +422,11 @@ evaluator re-reads every seat artifact: a `.json` artifact must be runner
 JSON whose `status` is `success`, and no seat artifact may be a usage-limit
 refusal. A limit-refused seat is not retried, because the limit holds until
 its reset; the gate is `INCOMPLETE`.
+
+When `codex-quota-before.json` reports `valid: true`, or either
+`codex-quota-probes.json` or `codex-quota-seats.json` reports `action: wrote`,
+the final summary adds one line: "Codex usage limit recorded until <reset_at>".
+Read each copy only when it parses; otherwise omit the line.
 
 ```bash
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
@@ -479,6 +510,10 @@ if [ "$CLASS" = "full" ]; then
     --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" 2>"$RUN_DIR/breaker.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/breaker.pid"
 fi
+```
+
+```bash
+uv run --no-project python "$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-seats.json" || true
 ```
 
 The Claude invocation preserves the original repository's selected account;

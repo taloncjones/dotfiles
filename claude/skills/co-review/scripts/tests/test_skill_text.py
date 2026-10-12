@@ -117,7 +117,7 @@ class CoReviewSkillText(unittest.TestCase):
     def test_co_review_documents_the_codex_substitute_procedure(self):
         for needle in ("codex_substitute", ".codex-attempt.json", "substitute-probe-",
                        "SUBSTITUTE", "not the fallback for a Codex outage",
-                       "A failed probe never switches runtime on its own"):
+                       "A failed probe switches a Codex seat to Claude only through"):
             self.assertIn(needle, CO_REVIEW)
         probe_needle = '"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'
         substitute_needle = '>"$RUN_DIR/substitute-probe-'
@@ -205,6 +205,77 @@ class CoReviewSkillText(unittest.TestCase):
                     self.assertTrue((run_dir / "probe-codex-skeptic.json").exists())
                     self.assertFalse(list(run_dir.glob("*.codex-attempt.json")))
                     self.assertFalse(list(run_dir.glob("substitute-probe-*")))
+
+    def test_co_review_records_and_checks_the_codex_quota_marker(self):
+        self.assertIn('CODEX_QUOTA="$REVIEW_ROOT/claude/skills/co-review/scripts/codex_quota.py"',
+                      CO_REVIEW)
+        check = CO_REVIEW.index('"$CODEX_QUOTA" check')
+        probes = CO_REVIEW.index('>"$RUN_DIR/probe-codex-reviewer.json" &')
+        probe_record = CO_REVIEW.index('"$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-probes.json"')
+        failure_check = CO_REVIEW.index('probe-*.json <<')
+        finders = CO_REVIEW.index('>"$RUN_DIR/codex.runtime.json" &')
+        seat_record = CO_REVIEW.index('>"$RUN_DIR/codex-quota-seats.json"')
+        verifier = CO_REVIEW.index('--prompt-file "$RUN_DIR/verifier.prompt"')
+        self.assertLess(check, probes)
+        self.assertLess(probes, probe_record)
+        self.assertLess(probe_record, failure_check)
+        self.assertLess(finders, seat_record)
+        self.assertLess(seat_record, verifier)
+        for line in CO_REVIEW.splitlines():
+            if '"$CODEX_QUOTA" ' in line and "substitutes" not in line:
+                self.assertTrue(line.rstrip().endswith("|| true"), line)
+        self.assertIn("Codex usage limit recorded until", CO_REVIEW)
+
+    def test_co_review_auto_substitute_runs_under_bash_and_zsh(self):
+        import json as jsonlib
+        import shutil
+        import subprocess as sp
+        import tempfile
+
+        select = _extract_block(CO_REVIEW, 'substitutes --run-dir "$RUN_DIR"').split("\n", 1)[1]
+        move = _extract_block(CO_REVIEW, '>"$RUN_DIR/substitute-probe-').split("\n", 1)[1]
+        stub_runner = Path(tempfile.mkstemp(suffix=".py")[1])
+        stub_runner.write_text("import json\nprint(json.dumps({'status': 'success'}))\n",
+                               encoding="utf-8")
+        helper = REPO / "claude/skills/co-review/scripts/codex_quota.py"
+        script = (
+            "uv() { shift 3; \"$PYTHON\" \"$@\"; }\n"
+            f'PYTHON="{sys.executable}"\n'
+            f'RUNNER="{stub_runner}"\n'
+            f'CODEX_QUOTA="{helper}"\n'
+            + select + move + 'echo "SUBSTITUTE=[$SUBSTITUTE]"\n'
+        )
+        limit_probe = {"runtime": "codex", "status": "error", "result": None,
+                       "errors": ["You've hit your usage limit. Try again in 2 days."]}
+        auth_probe = {**limit_probe, "errors": ["AuthRequired"]}
+        ok = {"runtime": "claude", "status": "success", "result": "ok", "errors": []}
+
+        def run_case(shell, run_dir, codex_probe):
+            files = {"probe-codex-reviewer.json": codex_probe,
+                     "probe-codex-skeptic.json": codex_probe,
+                     "probe-claude-reviewer.json": ok, "probe-claude-skeptic.json": ok}
+            for name, obj in files.items():
+                (run_dir / name).write_text(jsonlib.dumps(obj), encoding="utf-8")
+            env = {**__import__("os").environ, "RUN_DIR": str(run_dir), "CLASS": "full",
+                   "CLAUDE_ROOT": str(run_dir)}
+            return sp.run([shell, "-c", script], capture_output=True, text=True, env=env)
+
+        for shell in ("bash", "zsh"):
+            if shell == "zsh" and not shutil.which("zsh"):
+                self.skipTest("zsh not found")
+            with self.subTest(shell=shell):
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    result = run_case(shell, run_dir, limit_probe)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("SUBSTITUTE=[codex breaker]", result.stdout)
+                    self.assertTrue((run_dir / "codex.codex-attempt.json").exists())
+                    self.assertTrue((run_dir / "breaker.codex-attempt.json").exists())
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    run_case(shell, run_dir, auth_probe)
+                    self.assertFalse(list(run_dir.glob("*.codex-attempt.json")))
+                    self.assertTrue((run_dir / "probe-codex-reviewer.json").exists())
 
     def test_co_review_probes_every_runner_route_before_seats(self):
         probe = CO_REVIEW.index('"$RUN_DIR/probe-')
