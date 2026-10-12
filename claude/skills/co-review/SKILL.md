@@ -217,8 +217,8 @@ verdict and stop, and the director dispatches the full gate.
 A PR gate waits for the head's CI to finish and freezes it as `ci.json`
 before any probe or seat runs, so no seat reports a CI gap the coordinator
 already holds. CI can outlast a foreground call: a Claude coordinator runs
-this block with `run_in_background` and waits for its completion, as for the
-seats. `ci-capture` reads the PR number and head from the expected identity
+this block with `run_in_background` and waits for its completion.
+`ci-capture` reads the PR number and head from the expected identity
 and runs `gh` from `$REPO` itself; never write `ci.json` from your own `gh`
 output. A local no-PR review skips
 this block; a `lessons` class there falls back to `CLASS=light`.
@@ -433,10 +433,20 @@ done
 ```
 
 Seats run concurrently for up to 1200 seconds each, beyond a foreground
-command limit: a Claude coordinator runs each seat block with the Bash
-tool's `run_in_background` and waits for its completion notification (or a
-Monitor until-loop on the runtime JSON files) before continuing. Worst case is
-about 41 minutes: probes, finders, then the verifier.
+command limit. Each seat runs as its own detached `nohup` job with its own pid
+record, so no call is held open on a shared `wait` and one seat never holds
+the others. After the launch block the coordinator
+re-runs the collect block until it prints `collected`; one run waits at most
+540 seconds and exits 3 while a seat still runs. Set `COLLECT` per pass to
+that pass's seats (full: `claude codex breaker`; light: `codex`; delta:
+`claude`; lessons: none, so skip the pass), then `verifier`. Record each
+`incomplete: <seat>` as a missing seat. The collect block sends SIGTERM after
+the 1200-second deadline plus a 60-second grace (1260 seconds) and SIGKILL at
+1320 seconds, only when `ps -o command= -p` shows that seat's prompt file for
+the pid. An interruption of the launch block, or between launch and collect
+other than an exit-3 re-run, invalidates the gate: a fresh gate uses
+a new `RUN_DIR` with a new `run_id`, and nothing is relaunched into an
+existing `RUN_DIR`. Worst case is about 41 minutes: probes, finders, then the verifier.
 
 ```bash
 # A Codex-routed seat runs on Claude only when the substitute block above
@@ -449,24 +459,26 @@ case " ${SUBSTITUTE:-} " in *" breaker "*) BREAKER_SEAT_RUNTIME=claude BREAKER_S
 # Delta tier: only the claude reviewer seat.
 # Lessons tier: no finder seat; only the verifier runs.
 if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then
-  uv run --no-project python "$RUNNER" run \
+  nohup uv run --no-project python "$RUNNER" run \
     --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
     --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
-    --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
+    --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" 2>"$RUN_DIR/codex.runtime.err" &
+  echo "$! $(date +%s)" >"$RUN_DIR/codex.pid"
 fi
 if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then
-  uv run --no-project python "$RUNNER" run \
+  nohup uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
-    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" &
+    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" 2>"$RUN_DIR/claude.runtime.err" &
+  echo "$! $(date +%s)" >"$RUN_DIR/claude.pid"
 fi
 if [ "$CLASS" = "full" ]; then
-  uv run --no-project python "$RUNNER" run \
+  nohup uv run --no-project python "$RUNNER" run \
     --runtime "$BREAKER_SEAT_RUNTIME" --role skeptic --risk normal --provisional \
     --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
-    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" &
+    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" 2>"$RUN_DIR/breaker.runtime.err" &
+  echo "$! $(date +%s)" >"$RUN_DIR/breaker.pid"
 fi
-wait
 ```
 
 The Claude invocation preserves the original repository's selected account;
@@ -489,11 +501,40 @@ finder reports to the finder seats; the retained initial baseline is shared
 only for follow-up verification.
 
 ```bash
-uv run --no-project python "$RUNNER" run \
+nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
   --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
-  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" &
-wait
+  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" 2>"$RUN_DIR/verifier.runtime.err" &
+echo "$! $(date +%s)" >"$RUN_DIR/verifier.pid"
+```
+
+Run the collect block with `COLLECT` set, after the finder block and again
+after the verifier block:
+
+```bash
+# Re-run until it prints "collected"; one run waits at most 540 seconds.
+# A seat is collected when its own process is gone; ps confirms identity.
+for seat in claude codex breaker verifier; do
+  case " $COLLECT " in *" $seat "*) ;; *) continue ;; esac
+  if [ ! -f "$RUN_DIR/$seat.pid" ]; then
+    [ -s "$RUN_DIR/$seat.runtime.json" ] || echo "incomplete: $seat"
+    continue
+  fi
+  read -r pid started <"$RUN_DIR/$seat.pid"
+  while ps -o command= -p "$pid" 2>/dev/null | grep -qF -- "$RUN_DIR/$seat.prompt"; do
+    age=$(( $(date +%s) - started ))
+    if [ "$age" -ge 1320 ]; then
+      kill -KILL "$pid"
+      echo "incomplete: $seat"
+      break
+    fi
+    [ "$age" -ge 1260 ] && kill -TERM "$pid"
+    [ $SECONDS -ge 540 ] && { echo "waiting: $seat"; exit 3; }
+    sleep 10
+  done
+  rm -f "$RUN_DIR/$seat.pid"
+done
+echo collected
 ```
 
 The selected reviewer/skeptic runtime for each seat is resolved by the shared

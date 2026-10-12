@@ -2038,6 +2038,71 @@ def test_timeout_kills_the_process_group():
         assert result["observation"] == "timeout-before-init", result
 
 
+def test_wall_clock_deadline_fires_after_a_simulated_sleep():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        executable(bindir / "codex", "sleep 30\n")
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        real_clock = runtime._deadline_clock
+        real_slice = runtime._WAIT_SLICE_SECS
+        begin = real_clock()
+        runtime._deadline_clock = lambda: real_clock() + (
+            10000 if real_clock() - begin > 1 else 0
+        )
+        runtime._WAIT_SLICE_SECS = 0.2
+        try:
+            started = time.monotonic()
+            result = runtime.run_bounded(
+                route, "prompt", repo, "workspace-write", timeout_secs=600, env=env
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            runtime._deadline_clock = real_clock
+            runtime._WAIT_SLICE_SECS = real_slice
+        assert elapsed < 10, elapsed
+        assert result["status"] == "timeout", result
+        assert result["timed_out"] is True, result
+
+
+def test_sliced_wait_keeps_the_prompt_and_late_output():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        executable(
+            bindir / "codex",
+            "p=$(cat)\nsleep 1\n"
+            "printf '%s\\n' \"{\\\"type\\\":\\\"item.completed\\\",\\\"item\\\":"
+            "{\\\"type\\\":\\\"agent_message\\\",\\\"text\\\":\\\"got:$p\\\"}}\"\n"
+            "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{}}'\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        real_slice = runtime._WAIT_SLICE_SECS
+        runtime._WAIT_SLICE_SECS = 0.2
+        try:
+            result = runtime.run_bounded(
+                route, "hello", repo, "workspace-write", timeout_secs=30, env=env
+            )
+        finally:
+            runtime._WAIT_SLICE_SECS = real_slice
+        assert result["status"] == "success", result
+        assert "got:hello" in result["result"], result
+
+
 def test_timeout_returns_when_a_detached_child_holds_the_pipe():
     # Regression: a runtime CLI that detaches its worker with setsid() escapes
     # the killed process group and keeps the stdout pipe open. An unbounded
@@ -2907,6 +2972,8 @@ for name, test in (
     ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
+    ("wall-clock deadline fires after a simulated sleep", test_wall_clock_deadline_fires_after_a_simulated_sleep),
+    ("sliced wait keeps the prompt and late output", test_sliced_wait_keeps_the_prompt_and_late_output),
     ("bounded run returns when a detached child holds the pipe", test_timeout_returns_when_a_detached_child_holds_the_pipe),
     ("timeout reports pipe-held when descendants miss the worker", test_timeout_reports_pipe_held_when_descendants_miss_the_worker),
     ("stream-json result parses like the single object", test_stream_json_result_parses_like_single_object),
@@ -2918,7 +2985,7 @@ for name, test in (
     ("timeout without timestamps reports null timing", test_timeout_without_timestamps_reports_null_timing),
     ("timeout never leaks tool input", test_timeout_never_leaks_tool_input),
     ("Codex timeout progress counts by item type", test_codex_timeout_progress_counts_by_item_type),
-    ("SIGTERM to the uv wrapper reaps the seat once", test_sigterm_to_the_uv_wrapper_reaps_the_seat_once),
+    ("sigterm to the uv wrapper reaps the seat once", test_sigterm_to_the_uv_wrapper_reaps_the_seat_once),
     ("inherited ignored SIGHUP stays ignored", test_inherited_ignored_sighup_stays_ignored),
     ("signal during Popen still reaps the child", test_signal_during_popen_still_reaps_the_child),
     ("read-only child writes no bytecode", test_read_only_child_writes_no_bytecode),
