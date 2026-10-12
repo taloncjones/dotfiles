@@ -83,7 +83,7 @@ Live-verified layout of `~/.claude` in a cloud container, 2026-07-02
 
 | Entry                                                  | Kind            | Points to / holds                                                                                                                                                   |
 | ------------------------------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLAUDE.md`                                            | managed symlink | `claude/CLAUDE.md` -- global instructions, loaded every session                                                                                                     |
+| `CLAUDE.md`                                            | managed symlink | `claude/global-instructions.md` -- global instructions, loaded every session                                                                                                     |
 | `operating-principles.md`                              | managed symlink | `claude/operating-principles.md` -- pulled in via `@import` (see below)                                                                                             |
 | `commands/`                                            | managed symlink | `claude/commands/` -- slash commands                                                                                                                                |
 | `agents/`                                              | managed symlink | `claude/agents/` -- subagent definitions                                                                                                                            |
@@ -243,7 +243,7 @@ claude/skills` before assuming a skill is version-controlled.
 
 ## CLAUDE.md and @import
 
-`claude/CLAUDE.md` (symlinked to `<config-dir>/CLAUDE.md`) loads every
+`claude/global-instructions.md` (symlinked to `<config-dir>/CLAUDE.md`) loads every
 session. Its last line, `@operating-principles.md`, is an @import: Claude Code
 inlines the referenced file (resolved relative to the importing file's
 directory -- both are symlinks into `claude/`, so it resolves) into the
@@ -303,7 +303,7 @@ which also sweeps a stale `statusline.sh` from earlier setups. Requires node
 on PATH; bootstrap-cloud.sh warns (does not abort) when node is missing. The
 statusline follows the session's anchored dir (`workspace.current_dir`), not
 shell `cd` -- which is why worktrees must be entered via the native worktree
-tool (claude/CLAUDE.md "Worktree Default").
+tool (claude/global-instructions.md "Worktree Default").
 
 ## Provenance and maintenance
 
@@ -324,7 +324,7 @@ the authoring cloud container. Volatile facts and how to re-verify:
 | Hook exit-code behavior                      | `grep -n "sys.exit" claude/hooks/<hook>.py`                                                                    |
 | Hook script inventory                        | `ls claude/hooks/*.py`                                                                                         |
 | Tracked vs untracked skills                  | `git ls-files claude/skills` vs `ls claude/skills`                                                             |
-| @import still present                        | `tail -1 claude/CLAUDE.md`                                                                                     |
+| @import still present                        | `tail -1 claude/global-instructions.md`                                                                                     |
 | CLAUDE_CODE_REMOTE gate                      | `grep -n "CLAUDE_CODE_REMOTE" .claude/hooks/session-start.sh`                                                  |
 | Statusline command                           | `grep -n "statusline" claude/settings.json.tmpl install/common/claude-links.sh`                                |
 | Cited commits still exist                    | `git show --stat -s c1c4500 8d4507f 7cb28b7 722c653 910f2bc 5b799dd 52f807d`                                   |

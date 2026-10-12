@@ -154,7 +154,7 @@ assert "Codex AGENTS defines default skill routing" \
 assert "Codex AGENTS no longer routes to retired ECC skills" \
     sh -c "! rg -q 'ecc:' codex/AGENTS.md"
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
-    sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
+    sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/global-instructions.md"
 
 project_skill_bridge_is_complete() {
     [ -L .agents/skills ] || return 1

@@ -1280,6 +1280,16 @@ if [ ! -f claude/rules/personal/team-roles.md ]; then
     printf 'FAIL  rules: team-roles.md missing\n' >&2
     FAIL=$((FAIL + 1))
 fi
+if [ ! -f claude/rules/personal/writing-style.md ]; then
+    printf 'FAIL  rules: writing-style.md missing\n' >&2
+    FAIL=$((FAIL + 1))
+elif [ "$(wc -l < claude/rules/personal/writing-style.md)" -gt 16 ]; then
+    printf 'FAIL  rules: writing-style.md exceeds 16 lines\n' >&2
+    FAIL=$((FAIL + 1))
+else
+    printf 'PASS  rules: writing-style.md present within 16 lines\n'
+    PASS=$((PASS + 1))
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -1,6 +1,6 @@
 ---
 name: dotfiles-docs-and-writing
-description: Use when writing or updating any doc of record in this dotfiles repo -- README.md, repo CLAUDE.md, claude/CLAUDE.md, claude/operating-principles.md, codex/AGENTS.md, NOTICE -- or when authoring a new skill or slash command file. Trigger on "update the README", "document this", "where should this fact live", "add a skill", "add a command", "the docs are stale", "docs drift", or any house-style question (emoji tags, dash style, commit-message format). Not for platform mechanics content itself (use claude-code-platform-reference), change gating and review process (use dotfiles-change-control), or public-repo/licensing posture decisions (use dotfiles-external-positioning).
+description: Use when writing or updating any doc of record in this dotfiles repo -- README.md, repo CLAUDE.md, claude/global-instructions.md, claude/operating-principles.md, codex/AGENTS.md, NOTICE -- or when authoring a new skill or slash command file. Trigger on "update the README", "document this", "where should this fact live", "add a skill", "add a command", "the docs are stale", "docs drift", or any house-style question (emoji tags, dash style, commit-message format). Not for platform mechanics content itself (use claude-code-platform-reference), change gating and review process (use dotfiles-change-control), or public-repo/licensing posture decisions (use dotfiles-external-positioning).
 ---
 
 # Dotfiles Docs and Writing
@@ -17,12 +17,12 @@ Rule one: always edit the REPO file, never the live symlinked copy under
 - [WARNING] `codex/AGENTS.md` is repo-owned policy. Native plugins own
   upstream guidance. The copied ECC (retired) instruction block and global
   sync wrapper are retired; never regenerate them.
-- [WARNING] `claude/CLAUDE.md` is symlinked to `~/.claude/CLAUDE.md` and
+- [WARNING] `claude/global-instructions.md` is symlinked to `~/.claude/CLAUDE.md` and
   `~/.claude-work/CLAUDE.md` and loads in EVERY session in EVERY repo. A bad
   edit propagates globally on the next session start. The
   `protect_claude_md.py` hook warns (does not block) when the live
   `~/.claude/CLAUDE.md` path is edited -- the warning means "edit
-  `claude/CLAUDE.md` in the dotfiles repo instead".
+  `claude/global-instructions.md` in the dotfiles repo instead".
 - [WARNING] House style is hook-enforced (see table below). Violations are
   blocked at write or commit time, not merely flagged in review. Emojis and AI
   attribution never pass.
@@ -52,8 +52,8 @@ updated when it changes.
 | `README.md`                      | Human-facing setup (fresh Mac quick start), directory structure, command/agent/skill/hook catalogs, identity routing overview, troubleshooting | Catalogs must track the real surface -- see checklist below                                     |
 | `CLAUDE.md` (repo root)          | Claude-session guidance for THIS repo: commands, cloud restore mechanics, architecture guardrails and a pointer to the install-layout reference, commit format | The doc every session loads; keep terse. The symlink-targets list lives in the install-layout reference |
 | `.claude/skills/dotfiles-architecture-contract/references/install-layout.md` | Install flow, symlink and seed targets, hook catalogue, Codex plugin and Herdr notes | Authoritative symlink-targets list; update it with any link, hook, or installer change |
-| `claude/CLAUDE.md`               | Global cross-repo rules: strict rules, response style, commit/branch/Jira conventions, skill routing, plan-mode rules                          | Symlinked to `~/.claude*/CLAUDE.md`; edit the repo file only                                    |
-| `claude/operating-principles.md` | Model-agnostic engineering discipline (verify-before-claim, scope/safety, judgment, comms)                                                     | `@import`ed by the last line of `claude/CLAUDE.md`; also symlinked into both config dirs        |
+| `claude/global-instructions.md`               | Global cross-repo rules: strict rules, response style, commit/branch/Jira conventions, skill routing, plan-mode rules                          | Symlinked to `~/.claude*/CLAUDE.md`; edit the repo file only                                    |
+| `claude/operating-principles.md` | Model-agnostic engineering discipline (verify-before-claim, scope/safety, judgment, comms)                                                     | `@import`ed by the last line of `claude/global-instructions.md`; also symlinked into both config dirs        |
 | `codex/AGENTS.md`                | Codex global policy and runtime skill routing                                                                                                  | Edit owned policy; native plugins supply upstream guidance                                      |
 | `NOTICE`                         | Third-party attribution: retired ECC rules + pre-commit/pre-push hooks, GSD-redux-derived statusline; MIT notices                              | Add an entry (paths, upstream URL, license, copyright) whenever anything is vendored or adapted |
 
@@ -72,7 +72,7 @@ Jargon, defined once: "ECC" = Everything Claude Code, a retired (2026-09) third-
 
 Convention, not hook-enforced -- still mandatory:
 
-- Commits: `<scope>: <summary>`, imperative mood, <75 chars (claude/CLAUDE.md;
+- Commits: `<scope>: <summary>`, imperative mood, <75 chars (claude/global-instructions.md;
   caught in review, not by any hook).
 - Terse, scannable, rationale-carrying. Engineers scan, not read. Tables and
   checklists over prose. Front-load warnings.
@@ -81,7 +81,7 @@ Convention, not hook-enforced -- still mandatory:
   stable anchors (function names, headings) and cite lines only where they add
   value.
 - Never create new `.md` files unless explicitly instructed
-  (claude/CLAUDE.md, Code Standards).
+  (claude/global-instructions.md, Code Standards).
 - Cite commit hashes for anything committed (operating-principles.md).
 
 ## Templates
@@ -142,7 +142,7 @@ Run this after ANY surface change. Each row is a required same-PR update.
 | Changed `claude/settings.json.tmpl`                   | Announce the manual-merge need in the PR body -- machines seed once and never re-read the template; only cloud reconciles automatically (`bootstrap-cloud.sh` `reconcile_claude_settings`)                                                       |
 | Vendored or adapted third-party content               | `NOTICE` entry: paths, upstream URL, license, copyright                                                                                                                                                                                          |
 | Changed cloud restore mechanics                       | Repo `CLAUDE.md` "Cloud sessions" section (the doc of record for that flow)                                                                                                                                                                      |
-| Changed a global behavior rule                        | `claude/CLAUDE.md` (repo file) -- and expect it to reach every session in every repo                                                                                                                                                             |
+| Changed a global behavior rule                        | `claude/global-instructions.md` (repo file) -- and expect it to reach every session in every repo                                                                                                                                                             |
 
 Quick audit commands:
 
@@ -172,7 +172,7 @@ grep -rl 'passed, .* failed' "$HOME/dotfiles" --include='*.sh'   #   (runner's o
 4. README.md:13 claims a "CLAUDE.md template system" -- CANDIDATE stale:
    `bin/setup-claude` only writes `.git/info/exclude` entries and no CLAUDE.md
    template ships in the repo. Grep for references before deleting the claim
-   (Code Cleanup rule in claude/CLAUDE.md).
+   (Code Cleanup rule in claude/global-instructions.md).
 5. Command style: every command is plain markdown with an H1 title (see
    Templates); handoff and kickoff are skills, not commands.
 6. `GSD_HOOK_REPAIR`/`GSD_HOOK_ISOLATE` env-flag names in

@@ -21,16 +21,14 @@ is the staging tier, not an archive.
   and account: inherited settings outlive the config change they predate.
 - (2026-10) zsh: unquoted vars do not word-split, `$v:h` is a modifier (write
   `${v}:h`), use `pipestatus`; rm/git guards reject vars -- pass literal paths.
-- (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
-  MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
 - (2026-10) Never emit an identifier from memory, or one an earlier edit moved:
   shas, paths, symbols, line numbers -- re-read it or anchor on nearby text.
 - (2026-09) A worker never commits with failing tests: fix or report
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
   clean: retry once with defensive review framing before counting the seat.
-- (2026-09) Never change or fix one instance in isolation: name the failure
-  class or consumer set, grep every sibling site, and run their suites too.
+- (2026-10) Never fix one instance in isolation: name the failure class, grep
+  every sibling site and test for the changed literal, run each owning suite.
 - (2026-09) A protected main makes a local merge unshippable: open the PR
   first, so the co-review gate runs against it, then merge there.
 - (2026-09) A completion-enforcing hook is not user consent: hold the gated
@@ -66,5 +64,7 @@ is the staging tier, not an archive.
   or a detached worktree); a partial `cp` misses the files a test imports.
 - (2026-10) Re-grep anchors after a Markdown Write/Edit: the formatter reflows.
 - (2026-10) Never pass `-c commit.gpgsign=false`; a locked signer means pause.
-- (2026-10) Read a script's usage before passing it `--help`: some run the
-  whole suite, and `todos.sh new --help` filed a todo titled --help.
+- (2026-10) A suite outside the brief that fails in a worker pane: rerun it on
+  the base tree first, and blame the change only if the base passes.
+- (2026-10) An auto-mode worker cannot edit rules or principles files (the
+  self-modification classifier refuses); route those edits to a manual session.
