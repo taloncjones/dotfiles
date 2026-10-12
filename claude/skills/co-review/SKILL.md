@@ -431,6 +431,8 @@ Read each copy only when it parses; otherwise omit the line.
 ```bash
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || exit 2
+SEAT_REPORT="$REVIEW_ROOT/claude/skills/co-review/references/seat-report.md"
+test -s "$SEAT_REPORT" || exit 2
 # A local no-PR review skips the CI block, so it has no ci-envelope.json.
 CI_SHA256=
 if [ -f "$RUN_DIR/ci-envelope.json" ]; then
@@ -460,6 +462,7 @@ for seat in claude codex breaker verifier; do
       "affect an entry, say why." >>"$RUN_DIR/$seat.prompt"
   fi
   sed -n '/^## Classes/,$p' "$RUBRIC" >>"$RUN_DIR/$seat.prompt"
+  cat "$SEAT_REPORT" >>"$RUN_DIR/$seat.prompt"
 done
 ```
 
@@ -606,7 +609,8 @@ and coverage. Copy each seat's Structure fit findings into `findings` with
 every path report-relative. Populate the `seats` entries
 for `CLASS` (`schema` lists `light_seats` and `full_seats`) and set
 `report.class` to `CLASS`; put their raw runtime JSON paths and observed
-metadata in the fields named by the schema. Never replace a
+metadata in the fields named by the schema. Copy each seat's findings and coverage from its `co-review-seat` block.
+The coordinator never writes a `co-review-seat` block for a seat. Never replace a
 failed runtime result with coordinator prose. Token presence is advisory context;
 unfinished behavior blocks only with a concrete material consequence. A
 seat substituted from the block above keeps its seat name, records

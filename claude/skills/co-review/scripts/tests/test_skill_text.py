@@ -70,6 +70,26 @@ class CoReviewSkillText(unittest.TestCase):
                            "classify --diff", "--full", "CLASS"):
                 self.assertIn(needle, text)
 
+    def test_both_entrypoints_append_the_seat_report_reference(self):
+        reference = "claude/skills/co-review/references/seat-report.md"
+        loop = re.search(
+            r"^for seat in claude codex breaker verifier; do\n(.*?)^done$",
+            CO_REVIEW, re.M | re.S)
+        self.assertIsNotNone(loop)
+        self.assertIn('cat "$SEAT_REPORT" >>"$RUN_DIR/$seat.prompt"', loop.group(1))
+        self.assertIn(f'SEAT_REPORT="$REVIEW_ROOT/{reference}"', CO_REVIEW)
+        self.assertIn('test -s "$SEAT_REPORT" || exit 2', CO_REVIEW)
+        self.assertIn(reference, MIRROR)
+        text = (REPO / reference).read_text(encoding="utf-8")
+        for needle in ("```co-review-seat", "mktemp", "foreground", "functional_behavior", "exit_code"):
+            self.assertIn(needle, text)
+
+    def test_policy_and_entrypoints_state_the_seat_block_rules(self):
+        sentence = "The coordinator never writes a `co-review-seat` block for a seat."
+        self.assertIn(sentence, CO_REVIEW)
+        self.assertIn(sentence, MIRROR)
+        self.assertIn("co-review-seat", POLICY_FILE)
+
     def test_both_entrypoints_name_the_light_seats(self):
         for text in (CO_REVIEW, MIRROR):
             self.assertIn("light tier runs `codex` and `verifier`", text)

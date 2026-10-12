@@ -2104,6 +2104,216 @@ def advance(*, repo_slug, repo_path, runtime, task_id, session, fence, focus_fil
 
 
 
+def _gate_split(herdr_cli, pane_id, worktree, env):
+    """A fresh pane split off pane_id, for one gate attempt."""
+    split = _run_herdr(herdr_cli, ["pane", "split", pane_id, "--direction", "right",
+                                   "--no-focus", "--cwd", worktree], env=env)
+    pane = (split.get("pane") or {}).get("pane_id") if isinstance(split, dict) else None
+    if not isinstance(pane, str) or not pane:
+        raise DispatchError("pane split returned no pane id")
+    return pane
+
+
+def _gate_incomplete(phase, task_id, step, detail, **extra):
+    return {"status": "incomplete", "phase": phase, "task_id": task_id, "step": step,
+            "detail": str(detail)[:200], **extra}
+
+
+def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
+                          focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
+    if tier or prior_handoff:
+        raise DispatchError("--tier and --prior-handoff apply to the ship gate only")
+    worktree = task.get("worktree") or ""
+    _core_ok("should-dispatch-review", "--task-id", task_id, "--head-sha", head, ctx=ctx)
+    if task.get("review_head_sha"):
+        # launch() runs before the new pin is written; a kept pin would retire
+        # the fresh reviewer as the prior pin's review.
+        raise DispatchError("review_head_sha is set; clear it (stale-review-reset) first")
+    porcelain = core._git(worktree, "status", "--porcelain")
+    if porcelain is None or porcelain:
+        raise DispatchError("worktree is dirty")
+    base = task.get("base_sha") or ""
+    if head == base or core._git_ancestor(worktree, base, head) != "yes":
+        raise DispatchError("HEAD is not ahead of the task base")
+    impl = _last_row(task, "implement")
+    if impl is None:
+        raise DispatchError("no implement row to split the review pane from")
+    routes = core.read_config(rd).get("routes", {})
+    route = agent_runtime.resolve_route(
+        runtime, agent_runtime.role_for_step("implementation-review"), "normal",
+        {"routes": routes, "provisional": True})
+    if not route.get("ready"):
+        raise DispatchError("implementation-review route is not ready")
+    ws = impl.get("workspace_id") or ""
+    reviews = {w.get("launch_id") for w in task.get("workers", [])
+               if isinstance(w, dict) and w.get("phase") == "review"}
+    try:
+        swept = sweep(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                      workspace_id=ws, cwd=worktree, runtime=runtime, herdr_cli=herdr_cli,
+                      env=env, personal=personal)
+    except DispatchError as exc:
+        return _gate_incomplete("review", task_id, "sweep", exc)
+    live = [r.get("launch_id") for r in swept.get("rows", [])
+            if r.get("launch_id") in reviews and r.get("status") != "settled"]
+    if live:
+        return _gate_incomplete("review", task_id, "sweep",
+                                "a review row is still live: " + ", ".join(map(str, live)))
+    ok, rendered = _core_step("render-brief", "--task-id", task_id, "--phase", "review",
+                              "--focus-file", str(focus_file), ctx=ctx)
+    if not ok:
+        return _gate_incomplete("review", task_id, "render-brief", rendered)
+    brief = json.loads(rendered)
+    try:
+        pane = _gate_split(herdr_cli, impl["pane_id"], worktree, env)
+    except DispatchError as exc:
+        return _gate_incomplete("review", task_id, "pane-split", exc)
+    try:
+        launched = launch(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                          workspace_id=ws, pane_id=pane, phase="review", agent=brief["agent"],
+                          route=route, cwd=worktree, sandbox="read-only",
+                          prompt=core.read_payload_text(Path(brief["brief_path"])),
+                          herdr_cli=herdr_cli, env=env, personal=personal)
+    except DispatchError as exc:
+        return _gate_incomplete("review", task_id, "launch", exc, pane_id=pane)
+    if launched.get("status") != "launched":
+        return _gate_incomplete("review", task_id, "launch", launched.get("status"), pane_id=pane)
+    launch_id = launched.get("launch_id")
+    fenced = ("--session", session, "--fence", str(fence))
+    current = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    record = {**current, "status": "review-dispatched", "review_head_sha": head,
+              "note": f"review dispatched at {head[:7]}"}
+    ok, detail = _core_step("write-task", "--task-id", task_id, "--present", *fenced,
+                            "--json", json.dumps(record), ctx=ctx)
+    if not ok:
+        return _gate_incomplete("review", task_id, "write-task", detail,
+                                launch_id=launch_id, pane_id=pane)
+    index = {"repo_slug": repo_slug, "role": "review", "task_id": task_id}
+    ok, detail = _core_step("write-index", "--workspace", ws, *fenced,
+                            "--json", json.dumps(index), ctx=ctx)
+    if not ok:
+        return _gate_incomplete("review", task_id, "write-index", detail,
+                                launch_id=launch_id, pane_id=pane)
+    account = ["--runtime", runtime] + (["--personal"] if personal else [])
+    follow_up = [core._command(Path(core.__file__).resolve(), "review-deadlines",
+                               "--repo-slug", repo_slug, *account)]
+    if task.get("kind") == "jira":
+        follow_up.append("jira: transition to In Review (SKILL.md section 10)")
+    return {"status": "dispatched", "phase": "review", "task_id": task_id,
+            "launch_id": launch_id, "agent": brief["agent"], "pane_id": pane,
+            "brief_path": brief["brief_path"], "head_sha": head, "follow_up": follow_up}
+
+
+def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
+                        focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
+    if runtime != "claude":
+        raise DispatchError("the ship gate runs on the claude runtime")
+    if task.get("status") != "reviewed" or task.get("review_head_sha") != head:
+        raise DispatchError("ship needs a reviewed task whose review_head_sha is live HEAD")
+    worktree = task.get("worktree") or ""
+    impl = _last_row(task, "implement")
+    if impl is None:
+        raise DispatchError("no implement row to split the ship pane from")
+    routes = core.read_config(rd).get("routes", {})
+    route = agent_runtime.resolve_route("claude", "reviewer", "normal",
+                                        {"routes": routes, "provisional": True})
+    if not route.get("ready"):
+        raise DispatchError("reviewer route is not ready")
+    pinned_id = task.get("ship_launch_id")
+    pinned, stopped = None, False
+    if pinned_id:
+        pinned = next((w for w in task.get("workers", [])
+                       if isinstance(w, dict) and w.get("launch_id") == pinned_id), None)
+        if pinned is None:
+            raise DispatchError("ship_launch_id names no worker row")
+        state, record = _row_agent(herdr_cli, pinned, env)
+        if state == "unknown" or (state == "present" and record.get("agent_status") == "working"):
+            raise DispatchError("the pinned ship agent may still be running")
+        launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
+        stopped = launch_dir is None or core.read_ship_handoff(launch_dir, pinned_id) is None
+    if stopped:
+        if task.get("ship_relaunch_head") == task["review_head_sha"]:
+            raise DispatchError("relaunch budget spent for this head; park the task")
+        if tier == "delta":
+            raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
+        tier = "full"
+    ws = impl.get("workspace_id") or ""
+    fenced = ("--session", session, "--fence", str(fence))
+    args = ["--task-id", task_id, "--phase", "ship", "--focus-file", str(focus_file)]
+    if tier:
+        args += ["--tier", tier]
+    if prior_handoff:
+        args += ["--prior-handoff", str(prior_handoff)]
+    ok, rendered = _core_step("render-brief", *args, ctx=ctx)
+    if not ok:
+        return _gate_incomplete("ship", task_id, "render-brief", rendered)
+    brief = json.loads(rendered)
+    if stopped:
+        record = {**task, "ship_relaunch_head": task["review_head_sha"]}
+        ok, detail = _core_step("write-task", "--task-id", task_id, *fenced,
+                                "--json", json.dumps(record), ctx=ctx)
+        if not ok:
+            return _gate_incomplete("ship", task_id, "write-task", detail)
+    try:
+        pane = _gate_split(herdr_cli, impl["pane_id"], worktree, env)
+    except DispatchError as exc:
+        return _gate_incomplete("ship", task_id, "pane-split", exc)
+    try:
+        launched = launch(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                          workspace_id=ws, pane_id=pane, phase="ship", agent=brief["agent"],
+                          route=route, cwd=worktree, sandbox="read-only",
+                          prompt=core.read_payload_text(Path(brief["brief_path"])),
+                          herdr_cli=herdr_cli, env=env, personal=personal)
+    except DispatchError as exc:
+        return _gate_incomplete("ship", task_id, "launch", exc, pane_id=pane)
+    if launched.get("status") != "launched":
+        return _gate_incomplete("ship", task_id, "launch", launched.get("status"), pane_id=pane)
+    launch_id = launched.get("launch_id")
+    current = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    ok, detail = _core_step("write-task", "--task-id", task_id, "--present", *fenced,
+                            "--json", json.dumps({**current, "ship_launch_id": launch_id}),
+                            ctx=ctx)
+    if not ok:
+        return _gate_incomplete("ship", task_id, "write-task", detail,
+                                launch_id=launch_id, pane_id=pane)
+    settled = []
+    if pinned is not None:
+        try:
+            settled.append(settle(repo_slug=repo_slug, task_id=task_id, session=session,
+                                  fence=fence, workspace_id=pinned.get("workspace_id") or ws,
+                                  launch_id=pinned_id, cwd=worktree, runtime=runtime,
+                                  herdr_cli=herdr_cli, env=env, personal=personal))
+        except DispatchError as exc:
+            settled.append({"launch_id": pinned_id, "status": "error", "detail": str(exc)[:200]})
+    return {"status": "dispatched", "phase": "ship", "task_id": task_id,
+            "launch_id": launch_id, "agent": brief["agent"], "pane_id": pane,
+            "brief_path": brief["brief_path"], "head_sha": head, "follow_up": [],
+            "settle": settled}
+
+
+def dispatch_gate(*, repo_slug, repo_path, runtime, task_id, session, fence, phase, focus_file,
+                  tier=None, prior_handoff=None, personal=False, herdr_cli="herdr", env=None):
+    """Dispatch or re-dispatch a review or ship gate (references/dispatch-adapter.md)."""
+    if not core.valid_task_id(task_id):
+        raise DispatchError("invalid task identity")
+    gates = {"review": _dispatch_review_gate, "ship": _dispatch_ship_gate}
+    if phase not in gates:
+        raise DispatchError("dispatch-gate phase must be review or ship")
+    child_env, _repository, _scope, rd = _repo_context(
+        repo_slug, repo_path, runtime, personal, env, "dispatch-gate")
+    if not Path(focus_file).is_file():
+        raise DispatchError(f"focus file missing: {focus_file}")
+    ctx = {"repo_slug": repo_slug, "repo_path": str(repo_path), "runtime": runtime,
+           "personal": personal, "env": child_env}
+    task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    head = core._git(task.get("worktree") or "", "rev-parse", "HEAD")
+    if not head:
+        raise DispatchError("cannot read the task worktree HEAD")
+    return gates[phase](ctx=ctx, rd=rd, task=task, head=head, repo_slug=repo_slug,
+                        task_id=task_id, session=session, fence=fence, focus_file=focus_file,
+                        tier=tier, prior_handoff=prior_handoff, runtime=runtime,
+                        personal=personal, herdr_cli=herdr_cli, env=child_env)
+
+
 def runtime_main(argv: list[str] | None = None) -> int:
     from herdr_dispatch_cli import runtime_main as cli_runtime_main
 

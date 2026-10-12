@@ -57,6 +57,12 @@ _CHECKLIST = (
 )
 _SEVERITIES = {"critical", "high", "major", "minor", "low", "nit", "advisory"}
 _MATERIAL = {"critical", "high", "major"}
+_DISPOSITIONS = {"confirmed", "refuted", "unresolved"}
+_SEAT_VERDICTS = {"APPROVE", "CHANGES", "INCOMPLETE"}
+SEAT_REPORT_FENCE = "co-review-seat"
+SEAT_REPORT_KEYS = ("seat", "verdict", "findings", "coverage", "tests")
+_SEAT_BLOCK_RE = re.compile(
+    r"^```" + SEAT_REPORT_FENCE + r"[ \t]*\n(.*?)\n```[ \t]*$", re.M | re.S)
 
 
 def _load_sibling(name: str):
@@ -93,30 +99,102 @@ def _sha(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA_RE.fullmatch(value))
 
 
-def _seat_content_ok(content: bytes, artifact: str, name: str, reasons: list[str]) -> None:
-    """Refuse a failed runner result or a usage-limit refusal; .json means runner JSON."""
+def _seat_content_ok(content: bytes, artifact: str, name: str, reasons: list[str]) -> str | None:
+    """Refuse a failed runner result or a usage-limit refusal; .json means runner JSON.
+
+    Returns the seat's report text (runner result, or the file) for the block parse.
+    """
     refusal = _load_runner().usage_limit_refusal
     if not artifact.endswith(".json"):
-        if refusal(content.decode("utf-8", errors="replace")):
+        text = content.decode("utf-8", errors="replace")
+        if refusal(text):
             reasons.append(f"seat {name} result is a usage-limit refusal")
-        return
+        return text
     try:
         payload = json.loads(content.decode("utf-8"))
     except ValueError:
         payload = None
     if not isinstance(payload, dict) or not {"runtime", "status"} <= payload.keys():
         reasons.append(f"seat {name} artifact is not runner JSON")
-        return
+        return None
     if payload["status"] != "success":
         reasons.append(f"seat {name} runner status is not success")
     if refusal(payload.get("result")):
         reasons.append(f"seat {name} result is a usage-limit refusal")
+    result = payload.get("result")
+    return result if isinstance(result, str) else ""
 
 
-def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> None:
+def _finding_item_ok(finding: object) -> bool:
+    """True for a finding object with the required nonempty fields and enum values."""
+    return (
+        isinstance(finding, dict)
+        and all(_nonempty(finding.get(key))
+                for key in ("id", "severity", "disposition", "scenario", "evidence"))
+        and finding["severity"] in _SEVERITIES
+        and finding["disposition"] in _DISPOSITIONS
+    )
+
+
+def _seat_body_invalid(body: object, name: str) -> str | None:
+    """The first failing key of a seat block body, else None."""
+    if not isinstance(body, dict) or set(body) != set(SEAT_REPORT_KEYS):
+        return "body"
+    if body["seat"] != name:
+        return "seat"
+    if body["verdict"] not in _SEAT_VERDICTS:
+        return "verdict"
+    findings = body["findings"]
+    if (not isinstance(findings, list) or not all(_finding_item_ok(f) for f in findings)
+            or len({f["id"] for f in findings}) != len(findings)):
+        return "findings"
+    coverage = body["coverage"]
+    if not isinstance(coverage, dict) or set(coverage) != {"architecture", "checklist"}:
+        return "coverage"
+    for group, required in (("architecture", _AXES), ("checklist", _CHECKLIST)):
+        entries = coverage[group]
+        if (not isinstance(entries, dict) or set(entries) != set(required)
+                or not all(_nonempty(value) for value in entries.values())):
+            return "coverage"
+    tests = body["tests"]
+    if not isinstance(tests, list) or not all(
+        isinstance(test, dict)
+        and set(test) == {"command", "exit_code", "result"}
+        and _nonempty(test["command"])
+        and isinstance(test["exit_code"], int) and not isinstance(test["exit_code"], bool)
+        and _nonempty(test["result"])
+        for test in tests
+    ):
+        return "tests"
+    return None
+
+
+def _seat_report(text: str, name: str, reasons: list[str]) -> dict | None:
+    """The validated co-review-seat block in a seat's report text, else a reason and None."""
+    blocks = _SEAT_BLOCK_RE.findall(text)
+    if not blocks:
+        reasons.append(f"seat {name} structured report is missing")
+        return None
+    if len(blocks) > 1:
+        reasons.append(f"seat {name} structured report is ambiguous")
+        return None
+    try:
+        body = json.loads(blocks[0])
+    except ValueError:
+        body = None
+    bad = _seat_body_invalid(body, name)
+    if bad is not None:
+        reasons.append(f"seat {name} structured report is invalid: {bad}")
+        return None
+    return body
+
+
+def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> dict | None:
+    """Check a seat artifact; return its parsed block when every existing check passed."""
+    before = len(reasons)
     if not isinstance(entry, dict):
         reasons.append(f"seat {name} is invalid")
-        return
+        return None
     if entry.get("status") != "complete":
         reasons.append(f"seat {name} is not complete")
     for field in ("artifact", "sha256", "runtime", "model", "effort"):
@@ -124,19 +202,22 @@ def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> No
             reasons.append(f"seat {name} {field} is invalid")
     artifact, expected = entry.get("artifact"), entry.get("sha256")
     if not isinstance(artifact, str) or not isinstance(expected, str):
-        return
+        return None
     try:
         path = (root / artifact).resolve()
         path.relative_to(root.resolve())
         content = path.read_bytes()
     except (OSError, ValueError):
         reasons.append(f"seat {name} artifact cannot be read")
-        return
+        return None
     if not content.strip():
         reasons.append(f"seat {name} artifact is empty")
     if hashlib.sha256(content).hexdigest() != expected:
         reasons.append(f"seat {name} artifact digest does not match")
-    _seat_content_ok(content, artifact, name, reasons)
+    text = _seat_content_ok(content, artifact, name, reasons)
+    if len(reasons) != before or text is None:
+        return None
+    return _seat_report(text, name, reasons)
 
 
 def _substitute_cause(seat: dict, root: Path) -> tuple[str | None, Path | None]:
@@ -315,6 +396,19 @@ def _coverage(report: dict, reasons: list[str], visible: list[str]) -> None:
                 visible.append(f"coverage {label} has an accepted nonmaterial gap")
 
 
+def _test_evidence(report: dict, blocks: dict, required: tuple, reasons: list[str]) -> None:
+    """A string functional_behavior entry needs a test from every seat; a gap object is
+    judged by _coverage."""
+    coverage = report.get("coverage")
+    checklist = coverage.get("checklist") if isinstance(coverage, dict) else None
+    if not isinstance(checklist, dict) or not _nonempty(checklist.get("functional_behavior")):
+        return
+    for name in required:
+        block = blocks.get(name)
+        if block is not None and not block["tests"]:
+            reasons.append(f"coverage functional_behavior lacks test evidence from seat {name}")
+
+
 def _findings(report: dict, expected: dict, reasons: list[str]) -> bool:
     changes = False
     findings = report.get("findings")
@@ -323,17 +417,10 @@ def _findings(report: dict, expected: dict, reasons: list[str]) -> bool:
         return changes
     ids = set()
     for finding in findings:
-        if not isinstance(finding, dict) or not all(
-            _nonempty(finding.get(key))
-            for key in ("id", "severity", "disposition", "scenario", "evidence")
-        ):
+        if not _finding_item_ok(finding):
             reasons.append("finding is invalid")
             continue
-        if (
-            finding["id"] in ids
-            or finding["severity"] not in _SEVERITIES
-            or finding["disposition"] not in {"confirmed", "refuted", "unresolved"}
-        ):
+        if finding["id"] in ids:
             reasons.append(f"finding {finding['id']} is invalid")
             continue
         ids.add(finding["id"])
@@ -501,11 +588,14 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     if required is None:
         reasons.append("report class is invalid")
     seats = report.get("seats")
+    blocks: dict[str, dict] = {}
     if required is None or not isinstance(seats, dict) or set(seats) != set(required):
         reasons.append("required seats are missing")
     else:
         for name in required:
-            _artifact_ok(seats[name], artifact_root, name, reasons)
+            block = _artifact_ok(seats[name], artifact_root, name, reasons)
+            if block is not None:
+                blocks[name] = block
         substituted = _substitutes(tier, seats, artifact_root, reasons, visible)
         if tier == "light":
             runtimes = set()
@@ -536,6 +626,7 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     elif "delta" in report or "delta" in expected:
         reasons.append("delta block on a non-delta class")
     _coverage(report, reasons, visible)
+    _test_evidence(report, blocks, required or (), reasons)
     changes = _findings(report, expected, reasons)
     source = report.get("preconditions")
     if (
@@ -912,8 +1003,26 @@ def schema() -> dict:
         "seat_artifact_must_show": (
             "a .json seat artifact is runner JSON with runtime and status keys "
             "and status success; no seat artifact, runner result or native "
-            "text, may open with a usage-limit refusal notice"
+            "text, may open with a usage-limit refusal notice; the seat's "
+            "report text holds exactly one co-review-seat block"
         ),
+        "seat_report": {
+            "fence": SEAT_REPORT_FENCE,
+            "keys": list(SEAT_REPORT_KEYS),
+            "seat": "the seat's name in the report",
+            "verdict": sorted(_SEAT_VERDICTS),
+            "findings": "list of finding_fields objects, unique ids",
+            "coverage": {"architecture": list(_AXES), "checklist": list(_CHECKLIST)},
+            "tests": {
+                "command": "nonempty string",
+                "exit_code": "int",
+                "result": "nonempty string",
+            },
+            "functional_behavior": (
+                "a report string entry needs a nonempty tests list from every seat; "
+                "otherwise record an accepted gap"
+            ),
+        },
         "codex_substitute": {
             "seats": {k: list(v) for k, v in _CODEX_SEATS.items()},
             "reasons": list(_SUBSTITUTE_REASONS),

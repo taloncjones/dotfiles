@@ -718,15 +718,17 @@ def launch_argv(
     if route.get("add_dirs"):
         raise RouteError("add_dirs are supported only for Codex routes")
 
-    permission_modes = {"read-only": "plan", "workspace-write": "auto"}
+    permission_modes = {"read-only": "auto", "workspace-write": "auto"}
     if sandbox not in permission_modes:
         raise RouteError(
             "Claude cannot enforce danger-full-access as a sandbox setting"
         )
     argv = ["claude", "--model", model, "--effort", effort]
-    if sandbox == "read-only" and mode == "interactive":
-        # Plan mode's two approval menus strand an interactive reviewer; deny
-        # file-tool writes under the cwd instead ("//" marks an absolute path).
+    if sandbox == "read-only":
+        # Plan mode strands an interactive reviewer on approval menus and makes
+        # a headless one refuse any command that writes (even a temp-dir test
+        # run); deny file-tool writes under the cwd instead ("//" marks an
+        # absolute path).
         if not os.path.isabs(selected_cwd) or any(ch in selected_cwd for ch in "*?[]()\\"):
             raise RouteError("read-only Claude cwd cannot be expressed as a deny rule")
         deny = [f"Edit(/{selected_cwd}/**)", f"Write(/{selected_cwd}/**)"]

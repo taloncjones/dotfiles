@@ -3660,11 +3660,13 @@ NEXT_ACTIONS = {
     "confirm-review": ("run", "accept-review"),
     "exit-idle-worker": ("run", "settle"),
     "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
-    "dispatch-review": ("read", "SKILL.md section 5"),
+    "dispatch-review": ("read", "SKILL.md section 5: write the focus file, then "
+                                "dispatch-gate --phase review"),
     "stale-review-reset": ("read", "SKILL.md section 4 (stale-review-reset)"),
     "unblocked": ("read", "SKILL.md section 9 (blocked -> in-progress)"),
     "mech-ledger": ("read", "SKILL.md section 4 (run-mech worker)"),
-    "ship": ("read", "SKILL.md section 6 (ship step)"),
+    "ship": ("read", "SKILL.md section 6 ship step: merge-ready, then "
+                     "dispatch-gate --phase ship"),
     "unknown": ("read", "SKILL.md section 4 (full reconciliation)"),
     "changes-requested": ("ask", "Review at {head7} requested changes: render a repair brief "
                                  "(SKILL.md section 5 step 6), or return the task to design?"),

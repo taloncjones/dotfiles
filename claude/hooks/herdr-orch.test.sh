@@ -12694,7 +12694,11 @@ assert c.next_line({}, facts, ctx) == ("  next: ask Review at abcdef0 requested 
 facts.update(action="paused", head=None)
 assert c.next_line({}, facts, ctx) == "  next: ask Attempt paused at unknown: relaunch, re-brief, or stop?"
 facts["action"] = "dispatch-review"
-assert c.next_line({}, facts, ctx) == "  next: read SKILL.md section 5"
+assert c.next_line({}, facts, ctx) == ("  next: read SKILL.md section 5: write the focus file, "
+                                       "then dispatch-gate --phase review"), c.next_line({}, facts, ctx)
+facts["action"] = "ship"
+assert c.next_line({}, facts, ctx) == ("  next: read SKILL.md section 6 ship step: merge-ready, "
+                                       "then dispatch-gate --phase ship"), c.next_line({}, facts, ctx)
 PY
 
 check "next: output is checkin output plus next lines" <<'PY'
