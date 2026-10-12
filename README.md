@@ -173,7 +173,7 @@ dotfiles/
 │   ├── identity-setup   # Interactive wizard to write machine-local work identity
 │   └── setup-claude     # Add CLAUDE.md/.claude to .git/info/exclude in any repo
 ├── claude/           # Claude Code configuration
-│   ├── CLAUDE.md           # Global instructions
+│   ├── global-instructions.md  # Global instructions (installed as ~/.claude/CLAUDE.md)
 │   ├── settings.json.tmpl  # Settings template (seeded to ~/.claude/settings.json on first install)
 │   ├── commands/           # Custom slash commands
 │   └── hooks/              # Pre/post tool hooks

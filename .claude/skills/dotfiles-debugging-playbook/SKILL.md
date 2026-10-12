@@ -224,7 +224,7 @@ Reading `commit_guard.py` behavior before deciding what to do:
 When is a bypass legitimate? Almost never. Decision rule:
 
 - Blocked for AI attribution or emoji: NOT legitimate -- reword. These are the
-  repo's non-negotiables (claude/CLAUDE.md "Strict Rules").
+  repo's non-negotiables (claude/global-instructions.md "Strict Rules").
 - Blocked for a prohibited term used descriptively (e.g. a commit about the
   claude() wrapper body text): reword to keep the term in the scope prefix or
   out of the message; put detail in the PR body.

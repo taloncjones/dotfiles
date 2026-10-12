@@ -635,10 +635,10 @@ link_claude_config_dir() {
     fi
   done
   rm -rf "$cdir"/commands "$cdir"/agents "$cdir"/hooks "$cdir"/interview
-  ln -sf "$DOTFILEDIR"/claude/CLAUDE.md "$cdir"/CLAUDE.md
+  ln -sf "$DOTFILEDIR"/claude/global-instructions.md "$cdir"/CLAUDE.md
 
   # Standing operating principles: the committed, model-agnostic discipline file
-  # that CLAUDE.md @imports into every session.
+  # that global-instructions.md @imports into every session.
   ln -sf "$DOTFILEDIR"/claude/operating-principles.md "$cdir"/operating-principles.md
 
   # Optional per-model audit deep-dives are local-only and gitignored (they hold

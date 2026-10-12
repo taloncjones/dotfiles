@@ -35,7 +35,7 @@ section "claude assets ($CLAUDE_DIR)"
 
 DOTFILES=""
 if [ -L "$CLAUDE_DIR/CLAUDE.md" ] && [ -e "$CLAUDE_DIR/CLAUDE.md" ]; then
-  # Derive the dotfiles root from the anchor link: <root>/claude/CLAUDE.md
+  # Derive the dotfiles root from the anchor link: <root>/claude/global-instructions.md
   DOTFILES="$(dirname "$(dirname "$(readlink "$CLAUDE_DIR/CLAUDE.md")")")"
   if [ -f "$DOTFILES/bootstrap-cloud.sh" ]; then
     ok "CLAUDE.md links into dotfiles checkout at $DOTFILES"
