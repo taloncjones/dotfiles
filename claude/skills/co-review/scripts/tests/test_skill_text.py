@@ -213,7 +213,7 @@ class CoReviewSkillText(unittest.TestCase):
         probes = CO_REVIEW.index('>"$RUN_DIR/probe-codex-reviewer.json" &')
         probe_record = CO_REVIEW.index('"$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-probes.json"')
         failure_check = CO_REVIEW.index('probe-*.json <<')
-        finders = CO_REVIEW.index('>"$RUN_DIR/codex.runtime.json" &')
+        finders = CO_REVIEW.index('>"$RUN_DIR/codex.runtime.json" 2>"$RUN_DIR/codex.runtime.err" &')
         seat_record = CO_REVIEW.index('>"$RUN_DIR/codex-quota-seats.json"')
         verifier = CO_REVIEW.index('--prompt-file "$RUN_DIR/verifier.prompt"')
         self.assertLess(check, probes)
