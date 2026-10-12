@@ -311,6 +311,11 @@ severity floors, or automatic fix-and-repeat loops. Follow-up verification
 covers repairs and affected contracts using the prior coverage rules above.
 Structural or scope changes requiring a new full review stop for a user decision; they do not escape the original workflow allowance.
 
+Each seat's report ends with one `co-review-seat` block (seat, verdict,
+findings, coverage, tests). The evaluator counts a seat only with a valid
+block, and counts `functional_behavior` coverage only when every seat's block
+lists at least one test it ran; otherwise record an accepted gap.
+
 Coverage is separate from findings. Supply evidence or an explicit gap for each
 architecture axis:
 
