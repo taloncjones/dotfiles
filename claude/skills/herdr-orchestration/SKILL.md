@@ -809,16 +809,8 @@ check-in report while it holds, with no mutating retry.
    moves it on (one exception below): then `write-task` the record with
    `ship_launch_id: null` (every other field carried), and section 6
    dispatches afresh.
-   Host-sleep re-gate (owner standing request, 2026-10-12): treat an
-   `INCOMPLETE` handoff as if the human asked for a re-gate, with the same
-   `write-task`, only when all of these hold: (a) the task's live HEAD
-   equals the gate's reviewed head; (b) the gate's ship launch `started`
-   time is earlier than `sysctl -n kern.waketime`; (c) every report reason
-   is `seat <name> runner status is not success`, and each named seat's
-   runner JSON has `timed_out: true` and a file write time at or after that
-   wake. Anything else waits for the human: any other reason, a seat that
-   failed without `timed_out`, a seat result written before the wake, or an
-   unreadable wake time, launch time or seat result.
+   Host-sleep re-gate (`INCOMPLETE` from seats that timed out across a
+   sleep, same head): `references/director-launch.md`, Host-sleep re-gate.
 1. `APPROVE`: write `gh pr view <n> --json number,state,isDraft,mergeable,headRefOid,baseRefName,baseRefOid,statusCheckRollup`
    and `gh repo view --json nameWithOwner,defaultBranchRef` to the
    scratchpad, then

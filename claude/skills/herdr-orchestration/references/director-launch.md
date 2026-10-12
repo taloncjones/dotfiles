@@ -130,3 +130,16 @@ Rules:
   The default watch fires on completion-record, think-answer, and
   mech-ledger writes; the hook pushes on completion-record changes and
   blocks; an ordinary worker turn end produces neither.
+
+## Host-sleep re-gate (section 6a step 0)
+
+Host-sleep re-gate (owner standing request, 2026-10-12): treat an
+`INCOMPLETE` handoff as if the human asked for a re-gate, with the same
+`write-task`, only when all of these hold: (a) the task's live HEAD
+equals the gate's reviewed head; (b) the gate's ship launch `started`
+time is earlier than `sysctl -n kern.waketime`; (c) every report reason
+is `seat <name> runner status is not success`, and each named seat's
+runner JSON has `timed_out: true` and a file write time at or after that
+wake. Anything else waits for the human: any other reason, a seat that
+failed without `timed_out`, a seat result written before the wake, or an
+unreadable wake time, launch time or seat result.
