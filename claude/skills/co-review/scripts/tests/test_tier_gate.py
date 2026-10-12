@@ -57,12 +57,23 @@ def artifact(root: Path, name: str, body: str) -> dict:
     return {"artifact": name, "sha256": sha256(root / name)}
 
 
+def seat_text(name: str) -> str:
+    """Seat report text ending in one valid co-review-seat block with one test."""
+    body = {
+        "seat": name, "verdict": "APPROVE", "findings": [],
+        "coverage": {"architecture": {k: "checked" for k in AXES},
+                     "checklist": {k: "checked" for k in CHECKLIST}},
+        "tests": [{"command": "sh tests/run.sh", "exit_code": 0, "result": "12 passed"}],
+    }
+    return f"{name} ok\n\n```co-review-seat\n{json.dumps(body)}\n```\n"
+
+
 def write_run(run: Path, run_id: str, head: str, tier: str, seats: tuple[str, ...],
               runtime: str = "claude") -> tuple[dict, dict]:
     """A complete gate report and expected identity for head (data, not flow)."""
     run.mkdir(parents=True, exist_ok=True)
     seat_entries = {
-        name: {"status": "complete", **artifact(run, f"{name}.txt", f"{name} ok\n"),
+        name: {"status": "complete", **artifact(run, f"{name}.txt", seat_text(name)),
                "runtime": runtime, "model": "unknown", "effort": "unknown"}
         for name in seats
     }
