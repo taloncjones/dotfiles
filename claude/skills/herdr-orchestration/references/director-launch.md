@@ -50,6 +50,9 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   (`zsh/claude-account.zsh`), which runs `claude --agent director
 --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' --permission-mode auto`
   through the account-routing wrapper and refuses outside a herdr pane.
+  When `caffeinate` is on PATH the launch runs under `caffeinate -i -w
+  <launch subshell pid>`, so the host stays awake for exactly the life of
+  the director.
   Auto mode is the documented launch; an explicit `--permission-mode`
   argument overrides it. Nothing in the director flow assumes a
   permission mode; the rollover hook runs in every mode.
