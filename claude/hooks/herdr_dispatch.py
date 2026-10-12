@@ -820,6 +820,12 @@ def launch(
         base = rd / "leads" / binding
     pending_task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
     _validate_task_context(pending_task, repository, repo_slug)
+    if phase == "ship" and any(
+            isinstance(w, dict) and w.get("pane_id") == pane_id and w.get("phase") != "ship"
+            for w in pending_task.get("workers", [])):
+        # Settle never closes a pane an implementer or reviewer used, so a
+        # gate there would outlive its verdict.
+        raise DispatchError("a ship launch needs its own pane: split one in the task workspace")
     if binding is not None and phase == "review":
         head = pending_task.get("review_head_sha")
         if not isinstance(head, str) or head != repository["head"]:
@@ -1574,8 +1580,14 @@ def _agents_snapshot(herdr_cli, env):
 
 def _snapshot(herdr_cli, workspace_id, env):
     agents = _agents_snapshot(herdr_cli, env)
-    panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
-                       env=env).get("panes")
+    try:
+        panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
+                           env=env).get("panes")
+    except DispatchError as exc:
+        # A workspace settle (or the owner) already closed has no panes left.
+        if not str(exc).endswith(": workspace_not_found"):
+            raise
+        panes = []
     if not isinstance(panes, list):
         raise DispatchError("herdr agent or pane list is malformed")
     return (agents,
@@ -1678,13 +1690,17 @@ def _pane_verdict(task, row, agents, panes, reasons):
     pane_id = row["pane_id"]
     if pane_id not in [p.get("pane_id") for p in panes]:
         return "absent"
+    # Only this task's gate rows in the workspace: no implementer pane to keep.
+    gate_only = all(w.get("phase") == "ship" for w in task["workers"]
+                    if isinstance(w, dict) and w.get("workspace_id") == row.get("workspace_id"))
     # Distinct ids: herdr can list one pane twice.
-    if len(_pane_ids(panes)) < 2:
+    last = len(_pane_ids(panes)) < 2
+    if last and not gate_only:
         return "kept-last-pane"
     sharing = [i for i, w in enumerate(task["workers"])
                if isinstance(w, dict) and w.get("pane_id") == pane_id]
     # The first row's pane is the workspace root; a repair may still follow.
-    if pane_id == task["workers"][0].get("pane_id"):
+    if not gate_only and pane_id == task["workers"][0].get("pane_id"):
         return "kept-shared"
     if not all(core.row_releases_pane(task, i, reasons(i)) for i in sharing):
         return "kept-shared"
@@ -1692,7 +1708,7 @@ def _pane_verdict(task, row, agents, panes, reasons):
         return "kept-unsettled"
     if _other_occupants(agents, row):
         return "kept-occupied"
-    return "close"
+    return "close-workspace" if last else "close"
 
 
 def _pane_idle(herdr_cli, pane_id, env):
@@ -1741,6 +1757,21 @@ def _mark_exit_requested(task_path, task, index, reason):
     core.write_json_atomic(task_path, task)
 
 
+def _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
+    """True only when herdr reports the workspace's checkout is the task worktree."""
+    worktree = task.get("worktree")
+    if not isinstance(worktree, str) or not worktree:
+        return False
+    try:
+        workspace = _run_herdr(herdr_cli, ["workspace", "get", workspace_id],
+                               env=env).get("workspace")
+    except DispatchError:
+        return False
+    tree = workspace.get("worktree") if isinstance(workspace, dict) else None
+    checkout = tree.get("checkout_path") if isinstance(tree, dict) else None
+    return _same_directory(checkout, worktree)
+
+
 def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env):
     row = task["workers"][index]
     reason = reasons(index)
@@ -1767,15 +1798,16 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
             # freshest one before deciding whether to close.
             agent = "still-live"
     pane = _pane_verdict(task, row, agents, panes, reasons)
-    if pane == "close" and agent == "still-live":
+    closing = pane in ("close", "close-workspace")
+    if closing and agent == "still-live":
         # The agent never actually exited; keep the pane rather than close
         # one whose agent is still working.
         pane = "kept-occupied"
-    elif pane == "close" and not _await_pane_idle(herdr_cli, row["pane_id"], env):
+    elif closing and not _await_pane_idle(herdr_cli, row["pane_id"], env):
         # No registered agent is live, but an untracked live process (the
         # user's own shell command) could still occupy the pane.
         pane = "kept-occupied"
-    elif pane == "close":
+    elif closing:
         # herdr has no compare-and-close; re-read right before closing and
         # keep the pane on any change since the verdict snapshot.
         fresh_agents, fresh_panes = _snapshot(herdr_cli, workspace_id, env)
@@ -1785,10 +1817,20 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
             agent, pane = "still-live", "kept-occupied"
         elif _other_occupants(fresh_agents, row):
             pane = "kept-occupied"
+        elif pane == "close-workspace":
+            if _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
+                # Never pass the group flag: it also closes linked worktree workspaces.
+                _run_herdr(herdr_cli, ["workspace", "close", workspace_id], env=env,
+                           json_result=False)
+                pane = "workspace-closed"
+            else:
+                pane = "kept-workspace-unverified"
         else:
             _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
             pane = "closed"
-    status = "exit-incomplete" if agent == "still-live" and pane != "closed" else "settled"
+    status = ("exit-incomplete"
+              if agent == "still-live" and pane not in ("closed", "workspace-closed")
+              else "settled")
     return {**base, "status": status, "agent": agent, "pane": pane}
 
 
