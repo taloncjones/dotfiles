@@ -59,6 +59,7 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   Same for "not X, but Y" reversals, rule-of-three summaries, and
   labeled tradeoff callouts ("Cost accepted:", "The catch:"); they
   read as AI-generated. Applies everywhere: chat, tickets, PRs, docs.
+- Writing style per text kind: `~/.claude/rules/personal/writing-style.md`.
 
 **Stand-alone messages:** the body of every message must read without the
 session in the reader's head -- paste-safe into Slack, a PR thread, or Jira.
