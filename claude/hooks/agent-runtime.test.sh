@@ -688,7 +688,9 @@ def test_slim_boot_roles_launch_without_mcp_servers():
             "--effort",
             effort,
             "--permission-mode",
-            "plan",
+            "auto",
+            "--settings",
+            settings,
             "--strict-mcp-config",
             "-p",
             "--output-format",
@@ -706,6 +708,16 @@ def test_interactive_read_only_rejects_glob_cwd():
         except runtime.RouteError:
             continue
         raise AssertionError(bad)
+
+
+def test_headless_read_only_rejects_glob_cwd():
+    route = runtime.resolve_route("claude", "reviewer", config={"provisional": True})
+    try:
+        runtime.launch_argv(route, "/tmp/a*b", "read-only", mode="headless",
+                            scope={"personal_repository": False})
+    except runtime.RouteError:
+        return
+    raise AssertionError("headless glob cwd accepted")
 
 
 def test_interactive_read_only_settings_parse_to_two_deny_rules():
@@ -811,7 +823,10 @@ def test_bounded_run_passes_strict_mcp_config_for_reviewer():
             "--effort",
             "high",
             "--permission-mode",
-            "plan",
+            "auto",
+            "--settings",
+            json.dumps({"permissions": {"deny": [
+                f"Edit(/{repo}/**)", f"Write(/{repo}/**)"]}}),
             "--strict-mcp-config",
             "-p",
             "--output-format",
@@ -2880,7 +2895,8 @@ for name, test in (
     ("native Claude and Codex argv are exact", test_native_argv_mappings_are_exact),
     ("slim boot roles launch without MCP servers", test_slim_boot_roles_launch_without_mcp_servers),
     ("interactive read-only rejects a glob cwd", test_interactive_read_only_rejects_glob_cwd),
-    ("interactive read-only settings parse to two deny rules", test_interactive_read_only_settings_parse_to_two_deny_rules),
+    ("headless read-only rejects a glob cwd", test_headless_read_only_rejects_glob_cwd),
+    ("interactive read-only settings parse to two deny rules",test_interactive_read_only_settings_parse_to_two_deny_rules),
     ("full boot roles and Codex keep MCP servers", test_full_boot_roles_and_codex_keep_mcp_servers),
     ("bounded reviewer run passes strict MCP config", test_bounded_run_passes_strict_mcp_config_for_reviewer),
     ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
