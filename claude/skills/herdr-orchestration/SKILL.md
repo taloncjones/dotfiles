@@ -806,11 +806,11 @@ check-in report while it holds, with no mutating retry.
    `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
    report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff
    turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
-   moves it on (one exception below): then `write-task` the record with
-   `ship_launch_id: null` (every other field carried), and section 6
-   dispatches afresh.
-   Host-sleep re-gate (`INCOMPLETE` from seats that timed out across a
-   sleep, same head): `references/director-launch.md`, Host-sleep re-gate.
+   moves it on: then `write-task` the record with `ship_launch_id: null`
+   (every other field carried), and section 6 dispatches afresh.
+   Host-sleep re-gate, else the human: same HEAD, ship launch `started` before
+   `sysctl -n kern.waketime`, all reasons `runner status is not success` with
+   `timed_out` (`references/director-launch.md`).
 1. `APPROVE`: write `gh pr view <n> --json number,state,isDraft,mergeable,headRefOid,baseRefName,baseRefOid,statusCheckRollup`
    and `gh repo view --json nameWithOwner,defaultBranchRef` to the
    scratchpad, then
