@@ -417,14 +417,15 @@ want = [
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
+    "~/.claude/hooks/signer_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template lists the Bash guards in order, planning_artifact_guard last\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, signer_guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template lists the Bash guards in order, planning_artifact_guard last\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, signer_guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -1251,6 +1252,7 @@ want_bash = [
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
+    "~/.claude/hooks/signer_guard.py",
 ]
 ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
       and ours[0]["hooks"] == [{"type": "command",
