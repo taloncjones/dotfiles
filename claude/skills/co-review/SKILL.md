@@ -512,10 +512,6 @@ if [ "$CLASS" = "full" ]; then
 fi
 ```
 
-```bash
-uv run --no-project python "$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-seats.json" || true
-```
-
 The Claude invocation preserves the original repository's selected account;
 the runtime runner resolves it rather than an inherited snapshot account. A
 Codex-led controller creates a native fresh Codex seat through this runner and
@@ -524,6 +520,14 @@ reference skills under the canonical policy and requires the reviewer to do
 the review itself. It must not launch another review workflow, delegate
 reviewers, invoke a partner, post feedback, fix code, or act outside disposable
 fixtures.
+
+Record the seat usage-limit marker only after the finder collect pass prints
+`collected`, when the seat runtime files are final, and before the verifier
+launch:
+
+```bash
+uv run --no-project python "$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-seats.json" || true
+```
 
 After every finder artifact exists (full: `claude`, `codex`, `breaker`; light:
 `codex`; delta: `claude`; lessons: none, so the verifier starts

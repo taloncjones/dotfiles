@@ -213,13 +213,16 @@ class CoReviewSkillText(unittest.TestCase):
         probes = CO_REVIEW.index('>"$RUN_DIR/probe-codex-reviewer.json" &')
         probe_record = CO_REVIEW.index('"$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-probes.json"')
         failure_check = CO_REVIEW.index('probe-*.json <<')
-        finders = CO_REVIEW.index('>"$RUN_DIR/codex.runtime.json" 2>"$RUN_DIR/codex.runtime.err" &')
+        finders = CO_REVIEW.index('--prompt-file "$RUN_DIR/codex.prompt"')
         seat_record = CO_REVIEW.index('>"$RUN_DIR/codex-quota-seats.json"')
         verifier = CO_REVIEW.index('--prompt-file "$RUN_DIR/verifier.prompt"')
         self.assertLess(check, probes)
         self.assertLess(probes, probe_record)
         self.assertLess(probe_record, failure_check)
         self.assertLess(finders, seat_record)
+        intro = CO_REVIEW[:seat_record].rsplit("```bash", 1)[0][-400:]
+        self.assertIn("collected", intro)
+        self.assertIn("finder collect", intro)
         self.assertLess(seat_record, verifier)
         for line in CO_REVIEW.splitlines():
             if '"$CODEX_QUOTA" ' in line and "substitutes" not in line:
