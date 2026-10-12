@@ -580,6 +580,11 @@ hook_case "G git stash list allowed" allow Bash "git stash list" "$R" "$SID_A"
 hook_case "G git log allowed" allow Bash "git log --oneline -3" "$R" "$SID_A"
 hook_case "G git commit outside any work tree allowed" allow Bash "git commit -m x" "$N" "$SID_A"
 hook_case "G git -C variable target allowed (accepted gap)" allow Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
+hook_case "G git commit from .todos cwd denied" deny Bash "git commit -m x" "$R/.todos" "$SID_A"
+hook_case "G git -C .todos reset --hard denied" deny Bash "git -C $R/.todos reset --hard" "$N" "$SID_A"
+hook_case "G git reset --hard from gitignored cwd denied" deny Bash "git reset --hard" "$R/ignored" "$SID_A"
+hook_case "G git -C gitignored dir commit denied" deny Bash "git -C $R/ignored commit -m x" "$N" "$SID_A"
+hook_case "G cd .todos then git commit denied" deny Bash "cd $R/.todos && git commit -m x" "$N" "$SID_A"
 hook_case "G plain session git commit allowed" allow Bash "git commit -m x" "$R" "$SID_C"
 
 # --- AC5/AC6: marker and budget ----------------------------------------

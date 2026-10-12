@@ -547,6 +547,17 @@ def exempt(c, state_real):
     return c == state_real or c.startswith(state_real + "/")
 
 
+def git_toplevel(c, budget):
+    """Work-tree root of the directory a git command acts in, else `c`."""
+    d = c if os.path.isdir(c) else os.path.dirname(c)
+    while d != "/" and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    rc, out = git(["rev-parse", "--show-toplevel"], d, budget)
+    if rc != 0 or not out:
+        return c
+    return os.path.realpath(out.removesuffix("\n"))
+
+
 def classify(c, budget):
     """(toplevel, 'tracked'|'untracked') when `c` is guarded, else None:
     outside every work tree, inside .git/, gitignored, or git failed."""
@@ -1051,6 +1062,11 @@ def rm_operands(words):
     return ops
 
 
+class GitDir(str):
+    """A git invocation's directory: the command acts on its whole
+    repository, so the decision is made on that repository, not this path."""
+
+
 def git_write_targets(words):
     """[path] the git invocation writes (--work-tree, else the -C chain, else
     "."), or [] for a subcommand that does not change a work tree."""
@@ -1076,8 +1092,8 @@ def git_write_targets(words):
     if words[i] == "stash" and i + 1 < len(words) and words[i + 1] in ("list", "show"):
         return []
     if work_tree is not None:
-        return [os.path.join(chdir, work_tree)]
-    return [chdir or "."]
+        return [GitDir(os.path.join(chdir, work_tree))]
+    return [GitDir(chdir or ".")]
 
 
 def cd_target_candidates(words, cwd, home):
@@ -1245,7 +1261,8 @@ def targets_for(payload, tool, cwd, home):
 
 
 def resolve_targets(raw, home):
-    """Canonical absolute paths, skipping anything the shell would still
+    """Marker budget unit: one per distinct canonical target per call, so
+    `git commit && git reset` in one repo costs one unit. Canonical absolute paths, skipping anything the shell would still
     expand ($VAR, backticks, globs), deduplicated by canonical path, NOT
     capped.
 
@@ -1265,6 +1282,8 @@ def resolve_targets(raw, home):
         ):
             continue
         p = canonical_target(we, c_cwd, home)
+        if p is not None and isinstance(w, GitDir):
+            p = GitDir(p)
         if p is not None and p not in paths:
             paths.append(p)
     return paths
@@ -1621,10 +1640,14 @@ def decide(payload, runtime="claude"):
     budget = Budget(GIT_BUDGET_SECS)
     guarded = []
     for p in paths:
+        if isinstance(p, GitDir):
+            # A git write changes the whole repository: judge its root, so a
+            # .todos or gitignored cwd is not an exemption.
+            p = git_toplevel(p, budget)
         if exempt(p, state_real):
             continue
         hit = classify(p, budget)
-        if hit:
+        if hit and all(g[0] != p for g in guarded):
             guarded.append((p, hit[0], hit[1]))
     if not guarded:
         return 0

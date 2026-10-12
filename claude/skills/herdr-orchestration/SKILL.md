@@ -881,7 +881,8 @@ review dispatch of a Jira-kind task).
   `python3 "$CORE" allow-edit --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --minutes 5 --max-edits 3 --note "<what was approved>"`
   AFTER the approval and in the same turn, make the edit, and name it in
   the turn summary. A git work-tree write (`commit`, `merge`, `cherry-pick`,
-  `reset` and the like) is a write and spends marker budget. A marker is
+  `reset` and the like) is a write and spends marker budget, one unit per
+  distinct repository per Bash call (chained git commands share a unit). A marker is
   for director maintenance (teardown, lessons, gate sync) or an
   owner-requested direct edit, never task implementation; test runs,
   builds and investigations go to a worker or an Explore/general-purpose

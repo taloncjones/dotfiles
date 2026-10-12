@@ -2083,6 +2083,10 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
         raise DispatchError("--tier and --prior-handoff apply to the ship gate only")
     worktree = task.get("worktree") or ""
     _core_ok("should-dispatch-review", "--task-id", task_id, "--head-sha", head, ctx=ctx)
+    if task.get("review_head_sha"):
+        # launch() runs before the new pin is written; a kept pin would retire
+        # the fresh reviewer as the prior pin's review.
+        raise DispatchError("review_head_sha is set; clear it (stale-review-reset) first")
     porcelain = core._git(worktree, "status", "--porcelain")
     if porcelain is None or porcelain:
         raise DispatchError("worktree is dirty")

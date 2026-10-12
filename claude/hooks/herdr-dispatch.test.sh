@@ -5066,6 +5066,28 @@ def test_dispatch_gate_review_refuses_a_head_not_ahead_of_base():
         fx.close()
 
 
+def test_dispatch_gate_review_refuses_a_stale_pin_before_launching():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.launch = lambda **kw: calls.append("launch") or {"status": "launched", "launch_id": "rev-L1"}
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["review_head_sha"] = "0" * 40
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            run_gate(fx, "review", focus)
+            raise AssertionError("a stale review pin dispatched")
+        except herdr_dispatch.DispatchError as exc:
+            assert "review_head_sha" in str(exc), exc
+        assert calls == [] and fx.calls() == [], (calls, fx.calls())
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
 def test_dispatch_gate_review_refuses_when_should_dispatch_review_refuses():
     fx = Fixture()
     originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
@@ -5596,6 +5618,7 @@ for name, test in (
     ("dispatch-gate review launches read-only and records the pin", test_dispatch_gate_review_launches_read_only_and_records_the_pin),
     ("dispatch-gate review refuses a dirty worktree before any herdr call", test_dispatch_gate_review_refuses_a_dirty_worktree_before_any_herdr_call),
     ("dispatch-gate review refuses a head not ahead of base", test_dispatch_gate_review_refuses_a_head_not_ahead_of_base),
+    ("dispatch-gate review refuses a stale pin before launching", test_dispatch_gate_review_refuses_a_stale_pin_before_launching),
     ("dispatch-gate review refuses when should-dispatch-review refuses", test_dispatch_gate_review_refuses_when_should_dispatch_review_refuses),
     ("dispatch-gate review refuses a route that is not ready", test_dispatch_gate_review_refuses_a_route_that_is_not_ready),
     ("dispatch-gate review stops at sweep while a reviewer is live", test_dispatch_gate_review_stops_at_sweep_while_a_reviewer_is_live),
