@@ -145,6 +145,9 @@ to `claude -p "/code-review"` and create a Claude -> Codex -> Claude loop.
 - Before drafting prose or docs, read
   `~/.claude/rules/personal/writing-style.md`; it picks Orwell or Google
   developer documentation style by text kind.
+- A question to the owner, its options, and any recorded decision note read
+  without the session. Name a short label, acronym or decision ID by its
+  substance on first use and keep the label in parentheses.
 - Markdown-link every issue and PR reference in descriptions; do not rely on
   the editor to auto-link plain text. Use the actual repository or issue URL.
 - When creating an authorized ticket, create its named dependency/context

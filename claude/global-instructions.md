@@ -72,6 +72,13 @@ part not meant for pasting.
 - State facts directly in the body; process narration ("the re-review pass
   caught...", "result coming when the background run finishes") belongs in
   the closing block or nowhere.
+- Applies to `AskUserQuestion` question and option text and to every decision
+  note the director records: a reader with no session context must understand
+  both. A short label (R12, run 17, the stand check), an acronym (PRD) and a
+  decision ID are one case: name the thing by its substance on first use in
+  that prompt, option or note, and keep the label in parentheses. The Google
+  developer documentation style in `rules/personal/writing-style.md` is the
+  source of expand-on-first-use.
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
