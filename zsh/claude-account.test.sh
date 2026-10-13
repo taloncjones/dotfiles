@@ -512,12 +512,20 @@ exit 0
 EOF
 chmod +x "$TMP/bin/claude"
 
+# Recording caffeinate stub: no case starts the real one.
+cat >"$TMP/bin/caffeinate" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$CAFF"
+EOF
+chmod +x "$TMP/bin/caffeinate"
+CAFF="$TMP/caff"; export CAFF; : >"$CAFF"
+
 PREFIX='--agent director --settings {"crossSessionInbound":"accept","autoCompactWindow":350000}'
 rec="$TMP/rec"; : >"$rec"
 RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
     zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && unset HERDR_ENV && director" >/dev/null 2>"$TMP/err"
 rc=$?
-if [ "$rc" = 2 ] && [ ! -s "$rec" ] && grep -q 'HERDR_ENV is not 1' "$TMP/err"; then
+if [ "$rc" = 2 ] && [ ! -s "$rec" ] && [ ! -s "$CAFF" ] && grep -q 'HERDR_ENV is not 1' "$TMP/err"; then
     pass "director refuses outside a herdr pane"
 else
     fail "director refuses outside a herdr pane (rc=$rc)"
@@ -535,6 +543,57 @@ run_case "director passes --permission-mode=default through" \
     "UNSET" "$PREFIX --permission-mode=default"
 run_case "director keeps work-account routing" \
     "$SBHOME/Git/work/proj" "HERDR_ENV=1 director" "$SBHOME/.claude-work"
+
+# caffeinate binds to the launch subshell: the stub claude records its pid
+# chain and exits 7; the pid caffeinate got must be in that chain and must not
+# be the calling shell.
+mkdir -p "$TMP/bin7"
+cp "$TMP/bin/caffeinate" "$TMP/bin7/caffeinate"
+cat >"$TMP/bin7/claude" <<'EOF'
+#!/bin/sh
+i=0; while [ ! -s "$CAFF" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+p=$$; while [ "$p" -gt 1 ]; do echo "$p"; p=$(ps -o ppid= -p "$p" | tr -d ' '); done > "$CHAIN"
+exit 7
+EOF
+chmod +x "$TMP/bin7/claude"
+: >"$CAFF"
+CHAIN="$TMP/chain" HOME="$SBHOME" PATH="$TMP/bin7:$PATH" \
+    zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && echo \$\$ > '$TMP/top' && HERDR_ENV=1 director" >/dev/null 2>&1
+rc=$?
+wpid="$(sed -n 3p "$CAFF")"
+if [ "$rc" = 7 ]; then
+    pass "director returns claude's exit status"
+else
+    fail "director returns claude's exit status (rc=$rc)"
+fi
+if [ "$(sed -n 1p "$CAFF")" = -i ] && [ "$(sed -n 2p "$CAFF")" = -w ] \
+    && [ "$(wc -l <"$CAFF" | tr -d ' ')" = 3 ] && grep -qx "$wpid" "$TMP/chain" \
+    && [ "$wpid" != "$(cat "$TMP/top")" ]; then
+    pass "director binds caffeinate -i -w to the launch subshell"
+else
+    fail "director binds caffeinate -i -w to the launch subshell (caff='$(tr '\n' ' ' <"$CAFF")')"
+fi
+
+# Without caffeinate on PATH: same argv, empty stderr, status propagated.
+mkdir -p "$TMP/sys" "$TMP/bin8"
+for d in $(printf '%s' "$PATH" | tr ':' ' '); do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+        n="${f##*/}"
+        [ "$n" = caffeinate ] || [ -e "$TMP/sys/$n" ] || { [ -x "$f" ] && ln -s "$f" "$TMP/sys/$n"; } || true
+    done
+done
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "$ARGV"\nexit 7\n' >"$TMP/bin8/claude"
+chmod +x "$TMP/bin8/claude"
+ARGV="$TMP/argv" HOME="$SBHOME" PATH="$TMP/bin8:$TMP/sys" \
+    zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && HERDR_ENV=1 director" >/dev/null 2>"$TMP/err"
+rc=$?
+if [ "$rc" = 7 ] && [ ! -s "$TMP/err" ] && [ "$(sed -n 1,2p "$TMP/argv" | tr '\n' ' ')" = "--agent director " ] \
+    && grep -qx auto "$TMP/argv"; then
+    pass "director without caffeinate launches claude unchanged and stays quiet"
+else
+    fail "director without caffeinate launches claude unchanged (rc=$rc err='$(cat "$TMP/err")')"
+fi
 
 # --- herdr gh shim arming ---------------------------------------------------
 # claude() arms a subshell for the launch when HERDR_ENV=1: the gh shim first

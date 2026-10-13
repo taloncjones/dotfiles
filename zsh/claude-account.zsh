@@ -174,7 +174,7 @@ function claude() {    # claude() will launch Claude Code with the work account 
     fi
 }
 
-function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(). ex: $ director
+function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(), under caffeinate -i when available. ex: $ director
     emulate -L zsh
     if [[ "${HERDR_ENV:-}" != 1 ]]; then
         echo "[X] director: run inside a herdr pane (HERDR_ENV is not 1)." >&2
@@ -185,5 +185,12 @@ function director() {    # director() launches the herdr director with inbound m
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done
-    claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${mode[@]}" "$@"
+    (
+        if (( $+commands[caffeinate] )); then
+            zmodload zsh/system
+            local launcher=$sysparams[pid]
+            caffeinate -i -w "$launcher" &!
+        fi
+        claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${mode[@]}" "$@"
+    )
 }
