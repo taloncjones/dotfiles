@@ -71,6 +71,7 @@ sh claude/hooks/pr-post-guard.test.sh
 sh claude/hooks/gh-shim.test.sh
 sh claude/hooks/planning-artifact-guard.test.sh
 sh claude/hooks/signer-guard.test.sh
+sh claude/hooks/opaque-label-hint.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
 sh claude/skills/planning-skills.test.sh

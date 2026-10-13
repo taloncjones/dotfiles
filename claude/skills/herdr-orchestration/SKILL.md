@@ -365,6 +365,8 @@ directive. It prints `decision: <id>`. Retire a superseded or expired one
 (for example "retry in 10 minutes" once retried):
 `python3 "$CORE" retire-decision --repo-slug <slug> --session <id> --fence <fence> --id <id>`.
 Entries for a failed, abandoned or merged task drop out on their own.
+Write each note so it reads without the session: it is re-injected into a
+fresh context later. Name any label (R12, a run number) by its substance.
 
 The `director_rollover` hook injects the live entries as an `[INFO] herdr
 decisions` block at every session start. That block is authoritative: do not

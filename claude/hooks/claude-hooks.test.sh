@@ -1235,7 +1235,8 @@ fi
 
 # git_remote_guard.py registration: the template carries exactly one
 # PreToolUse entry with matcher Bash|Edit|Write, listing only the git
-# metadata guard, appended last, and the Bash guard group ends with the
+# metadata guard, followed only by the AskUserQuestion hint entry, and the
+# Bash guard group ends with the
 # orchestrator edit guard followed by the planning-artifact guard,
 # both registered by their dedicated suites.
 # Independent of live machine state; the live drift check above is
@@ -1258,7 +1259,8 @@ want_bash = [
     "~/.claude/hooks/planning_artifact_guard.py",
     "~/.claude/hooks/signer_guard.py",
 ]
-ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
+ok = (len(ours) == 1 and pre[-2] is ours[0] and pre[-1].get("matcher") == "AskUserQuestion"
+      and bash == want_bash
       and ours[0]["hooks"] == [{"type": "command",
                                 "command": "~/.claude/hooks/git_remote_guard.py"}])
 sys.exit(0 if ok else 1)

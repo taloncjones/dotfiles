@@ -245,6 +245,15 @@
             "command": "~/.claude/hooks/git_remote_guard.py"
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/opaque_label_hint.py"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
