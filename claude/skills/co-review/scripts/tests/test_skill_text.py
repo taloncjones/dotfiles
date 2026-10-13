@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -37,6 +42,24 @@ def _assert_launches_all_precede_one_trailing_wait(testcase, block):
     testcase.assertEqual(len(wait_positions), 1, "block must wait exactly once")
     testcase.assertGreater(wait_positions[0], max(launch_positions),
                             "wait must follow every launch, not sit between them")
+
+
+def _assert_each_launch_is_its_own_job(testcase, block, seats):
+    """Every seat launches via nohup, records its pid, and the block never waits."""
+    lines = [line.strip() for line in block.splitlines()]
+    testcase.assertNotIn("wait", lines, "a seat block must not contain wait")
+    for seat in seats:
+        launch = f'--prompt-file "$RUN_DIR/{seat}.prompt" >"$RUN_DIR/{seat}.runtime.json" 2>"$RUN_DIR/{seat}.runtime.err" &'
+        positions = [i for i, line in enumerate(lines) if line.endswith(launch)]
+        testcase.assertEqual(len(positions), 1, f"{seat} must launch exactly once")
+        testcase.assertEqual(lines[positions[0] + 1], f'echo "$! $(date +%s)" >"$RUN_DIR/{seat}.pid"')
+        first = max(i for i in range(positions[0]) if lines[i].startswith("nohup uv run"))
+        testcase.assertTrue(
+            lines[first].startswith('nohup uv run --no-project python "$RUNNER" run'))
+
+
+def _shells():
+    return [name for name in ("bash", "zsh") if shutil.which(name)]
 
 
 class CoReviewSkillText(unittest.TestCase):
@@ -210,13 +233,16 @@ class CoReviewSkillText(unittest.TestCase):
         probes = CO_REVIEW.index('>"$RUN_DIR/probe-codex-reviewer.json" &')
         probe_record = CO_REVIEW.index('"$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-probes.json"')
         failure_check = CO_REVIEW.index('probe-*.json <<')
-        finders = CO_REVIEW.index('>"$RUN_DIR/codex.runtime.json" &')
+        finders = CO_REVIEW.index('--prompt-file "$RUN_DIR/codex.prompt"')
         seat_record = CO_REVIEW.index('>"$RUN_DIR/codex-quota-seats.json"')
         verifier = CO_REVIEW.index('--prompt-file "$RUN_DIR/verifier.prompt"')
         self.assertLess(check, probes)
         self.assertLess(probes, probe_record)
         self.assertLess(probe_record, failure_check)
         self.assertLess(finders, seat_record)
+        intro = CO_REVIEW[:seat_record].rsplit("```bash", 1)[0][-400:]
+        self.assertIn("collected", intro)
+        self.assertIn("finder collect", intro)
         self.assertLess(seat_record, verifier)
         for line in CO_REVIEW.splitlines():
             if '"$CODEX_QUOTA" ' in line and "substitutes" not in line:
@@ -285,19 +311,163 @@ class CoReviewSkillText(unittest.TestCase):
                        "Reply ok"):
             self.assertIn(needle, CO_REVIEW)
 
-    def test_co_review_seats_run_in_background_at_1200_seconds(self):
+    def test_co_review_seats_run_as_detached_jobs_at_1200_seconds(self):
         self.assertEqual(CO_REVIEW.count("--timeout-secs 1200"), 4)
         self.assertNotIn("--timeout-secs 600", CO_REVIEW)
-        for needle in ("run_in_background", "git apply --index", "wait"):
+        for needle in ("git apply --index", "nohup uv run", 'echo "$! $(date +%s)"',
+                       "echo collected", "kill -TERM", "kill -KILL", "incomplete: ",
+                       "Worst case is about 41 minutes", "re-runs the collect block",
+                       "a new `RUN_DIR`"):
             self.assertIn(needle, CO_REVIEW)
 
     def test_co_review_probe_seats_launch_together_before_one_wait(self):
         block = _extract_block(CO_REVIEW, '"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"')
         _assert_launches_all_precede_one_trailing_wait(self, block)
 
-    def test_co_review_finder_seats_launch_together_before_one_wait(self):
+    def test_co_review_finder_seats_launch_as_separate_jobs(self):
         block = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"')
-        _assert_launches_all_precede_one_trailing_wait(self, block)
+        _assert_each_launch_is_its_own_job(self, block, ("codex", "claude", "breaker"))
+
+    def test_co_review_verifier_launches_as_its_own_job(self):
+        block = _extract_block(CO_REVIEW, '--prompt-file "$RUN_DIR/verifier.prompt"')
+        _assert_each_launch_is_its_own_job(self, block, ("verifier",))
+
+    def test_co_review_seat_jobs_run_and_collect_under_a_stub_runner(self):
+        launch = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"')[len("```bash"):]
+        collect = _extract_block(CO_REVIEW, "echo collected")[len("```bash"):]
+        for shell in _shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / "bin").mkdir()
+                (root / "bin/uv").write_text("#!/bin/sh\nshift 3\nexec \"$@\"\n")
+                (root / "runner").write_text(
+                    "#!/bin/sh\nsleep 1\necho '{\"status\":\"success\"}'\n")
+                for name in ("bin/uv", "runner"):
+                    (root / name).chmod(0o755)
+                run_dir = root / "run"
+                run_dir.mkdir()
+                env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                           RUNNER=str(root / "runner"), RUN_DIR=str(run_dir),
+                           CLASS="full", CODEX_ROOT=td, CLAUDE_ROOT=td)
+                launched = subprocess.run([shell, "-c", launch], env=env, check=True,
+                                          capture_output=True, text=True, timeout=30)
+                pid = int((run_dir / "codex.pid").read_text().split()[0])
+                os.kill(pid, 0)
+                collected = subprocess.run([shell, "-c", collect], env=dict(env, COLLECT="claude codex breaker"),
+                                           capture_output=True, text=True, timeout=60)
+                self.assertEqual(collected.returncode, 0, collected.stderr)
+                self.assertEqual(collected.stdout.strip(), "collected")
+                for seat in ("claude", "codex", "breaker"):
+                    self.assertFalse((run_dir / f"{seat}.pid").exists())
+                    self.assertIn("success", (run_dir / f"{seat}.runtime.json").read_text())
+
+                # A seat older than 1260 s gets SIGTERM and is collected.
+                (run_dir / "claude.prompt").write_text("x")
+                old = subprocess.Popen(["/bin/sh", "-c", "sleep 20; :", "stub", "--prompt-file",
+                                        str(run_dir / "claude.prompt")],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                (run_dir / "claude.pid").write_text(f"{old.pid} {int(time.time()) - 1300}\n")
+                collected = subprocess.run([shell, "-c", collect], env=dict(env, COLLECT="claude"),
+                                           capture_output=True, text=True, timeout=60)
+                self.assertEqual(collected.stdout.strip(), "collected")
+                self.assertEqual(old.wait(timeout=10), -signal.SIGTERM)
+
+                # A seat with no pid record and no JSON is reported incomplete.
+                missing = subprocess.run([shell, "-c", collect], env=dict(env, COLLECT="verifier"),
+                                         capture_output=True, text=True, timeout=30)
+                self.assertEqual(missing.stdout.splitlines(), ["incomplete: verifier", "collected"])
+
+    def test_co_review_collect_waits_for_seat_that_has_not_exec_yet(self):
+        collect = _extract_block(CO_REVIEW, "echo collected")[len("```bash"):]
+        for shell in _shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as td:
+                run_dir = Path(td)
+                # Command line lacks the prompt path, as in the fork-to-exec window.
+                seat = subprocess.Popen(
+                    ["/bin/sh", "-c", 'sleep 2; echo \'{"status":"success"}\' >"$1"', "stub",
+                     str(run_dir / "codex.runtime.json")],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                (run_dir / "codex.pid").write_text(f"{seat.pid} {int(time.time())}\n")
+                env = dict(os.environ, RUN_DIR=str(run_dir), COLLECT="codex")
+                collected = subprocess.run([shell, "-c", collect], env=env,
+                                           capture_output=True, text=True, timeout=60)
+                seat.wait()
+                self.assertEqual(collected.stdout.strip(), "collected")
+                self.assertIn("success", (run_dir / "codex.runtime.json").read_text())
+
+    def test_co_review_collect_marks_missing_runtime_json_as_error(self):
+        collect = _extract_block(CO_REVIEW, "echo collected")[len("```bash"):]
+        for shell in _shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as td:
+                run_dir = Path(td)
+                (run_dir / "codex.pid").write_text(f"999999 {int(time.time()) - 100}\n")
+                env = dict(os.environ, RUN_DIR=str(run_dir), COLLECT="codex")
+                collected = subprocess.run([shell, "-c", collect], env=env,
+                                           capture_output=True, text=True, timeout=60)
+                self.assertEqual(collected.stdout.strip(), "collected")
+                self.assertIn('"status":"error"', (run_dir / "codex.runtime.json").read_text())
+
+    def test_co_review_collect_exits_3_then_resumes(self):
+        collect = _extract_block(CO_REVIEW, "echo collected")[len("```bash"):]
+        for shell in _shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as td:
+                run_dir = Path(td)
+                (run_dir / "codex.prompt").write_text("x")
+                seat = subprocess.Popen(["/bin/sh", "-c", "sleep 60; :", "stub", "--prompt-file",
+                                         str(run_dir / "codex.prompt")],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    (run_dir / "codex.pid").write_text(f"{seat.pid} {int(time.time())}\n")
+                    env = dict(os.environ, RUN_DIR=str(run_dir), COLLECT="codex")
+                    first = subprocess.run([shell, "-c", "SECONDS=540;\n" + collect], env=env,
+                                           capture_output=True, text=True, timeout=30)
+                    self.assertEqual(first.returncode, 3)
+                    self.assertEqual(first.stdout.strip(), "waiting: codex")
+                    self.assertTrue((run_dir / "codex.pid").exists())
+                finally:
+                    seat.kill()
+                    seat.wait()
+                second = subprocess.run([shell, "-c", collect], env=env,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(second.returncode, 0)
+                self.assertEqual(second.stdout.strip(), "collected")
+                self.assertFalse((run_dir / "codex.pid").exists())
+
+    def test_co_review_collect_kills_an_unresponsive_seat(self):
+        collect = _extract_block(CO_REVIEW, "echo collected")[len("```bash"):]
+        for shell in _shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as td:
+                run_dir = Path(td)
+                (run_dir / "codex.prompt").write_text("x")
+                (run_dir / "claude.prompt").write_text("x")
+                stuck = subprocess.Popen(["/bin/sh", "-c", "trap '' TERM; sleep 20", "stub",
+                                          "--prompt-file", str(run_dir / "codex.prompt")],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Not a seat: its command line never names claude.prompt.
+                foreign = subprocess.Popen(["sleep", "20"], stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL)
+                try:
+                    old = int(time.time()) - 1400
+                    (run_dir / "codex.pid").write_text(f"{stuck.pid} {old}\n")
+                    (run_dir / "claude.pid").write_text(f"{foreign.pid} {old}\n")
+                    env = dict(os.environ, RUN_DIR=str(run_dir), COLLECT="claude codex")
+                    done = subprocess.run([shell, "-c", collect], env=env,
+                                          capture_output=True, text=True, timeout=30)
+                    self.assertEqual(done.stdout.splitlines(), ["incomplete: codex", "collected"])
+                    self.assertEqual(stuck.wait(timeout=10), -signal.SIGKILL)
+                    self.assertIsNone(foreign.poll(), "a reused pid must never be signaled")
+                    self.assertFalse((run_dir / "codex.pid").exists())
+                    self.assertFalse((run_dir / "claude.pid").exists())
+                finally:
+                    stuck.kill()
+                    stuck.wait()
+                    foreign.kill()
+                    foreign.wait()
+
+    def test_both_entrypoints_state_the_seat_backstop(self):
+        for text in (CO_REVIEW, MIRROR):
+            for needle in ("1200-second deadline", "60-second grace", "ps -o command= -p"):
+                self.assertIn(needle, text)
 
     def test_mirror_probe_seats_launch_together_before_one_wait(self):
         block = _extract_block(MIRROR, '"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json"')

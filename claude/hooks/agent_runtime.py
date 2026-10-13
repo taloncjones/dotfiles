@@ -1162,6 +1162,10 @@ def _kill_after_timeout(
 
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+# time.monotonic stops during system sleep, so a deadline on it outlives the
+# wall-clock budget; time.time keeps counting. Tests patch both names.
+_deadline_clock = time.time
+_WAIT_SLICE_SECS = 5.0
 
 
 class _RunnerInterrupted(Exception):
@@ -1285,7 +1289,19 @@ def run_bounded(
             start_new_session=True,
         )
         stops.arm()
-        stdout, stderr = process.communicate(prompt, timeout=timeout_secs)
+        deadline = _deadline_clock() + timeout_secs
+        pending_input = prompt
+        while True:
+            remaining = deadline - _deadline_clock()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout_secs)
+            try:
+                stdout, stderr = process.communicate(
+                    pending_input, timeout=min(_WAIT_SLICE_SECS, remaining)
+                )
+                break
+            except subprocess.TimeoutExpired:
+                pending_input = None
     except subprocess.TimeoutExpired:
         stops.ignore()
         stdout, stderr, pipe_held = _kill_after_timeout(process)
