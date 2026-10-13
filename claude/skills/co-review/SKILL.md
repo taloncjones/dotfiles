@@ -496,21 +496,21 @@ if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
     --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
-    --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json.tmp" 2>"$RUN_DIR/codex.runtime.err" &
+    --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" 2>"$RUN_DIR/codex.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/codex.pid"
 fi
 if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
-    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json.tmp" 2>"$RUN_DIR/claude.runtime.err" &
+    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" 2>"$RUN_DIR/claude.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/claude.pid"
 fi
 if [ "$CLASS" = "full" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime "$BREAKER_SEAT_RUNTIME" --role skeptic --risk normal --provisional \
     --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
-    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json.tmp" 2>"$RUN_DIR/breaker.runtime.err" &
+    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" 2>"$RUN_DIR/breaker.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/breaker.pid"
 fi
 ```
@@ -546,7 +546,7 @@ only for follow-up verification.
 nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
   --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
-  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json.tmp" 2>"$RUN_DIR/verifier.runtime.err" &
+  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" 2>"$RUN_DIR/verifier.runtime.err" &
 echo "$! $(date +%s)" >"$RUN_DIR/verifier.pid"
 ```
 
@@ -557,7 +557,7 @@ after the verifier block:
 # Re-run until it prints "collected"; one run waits at most 540 seconds.
 # A seat is collected when its own process is gone; ps confirms identity,
 # except in the first 30 seconds, before the child has exec'd its command.
-# The job writes <seat>.runtime.json.tmp; collect renames it once the job is gone.
+# A seat with no non-empty runtime JSON after its process is gone is marked error.
 for seat in claude codex breaker verifier; do
   case " $COLLECT " in *" $seat "*) ;; *) continue ;; esac
   json=$RUN_DIR/$seat.runtime.json
@@ -579,7 +579,6 @@ for seat in claude codex breaker verifier; do
     sleep 10
   done
   rm -f "$RUN_DIR/$seat.pid"
-  [ -s "$json.tmp" ] && mv -f "$json.tmp" "$json"
   waited=0
   while [ ! -s "$json" ] && [ "$waited" -lt 5 ]; do sleep 1; waited=$((waited + 1)); done
   [ -s "$json" ] || printf '{"status":"error","reason":"runtime json missing"}\n' >"$json"

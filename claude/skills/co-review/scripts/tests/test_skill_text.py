@@ -49,7 +49,7 @@ def _assert_each_launch_is_its_own_job(testcase, block, seats):
     lines = [line.strip() for line in block.splitlines()]
     testcase.assertNotIn("wait", lines, "a seat block must not contain wait")
     for seat in seats:
-        launch = f'--prompt-file "$RUN_DIR/{seat}.prompt" >"$RUN_DIR/{seat}.runtime.json.tmp" 2>"$RUN_DIR/{seat}.runtime.err" &'
+        launch = f'--prompt-file "$RUN_DIR/{seat}.prompt" >"$RUN_DIR/{seat}.runtime.json" 2>"$RUN_DIR/{seat}.runtime.err" &'
         positions = [i for i, line in enumerate(lines) if line.endswith(launch)]
         testcase.assertEqual(len(positions), 1, f"{seat} must launch exactly once")
         testcase.assertEqual(lines[positions[0] + 1], f'echo "$! $(date +%s)" >"$RUN_DIR/{seat}.pid"')
@@ -325,7 +325,7 @@ class CoReviewSkillText(unittest.TestCase):
         _assert_launches_all_precede_one_trailing_wait(self, block)
 
     def test_co_review_finder_seats_launch_as_separate_jobs(self):
-        block = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json.tmp"')
+        block = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"')
         _assert_each_launch_is_its_own_job(self, block, ("codex", "claude", "breaker"))
 
     def test_co_review_verifier_launches_as_its_own_job(self):
@@ -333,7 +333,7 @@ class CoReviewSkillText(unittest.TestCase):
         _assert_each_launch_is_its_own_job(self, block, ("verifier",))
 
     def test_co_review_seat_jobs_run_and_collect_under_a_stub_runner(self):
-        launch = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json.tmp"')[len("```bash"):]
+        launch = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"')[len("```bash"):]
         collect = _extract_block(CO_REVIEW, "echo collected")[len("```bash"):]
         for shell in _shells():
             with self.subTest(shell=shell), tempfile.TemporaryDirectory() as td:
@@ -384,7 +384,7 @@ class CoReviewSkillText(unittest.TestCase):
                 run_dir = Path(td)
                 # Command line lacks the prompt path, as in the fork-to-exec window.
                 seat = subprocess.Popen(
-                    ["/bin/sh", "-c", 'sleep 2; echo \'{"status":"success"}\' >"$1.tmp"', "stub",
+                    ["/bin/sh", "-c", 'sleep 2; echo \'{"status":"success"}\' >"$1"', "stub",
                      str(run_dir / "codex.runtime.json")],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 (run_dir / "codex.pid").write_text(f"{seat.pid} {int(time.time())}\n")
