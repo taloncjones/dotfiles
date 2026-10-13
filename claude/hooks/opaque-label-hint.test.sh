@@ -146,7 +146,8 @@ import json
 h = json.load(open("claude/settings.json.tmpl"))["hooks"]
 pre = [e for e in h["PreToolUse"] if e.get("matcher") == "AskUserQuestion"]
 assert len(pre) == 1 and pre[0]["hooks"] == [
-    {"type": "command", "command": "~/.claude/hooks/opaque_label_hint.py"}], pre
+    {"type": "command", "command": "~/.claude/hooks/opaque_label_hint.py"},
+    {"type": "command", "command": "~/.claude/hooks/pr_post_guard.py"}], pre
 post = [e for e in h["PostToolUse"] if e.get("matcher") == "AskUserQuestion"]
 assert len(post) == 1 and post[0]["hooks"] == [
     {"type": "command", "command": "~/.claude/hooks/pr_post_guard.py"}], post

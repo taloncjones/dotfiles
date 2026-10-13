@@ -234,10 +234,6 @@
         ]
       },
       {
-        "matcher": "AskUserQuestion",
-        "hooks": [ { "type": "command", "command": "~/.claude/hooks/pr_post_guard.py" } ]
-      },
-      {
         "matcher": "Bash|Edit|Write",
         "hooks": [
           {
@@ -252,6 +248,10 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/opaque_label_hint.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/pr_post_guard.py"
           }
         ]
       }
