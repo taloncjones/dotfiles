@@ -51,8 +51,9 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
 --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' --permission-mode auto`
   through the account-routing wrapper and refuses outside a herdr pane.
   When `caffeinate` is on PATH the launch runs under `caffeinate -i -w
-  <launch subshell pid>`, so the host stays awake for exactly the life of
-  the director.
+  <launch subshell pid>`, so the host does not idle-sleep for exactly the
+  life of the director (`-i` blocks idle sleep only, not lid-close or a
+  forced sleep).
   Auto mode is the documented launch; an explicit `--permission-mode`
   argument overrides it. Nothing in the director flow assumes a
   permission mode; the rollover hook runs in every mode.
@@ -136,8 +137,9 @@ Rules:
 Host-sleep re-gate (owner standing request, 2026-10-12): treat an
 `INCOMPLETE` handoff as if the human asked for a re-gate, with the same
 `write-task`, only when all of these hold: (a) the task's live HEAD
-equals the gate's reviewed head; (b) the gate's ship launch `started`
-time is earlier than `sysctl -n kern.waketime`; (c) every report reason
+equals the gate's reviewed head; (b) the gate's ship launch `started_ns`
+(Unix nanoseconds) divided by 1000000000 is earlier than the `sec` field
+of `sysctl -n kern.waketime` (seconds); (c) every report reason
 is `seat <name> runner status is not success`, and each named seat's
 runner JSON has `timed_out: true` and a file write time at or after that
 wake. Anything else waits for the human: any other reason, a seat that

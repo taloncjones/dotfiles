@@ -47,9 +47,10 @@ WARNING = (
 )
 HOST_SLEEP_NOTE = (
     "[INFO] host sleep: if the host slept while a ship gate ran, apply the\n"
-    "section 6 host-sleep re-gate rule in herdr-orchestration: an eligible\n"
-    "INCOMPLETE gate is re-gated at the same head without asking. Compare\n"
-    "`sysctl -n kern.waketime` with the gate launch's `started` time."
+    "section 6a step 0 host-sleep re-gate rule in herdr-orchestration: an\n"
+    "eligible INCOMPLETE gate is re-gated at the same head without asking.\n"
+    "Compare the `sec` field of `sysctl -n kern.waketime` with the gate\n"
+    "launch's `started_ns` (Unix nanoseconds; divide by 1000000000)."
 )
 DECISIONS_WARNING = (
     "[WARNING] herdr decisions: not loaded; run python3 ~/.claude/hooks/"

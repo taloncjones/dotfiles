@@ -1157,6 +1157,8 @@ for src in clear compact; do
     test "$a" -lt "$b"
     test "$b" -lt "$c"
     grep -q 'kern.waketime' "$FX/c.$src"
+    grep -q 'started_ns' "$FX/c.$src"
+    grep -q 'section 6a step 0' "$FX/c.$src"
 done
 SH
 
