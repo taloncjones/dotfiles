@@ -438,7 +438,11 @@ import sys
 hooks = json.load(open("claude/settings.json.tmpl"))["hooks"]
 gate = [{"type": "command", "command": "~/.claude/hooks/pr_post_guard.py"}]
 post = [e for e in hooks["PostToolUse"] if e.get("matcher") == "AskUserQuestion"]
-ok = len(post) == 1 and post[0]["hooks"] == gate and hooks["UserPromptSubmit"] == [{"hooks": gate}]
+pre = [e for e in hooks["PreToolUse"] if e.get("matcher") == "AskUserQuestion"]
+ok = (
+    len(post) == 1 and post[0]["hooks"] == gate and hooks["UserPromptSubmit"] == [{"hooks": gate}]
+    and len(pre) == 1 and pre[0]["hooks"] == gate
+)
 sys.exit(0 if ok else 1)
 PY
 then

@@ -101,6 +101,36 @@ print(json.dumps({"hook_event_name": "PostToolUse", "session_id": os.environ["PA
 PY
 }
 
+# payload_q SID LABEL PREVIEW_TEXT QUESTION -> PreToolUse AskUserQuestion JSON:
+# one question QUESTION with the option LABEL (preview PREVIEW_TEXT when set)
+payload_q() {
+    PQ_SID="$1" PQ_LABEL="$2" PQ_PREVIEW="$3" PQ_QUESTION="$4" python3 - <<'PY'
+import json, os
+option = {"label": os.environ["PQ_LABEL"], "description": "posts the draft"}
+if os.environ["PQ_PREVIEW"]:
+    option["preview"] = os.environ["PQ_PREVIEW"]
+questions = [{"question": os.environ["PQ_QUESTION"], "header": "Post", "multiSelect": False,
+              "options": [option, {"label": "Hold", "description": "wait"}]}]
+print(json.dumps({"hook_event_name": "PreToolUse", "session_id": os.environ["PQ_SID"],
+                  "tool_name": "AskUserQuestion", "tool_input": {"questions": questions}}))
+PY
+}
+
+# expect_err LABEL NEEDLE PAYLOAD -> the hook exits 2 and stderr contains NEEDLE
+expect_err() {
+    printf '%s' "$3" | python3 "$HOOK" >"$FIX/out" 2>"$FIX/err"
+    rc=$?
+    case "$(cat "$FIX/err")" in
+        *"$2"*) found=1 ;;
+        *) found=0 ;;
+    esac
+    if [ "$rc" = 2 ] && [ "$found" = 1 ]; then
+        printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (rc=%s err=%s)\n' "$1" "$rc" "$(cat "$FIX/err")" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
 # expect_out LABEL NEEDLE PAYLOAD -> the hook's stdout contains NEEDLE
 expect_out() {
     got=$(printf '%s' "$3" | python3 "$HOOK" 2>/dev/null)
@@ -389,6 +419,24 @@ PY
 )
 expect_out "A28 a question naming two drafts is refused" "post gate: draft bbbbbbbb not decided (the question names more than one draft)" "$A28"
 expect_file "A28 neither draft is approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+# --- PQ: a Post draft prompt that cannot approve is refused before it is shown ---
+
+case_gate pq1
+expect_err "PQ1 an unregistered hash is refused with the register command" "pr_post_guard.py draft -- gh" "$(payload_q s1 'Post draft cccccccc' '' 'Post this draft? reply one')"
+expect_file "PQ1 the refusal creates no gate dir" "$GATE" absent
+
+case_gate pq2
+pending aaaaaaaa 1 'reply one'
+expect_err "PQ2 text only in the option preview is refused" "put the full draft text in the question body, not the option preview" "$(payload_q s1 'Post draft aaaaaaaa' 'reply one' 'Post this draft?')"
+expect_file "PQ2 still pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+expect_file "PQ2 not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate pq3
+pending aaaaaaaa 1 'reply one'
+expect_rc "PQ3 a registered draft shown in the question passes" 0 "$(payload_q s1 'Post draft aaaaaaaa' '' 'Post this draft? reply one')"
+expect_file "PQ3 still pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+expect_file "PQ3 not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 
 # --- P: an approval is per draft, per session, and survives other prompts ---
 
