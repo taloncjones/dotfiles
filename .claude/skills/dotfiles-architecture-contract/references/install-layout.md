@@ -66,3 +66,18 @@ template-owned key) and the settings drift check flags meanwhile. Herdr's
 agent-state detection works without the integration (screen manifest); if the
 integration is ever wanted, it needs the installer-owned pattern (post-reconcile
 idempotent install step) plus a gitignore entry for the generated script.
+
+**Claude Code mods:**
+
+`claude/plugins/herdr-fleet` is a Claude Code mod (hooks module plus
+`$.state` contract) that draws the director's fleet pane: one row per herdr
+task and one per open PR. `director()` (`zsh/claude-account.zsh`) loads it
+with `--plugin-dir` when the directory exists; it is never installed from a
+marketplace and has no `enabledPlugins` entry. `claude/plugins/` is not linked
+into `~/.claude`, which Claude Code's installer owns. The engine writes
+`.claude-plugin/types/` into a hot-reloaded `--plugin-dir` folder; `.gitignore`
+ignores it. `claude/plugins/herdr-fleet/plugin.test.sh` runs `claude plugin
+validate` and `claude plugin test`, and skips when `claude` is not on PATH.
+The mod's CI cell (`hooks/fleet.ts` `ciCell`) copies
+`claude/skills/pr-status/scripts/pr_status.py` `ci_state`/`ci_cell`; change
+both together.

@@ -520,7 +520,7 @@ EOF
 chmod +x "$TMP/bin/caffeinate"
 CAFF="$TMP/caff"; export CAFF; : >"$CAFF"
 
-PREFIX='--agent director --settings {"crossSessionInbound":"accept","autoCompactWindow":350000}'
+PREFIX='--agent director --settings {"crossSessionInbound":"accept","autoCompactWindow":350000} --plugin-dir '"$REPO"'/claude/plugins/herdr-fleet'
 rec="$TMP/rec"; : >"$rec"
 RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
     zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && unset HERDR_ENV && director" >/dev/null 2>"$TMP/err"
@@ -543,6 +543,16 @@ run_case "director passes --permission-mode=default through" \
     "UNSET" "$PREFIX --permission-mode=default"
 run_case "director keeps work-account routing" \
     "$SBHOME/Git/work/proj" "HERDR_ENV=1 director" "$SBHOME/.claude-work"
+
+# With the plugin directory missing, director launches with no --plugin-dir.
+rec="$TMP/rec"; : >"$rec"
+RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && DOTFILES_FLEET_PLUGIN='$TMP/missing' && HERDR_ENV=1 director" >/dev/null 2>&1
+if [ -s "$rec" ] && ! grep -q -- '--plugin-dir' "$rec"; then
+    pass "director omits --plugin-dir when the plugin directory is missing"
+else
+    fail "director omits --plugin-dir when the plugin directory is missing"
+fi
 
 # caffeinate binds to the launch subshell: the stub claude records its pid
 # chain and exits 7; the pid caffeinate got must be in that chain and must not

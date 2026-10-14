@@ -146,6 +146,9 @@ Brewfile.rb.lock.json
 /docs/plans/
 /docs/specs/
 /claude/contracts/
+
+# Types the engine writes into hot-reloaded --plugin-dir folders
+claude/plugins/*/.claude-plugin/types/
 /.planning/
 
 # ruff lint cache
