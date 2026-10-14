@@ -31,9 +31,9 @@ export type FleetSnapshot = {
   repoRoot: string | null
   live: FleetPart<FleetTaskRow>
   archived: FleetPart<FleetTaskRow>
-  prs: FleetPart<FleetPrRow> | null
-  ghError: string | null
-  prsAt: number | null
+  prs: (FleetPart<FleetPrRow> & { at: number }) | null
+  ghError: { slug: string; reason: string } | null
+  readError: string | null
   readAt: number | null
 }
 
@@ -43,6 +43,7 @@ declare module 'claude-code' {
       tab: FleetTab
       snapshot: FleetSnapshot
       generation: number
+      opened: boolean
     }
   }
 }

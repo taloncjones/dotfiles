@@ -38,16 +38,27 @@ const EMPTY: FleetSnapshot = {
   archived: { slug: null, rows: [] },
   prs: null,
   ghError: null,
-  prsAt: null,
+  readError: null,
   readAt: null,
 }
 
 const tabAtom = atom({ plugin: 'herdr-fleet', key: 'tab' } as const, 'tasks' as FleetTab)
 const snapAtom = atom({ plugin: 'herdr-fleet', key: 'snapshot' } as const, EMPTY)
 const genAtom = atom({ plugin: 'herdr-fleet', key: 'generation' } as const, 0)
+const openedAtom = atom({ plugin: 'herdr-fleet', key: 'opened' } as const, false)
 
 function heldSlug(lease: FleetLease): string | null {
   return lease.kind === 'held' ? lease.slug : null
+}
+
+// Rows that belong to the lease held now; the render and /fleet share it.
+function view(snap: FleetSnapshot) {
+  const slug = heldSlug(snap.lease)
+  const live = snap.live.slug === slug ? snap.live.rows : []
+  const archived = snap.archived.slug === slug ? snap.archived.rows : []
+  const prs = snap.prs && snap.prs.slug === slug ? snap.prs : null
+  const ghError = snap.ghError && snap.ghError.slug === slug ? snap.ghError : null
+  return { slug, live, archived, prs, ghError }
 }
 
 function clock(ms: number): string {
@@ -62,6 +73,7 @@ function createFleet($: Dollar, generation: number) {
     prs: null,
     archive: null,
   }
+  const triggered = new Map<Kind, Promise<void>>()
 
   async function stateRoot(): Promise<string> {
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
@@ -116,6 +128,7 @@ function createFleet($: Dollar, generation: number) {
     const repo = await $.session.repo()
     const now = await $.clock.now()
     const slug = heldSlug(lease)
+    const before = heldSlug((await read($, snapAtom)).lease)
     const rows: FleetTaskRow[] = []
     if (slug !== null) {
       const dir = `${root}/${slug}`
@@ -156,8 +169,14 @@ function createFleet($: Dollar, generation: number) {
       lease,
       repoRoot: repo ? repo.root : null,
       live: { slug, rows },
+      readError: null,
       readAt: now,
     }))
+    // gh and the archive run once per lease change, not on the task tick.
+    if (slug !== null && slug !== before) {
+      triggered.set('prs', forced('prs'))
+      triggered.set('archive', forced('archive'))
+    }
   }
 
   async function refreshArchive(): Promise<void> {
@@ -214,15 +233,14 @@ function createFleet($: Dollar, generation: number) {
           const known = [...s.live.rows, ...s.archived.rows]
           return {
             ...s,
-            prs: { slug, rows: prRows(text, known) },
-            prsAt: now,
+            prs: { slug, rows: prRows(text, known), at: now },
             ghError: null,
           }
         } catch (error) {
-          return { ...s, ghError: ghReason(error) }
+          return { ...s, ghError: { slug, reason: ghReason(error) } }
         }
       }
-      return { ...s, ghError: failure }
+      return { ...s, ghError: { slug, reason: failure } }
     })
   }
 
@@ -236,7 +254,11 @@ function createFleet($: Dollar, generation: number) {
     const running = inflight[kind]
     if (running) return running
     const next = runners[kind]()
-      .catch(() => {})
+      .catch(error =>
+        kind === 'tasks'
+          ? publish(null, s => ({ ...s, readError: ghReason(error) })).catch(() => {})
+          : undefined,
+      )
       .finally(() => {
         inflight[kind] = null
       })
@@ -251,8 +273,12 @@ function createFleet($: Dollar, generation: number) {
   }
 
   async function refreshAll(): Promise<void> {
+    triggered.clear()
     await forced('tasks')
-    await Promise.all([forced('prs'), forced('archive')])
+    await Promise.all([
+      triggered.get('prs') ?? forced('prs'),
+      triggered.get('archive') ?? forced('archive'),
+    ])
   }
 
   return {
@@ -321,24 +347,28 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: 'Fleet' })
     if (fleet) await fleet.refreshAll()
     const snap = await read($, snapAtom)
-    const live = snap.live.rows
-    const done = doneRows(live, snap.archived.rows)
+    const { live, archived, prs, ghError } = view(snap)
+    const done = doneRows(live, archived)
 
     return {
       text: summaryLine(
         activeRows(live).length,
         done.length,
-        snap.prs?.rows ?? [],
-        snap.ghError,
+        prs?.rows ?? [],
+        ghError !== null,
       ),
     }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!hasOpened) {
+    if (!hasOpened && !(await read($, openedAtom))) {
+      // Render hooks cannot write state, so the host flag is set after the open.
       if (e.viewport?.isFullscreen === true) {
         hasOpened = true
-        void $.ui.open({ id: PANE, title: 'Fleet' })
+        $.ui
+          .open({ id: PANE, title: 'Fleet' })
+          .then(() => update($, openedAtom, () => true))
+          .catch(() => $.ui.log('herdr-fleet: could not open the pane; run /fleet'))
       } else if (e.viewport?.isFullscreen === false) {
         hasOpened = true
         $.ui.log('herdr-fleet: run /fleet to show the fleet pane')
@@ -353,10 +383,8 @@ export const register: Register = on => {
     const snap = await read($, snapAtom)
     const tab = await read($, tabAtom)
     const width = Math.max(40, e.props.bodyColumns)
-    const slug = heldSlug(snap.lease)
-    const live = snap.live.slug === slug ? snap.live.rows : []
-    const archived = snap.archived.slug === slug ? snap.archived.rows : []
-    const prs = snap.prs && snap.prs.slug === slug ? snap.prs.rows : []
+    const { slug, live, archived, prs: prPart, ghError } = view(snap)
+    const prs = prPart ? prPart.rows : []
     const active = activeRows(live)
     const done = doneRows(live, archived)
     const tabs: Array<[FleetTab, string, string]> = [
@@ -373,21 +401,25 @@ export const register: Register = on => {
       }`
     }
     const lines: string[] = []
-    if (snap.readAt === null) lines.push('reading...')
-    else if (slug !== null) {
+    if (snap.readError) lines.push(`read failed: ${snap.readError}`)
+    if (snap.readAt === null) {
+      if (!snap.readError) lines.push('reading...')
+    } else if (slug !== null) {
       if (tab === 'tasks') {
         lines.push(...(active.length ? active.map(r => taskLine(r, width)) : ['no tasks']))
       } else if (tab === 'done') {
-        lines.push(...(done.length ? done.map(r => taskLine(r, width)) : ['no finished tasks']))
+        if (snap.archived.slug !== slug) lines.push('reading...')
+        else lines.push(...(done.length ? done.map(r => taskLine(r, width)) : ['no finished tasks']))
       } else {
-        if (snap.ghError) {
+        if (ghError) {
           lines.push(
-            `gh unavailable: ${snap.ghError}${
-              snap.prsAt === null ? '' : ` (as of ${clock(snap.prsAt)})`
+            `gh unavailable: ${ghError.reason}${
+              prPart ? ` (as of ${clock(prPart.at)})` : ''
             }`,
           )
         }
-        lines.push(...(prs.length ? prs.map(r => prLine(r, width)) : ['no open PRs']))
+        if (!prPart && !ghError) lines.push('reading...')
+        else lines.push(...(prs.length ? prs.map(r => prLine(r, width)) : ['no open PRs']))
       }
     }
 

@@ -21,12 +21,14 @@ type World = {
   maxRunning: number
   opened: string[]
   logs: string[]
+  repoFails: boolean
+  openFails: boolean
 }
 
 function newWorld(files: Record<string, string> = {}): World {
   return {
     files, ghosts: [], gh: OK, ghGate: null, readGate: null,
-    runs: [], running: 0, maxRunning: 0, opened: [], logs: [],
+    runs: [], running: 0, maxRunning: 0, opened: [], logs: [], repoFails: false, openFails: false,
   }
 }
 
@@ -54,9 +56,13 @@ function stub(on: any, w: World) {
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => (globalThis as any).h($.ui.resolve(e).Box, {}))
   on('session.id', () => ({ value: 'sess' }))
-  on('session.repo', () => ({ value: { root: '/repo', remote: null } }))
+  on('session.repo', (_$: any, e: any, next: any) => {
+    if (w.repoFails) return next(e)
+    return { value: { root: '/repo', remote: null } }
+  })
   on('ui.open', (_$: any, e: any) => {
     w.opened.push(e.id)
+    if (w.openFails) throw new Error('no dock')
     return { value: { isPlaced: true } }
   })
   on('ui.log', (_$: any, e: any) => {
@@ -428,4 +434,61 @@ test('control characters in PR titles never reach the drawing', async ($, on) =>
   const text = await prsText(await pane($))
   expect(text).toContain('evil?[2Jtitle?')
   expect(text).not.toContain('\u001b')
+})
+
+const onePr = (number: number, title: string) => prJson([
+  { number, title, isDraft: true, headRefName: `b${number}`, headRefOid: 'aaaaaaa111', statusCheckRollup: [], reviewDecision: '' },
+])
+
+test('a lease that appears after boot runs gh once and shows the rows', async ($, on) => {
+  const w = newWorld({})
+  w.gh = { exitCode: 0, stderr: '', stdout: onePr(3, 'Late') }
+  const clock = stub(on, w)
+  await boot($, clock)
+  expect(w.runs.length).toBe(0)
+  Object.assign(w.files, owner('a'), archived('2026-09', 'old'))
+  await clock.advance(15000)
+  expect(w.runs.length).toBe(1)
+  const ui = await pane($)
+  expect(await prsText(ui)).toContain('#3')
+  await ui.press({ key: 'tab-done' })
+  expect((await lines(ui)).join('\n')).toContain('old')
+  await clock.advance(15000)
+  expect(w.runs.length).toBe(1)
+})
+
+test('a gh error stays with its own lease', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...task('a', 'ta') })
+  w.gh = 'reject'
+  const clock = stub(on, w)
+  await boot($, clock)
+  delete w.files[`${ROOT}/a/owner.json`]
+  Object.assign(w.files, owner('b'))
+  w.ghGate = new Promise<void>(() => {})
+  await clock.advance(15000)
+  const text = await prsText(await pane($))
+  expect(text).not.toContain('gh unavailable')
+  expect(text).toContain('reading...')
+})
+
+test('a failing task refresh shows a message instead of reading', async ($, on) => {
+  const w = newWorld(owner('a'))
+  w.repoFails = true
+  const clock = stub(on, w)
+  await boot($, clock)
+  const text = (await lines(await pane($))).join('\n')
+  expect(text).toContain('read failed: no implementation')
+  expect(text).not.toContain('reading...')
+})
+
+test('a rejected auto-open is logged once', async ($, on) => {
+  const w = newWorld(owner('a'))
+  w.openFails = true
+  const clock = stub(on, w)
+  await boot($, clock)
+  await band($, true)
+  await band($, true)
+  await clock.settle()
+  expect(w.opened).toEqual(['herdr-fleet'])
+  expect(w.logs).toEqual(['herdr-fleet: could not open the pane; run /fleet'])
 })

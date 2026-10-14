@@ -191,7 +191,7 @@ export function summaryLine(
   active: number,
   done: number,
   prs: FleetPrRow[],
-  ghError: string | null,
+  ghError: boolean,
 ): string {
   const drafts = prs.filter(pr => pr.isDraft).length
   return (
