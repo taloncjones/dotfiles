@@ -73,12 +73,13 @@ from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
 # The owner's answer to a post prompt: a label naming `draft <hash>` decides
-# that draft. The verb is the leading word or the word before the token
-# ("Post the reply (draft h)", "Leave it (skip draft h)", "Post draft h").
+# that draft. A post label starts with `Post` plus whitespace, or `(` then
+# `Post`; any other leading word ("Hold off on post draft h") is not a post.
+# A skip is the leading `Skip` or `skip draft h` ("Leave it (skip draft h)").
 DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
-LEAD_VERB_RE = re.compile(r"\s*(post|skip)(?=\s|$)", re.IGNORECASE)
-# A negation makes the verb unreliable ("Do not post draft h"): fail closed.
-NEGATION_RE = re.compile(r"\b(?:not|never|no|nothing|without|cannot)\b|n't\b", re.IGNORECASE)
+LEAD_VERB_RE = re.compile(r"\s*\(?(post|skip)(?=\s)", re.IGNORECASE)
+LEAD_PUNCT_POST_RE = re.compile(r"\s*\(?post(?=[^\w\s])", re.IGNORECASE)
+HASH_WORD_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?![0-9A-Za-z])")
 
 # GitHub sends no notification for a mention inside code.
 FENCED_CODE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
@@ -394,8 +395,8 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
-    "that read as the action: a post starts with `Post` and ends with `(draft <hash>)` "
-    "(or is `Post draft <hash>`), and a skip ends with "
+    "that read as the action: a post starts with `Post` plus a space and ends with `(draft <hash>)` "
+    "(or is `Post draft <hash>`), with exactly one hash, and a skip ends with "
     "`(skip draft <hash>)`, the full draft text in the question "
     "(an option preview is clipped by the terminal and never counts). "
     "Post only after the answer approves it.\n"
@@ -1034,11 +1035,15 @@ def label_decision(label: str) -> tuple[str | None, list[str]] | None:
     if not tokens:
         return None
     digests = list(dict.fromkeys(hit.group(2) for hit in tokens))
+    hashes = set(HASH_WORD_RE.findall(label))
     signals = {hit.group(1).lower() for hit in tokens if hit.group(1)}
     lead = LEAD_VERB_RE.match(label)
-    if lead:
-        signals.add(lead.group(1).lower())
-    if len(digests) != 1 or len(signals) != 1 or NEGATION_RE.search(label):
+    lead_verb = lead.group(1).lower() if lead else None
+    if lead_verb:
+        signals.add(lead_verb)
+    if "post" in signals and lead_verb != "post":
+        return None, digests
+    if len(digests) != 1 or len(hashes) != 1 or len(signals) != 1:
         return None, digests
     return signals.pop().capitalize(), digests
 
@@ -1270,12 +1275,16 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
         options = question.get("options") if isinstance(question.get("options"), list) else []
         for option, verb, digests in decision_labels(options):
             if verb is None:
-                if NEGATION_RE.search(normalize_label(option["label"])):
-                    fix = "avoid not/no/never/nothing/without/cannot/n't anywhere in the label"
+                if LEAD_PUNCT_POST_RE.match(normalize_label(option["label"])):
+                    fix = (
+                        "`Post` must be followed by a space, not punctuation or a dash "
+                        "(`Post the reply (draft <hash>)`)"
+                    )
                 else:
                     fix = (
-                        "start a post option with `Post`, or write `(skip draft <hash>)` "
-                        "in a skip option, and name one draft"
+                        "a post option must start with `Post` plus a space, or `(Post`; "
+                        "any other leading word is a refusal. Write `(skip draft <hash>)` "
+                        "in a skip option, and name exactly one draft hash"
                     )
                 problems[("ambiguous", option["label"], text)] = (
                     f"option `{option['label']}` is ambiguous: {fix}"

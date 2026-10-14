@@ -386,6 +386,14 @@ else
     printf 'FAIL  A23 reply denial text (%s)\n' "$(cat "$FIX/err")" >&2; FAIL=$((FAIL + 1))
 fi
 
+case_gate a23b
+payload_b s1 "$REVIEW" | python3 "$HOOK" >/dev/null 2>"$FIX/err"
+if grep -qF 'plus a space' "$FIX/err"; then
+    printf 'PASS  A23b the reply denial states the space rule\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  A23b space rule missing (%s)\n' "$(cat "$FIX/err")" >&2; FAIL=$((FAIL + 1))
+fi
+
 case_gate a24
 mkdir -p "$GATE"
 : >"$GATE/s1.draft-aaaaaaaa.spent"
@@ -463,7 +471,7 @@ expect_out "L4 a skip word inside a post label still approves" "post gate: appro
 
 case_gate l5
 pending aaaaaaaa 1 'reply one'
-expect_out "L5 (post draft hash) after another leading word approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 'Close PR 5 with the reply (post draft aaaaaaaa)' 'reply one')"
+expect_out "L5 (post draft hash) after another leading word is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Close PR 5 with the reply (post draft aaaaaaaa)' 'reply one')"
 
 case_gate l6
 pending aaaaaaaa 1 'reply one'
@@ -553,17 +561,50 @@ expect_err "PQ10 and says is ambiguous" "is ambiguous" "$(payload_q s1 'Post the
 case_gate l15
 pending aaaaaaaa 1 'reply one'
 expect_out "L15 a negated post label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Do not post draft aaaaaaaa' 'reply one')"
-expect_out "L15 a Post-nothing label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post nothing (draft aaaaaaaa)' 'reply one')"
 expect_out "L15 a curly-apostrophe Don't label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 "$(printf 'Don\342\200\231t post draft aaaaaaaa')" 'reply one')"
 expect_out "L15 a curly-apostrophe Can't label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 "$(printf 'Can\342\200\231t post draft aaaaaaaa')" 'reply one')"
 expect_out "L15 a hyphenated Post-mortem lead is not a post" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post-mortem note (draft aaaaaaaa)' 'reply one')"
 expect_file "L15 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 
+AMB="post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)"
+case_gate l16
+pending aaaaaaaa 1 'reply one'
+for lab in 'Hold off on post draft aaaaaaaa' 'Cancel post draft aaaaaaaa' 'Decline to post draft aaaaaaaa' 'Maybe post draft aaaaaaaa' 'Stop post draft aaaaaaaa' 'Save post draft aaaaaaaa' 'Cancel "Post draft aaaaaaaa"'; do
+  expect_out "L16 refusal-led label is ambiguous: $lab" "$AMB" "$(payload_a s1 "$lab" 'reply one')"
+done
+expect_file "L16 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+expect_file "L16 the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+case_gate l17
+pending aaaaaaaa 1 'reply one'
+expect_out "L17 a (Post lead approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 '(Post the reply) (draft aaaaaaaa)' 'reply one')"
+case_gate l18
+pending aaaaaaaa 1 'reply one'
+expect_out "L18 two hashes joined by or are ambiguous" "$AMB" "$(payload_a s1 'Post draft aaaaaaaa or bbbbbbbb' 'reply one')"
+expect_out "L18 two hashes joined by a dash are ambiguous" "$AMB" "$(payload_a s1 'Post draft aaaaaaaa-bbbbbbbb' 'reply one')"
+expect_file "L18 the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+case_gate l19
+pending aaaaaaaa 1 'reply one'
+expect_out "L19 Post colon is ambiguous" "$AMB" "$(payload_a s1 'Post: the closing comment (draft aaaaaaaa)' 'reply one')"
+expect_out "L19 Post comma is ambiguous" "$AMB" "$(payload_a s1 'Post, then close (draft aaaaaaaa)' 'reply one')"
+expect_out "L19 Post dash is ambiguous" "$AMB" "$(payload_a s1 'Post-the comment (draft aaaaaaaa)' 'reply one')"
+expect_out "L19 Post em dash is ambiguous" "$AMB" "$(payload_a s1 "$(printf 'Post\342\200\224the comment (draft aaaaaaaa)')" 'reply one')"
+
 case_gate pq11
 pending aaaaaaaa 1 'reply one'
 expect_err "PQ11 a negated post label is refused as ambiguous" "is ambiguous" "$(payload_q s1 'Do not post draft aaaaaaaa' '' 'Post this draft? reply one')"
 expect_err "PQ11 a curly-apostrophe negated label is refused as ambiguous" "is ambiguous" "$(payload_q s1 "$(printf 'Don\342\200\231t post draft aaaaaaaa')" '' 'Post this draft? reply one')"
-expect_err "PQ11 a Post-led negated label names the negation rule" "avoid not/no/never/nothing/without/cannot/n't" "$(payload_q s1 'Post the reply, no mentions (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+
+case_gate pq12
+pending aaaaaaaa 1 'reply one'
+for lab in 'Hold off on post draft aaaaaaaa' 'Cancel post draft aaaaaaaa' 'Decline to post draft aaaaaaaa' 'Maybe post draft aaaaaaaa' 'Post draft aaaaaaaa or bbbbbbbb' 'Post draft aaaaaaaa-bbbbbbbb'; do
+  expect_err "PQ12 refused at PreToolUse: $lab" "is ambiguous" "$(payload_q s1 "$lab" '' 'Post this draft? reply one')"
+done
+expect_err "PQ12 Post colon names the space rule" "must be followed by a space" "$(payload_q s1 'Post: the closing comment (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ12 Post comma names the space rule" "must be followed by a space" "$(payload_q s1 'Post, then close (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ12 Post dash names the space rule" "must be followed by a space" "$(payload_q s1 'Post-the comment (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ12 a leading-verb refusal names the leading-word rule" "any other leading word is a refusal" "$(payload_q s1 'Hold off on post draft aaaaaaaa' '' 'Post this draft? reply one')"
+
+expect_err "PQ12 Post em dash names the space rule" "must be followed by a space" "$(payload_q s1 "$(printf 'Post\342\200\224the comment (draft aaaaaaaa)')" '' 'Post this draft? reply one')"
 
 # --- P: an approval is per draft, per session, and survives other prompts ---
 
