@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -75,7 +76,7 @@ CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflo
 # that draft. The verb is the leading word or the word before the token
 # ("Post the reply (draft h)", "Leave it (skip draft h)", "Post draft h").
 DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
-LEAD_VERB_RE = re.compile(r"\s*(post|skip)\b", re.IGNORECASE)
+LEAD_VERB_RE = re.compile(r"\s*(post|skip)(?=\s|$)", re.IGNORECASE)
 # A negation makes the verb unreliable ("Do not post draft h"): fail closed.
 NEGATION_RE = re.compile(r"\b(?:not|never|no|nothing|without|cannot)\b|n't\b", re.IGNORECASE)
 
@@ -393,8 +394,9 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
-    "that read as the action and end with `(draft <hash>)` for the post and "
-    "`(skip draft <hash>)` for the skip, the full draft text in the question "
+    "that read as the action: a post starts with `Post` and ends with `(draft <hash>)` "
+    "(or is `Post draft <hash>`), and a skip ends with "
+    "`(skip draft <hash>)`, the full draft text in the question "
     "(an option preview is clipped by the terminal and never counts). "
     "Post only after the answer approves it.\n"
     "An answer that printed no `post gate:` line means the answer hook is not active "
@@ -1016,9 +1018,18 @@ def dismiss_draft(directory: Path, sid: str, digest: str) -> str:
     return f"draft {digest} skipped (nothing to withdraw)"
 
 
+APOSTROPHES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
+
+
+def normalize_label(label: str) -> str:
+    """NFKC-fold a label and map typographic apostrophes to ASCII."""
+    return unicodedata.normalize("NFKC", label).translate(APOSTROPHES)
+
+
 def label_decision(label: str) -> tuple[str | None, list[str]] | None:
     """(verb, digests) for a label naming a draft, None for any other label;
     verb is "Post" or "Skip", or None when the label is ambiguous."""
+    label = normalize_label(label)
     tokens = list(DRAFT_TOKEN_RE.finditer(label))
     if not tokens:
         return None
@@ -1259,9 +1270,15 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
         options = question.get("options") if isinstance(question.get("options"), list) else []
         for option, verb, digests in decision_labels(options):
             if verb is None:
+                if NEGATION_RE.search(normalize_label(option["label"])):
+                    fix = "avoid not/no/never/nothing/without/cannot/n't anywhere in the label"
+                else:
+                    fix = (
+                        "start a post option with `Post`, or write `(skip draft <hash>)` "
+                        "in a skip option, and name one draft"
+                    )
                 problems[("ambiguous", option["label"], text)] = (
-                    f"option `{option['label']}` is ambiguous: start a post option with `Post`, "
-                    "or write `(skip draft <hash>)` in a skip option, and name one draft"
+                    f"option `{option['label']}` is ambiguous: {fix}"
                 )
                 continue
             digest = digests[0]

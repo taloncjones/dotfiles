@@ -14,10 +14,10 @@ gh <args>`. A Jira comment has no draft.
    for a post or `(skip draft <hash>)` for a skip: a post option such as `Post the closing comment on PR #1
    (draft 9cb85c49)`, a skip option such as `Leave PR #1 open (skip draft
    9cb85c49)`. The recommended one comes first, with ` (Recommended)`.
-   The verb rule: a label is a post when its leading word or the word
-   before the hash is `post`, and a skip when that word is `skip`. A `skip`
+   The verb rule: a label is a post when its leading word (followed by a space) or the
+   word before `draft <hash>` is `post`, and a skip when that word is `skip`. A `skip`
    elsewhere in the label does not count. A label with neither verb, both
-   verbs, a negation (`not`, `never`, `nothing`), or two hashes is ambiguous
+   verbs, a negation (`not`, `no`, `never`, `nothing`, `without`, `cannot`, `n't`), or two hashes is ambiguous
    and never decides. The legacy labels
    `Post draft <hash>` and `Skip draft <hash>` still work.
 

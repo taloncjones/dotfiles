@@ -554,11 +554,16 @@ case_gate l15
 pending aaaaaaaa 1 'reply one'
 expect_out "L15 a negated post label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Do not post draft aaaaaaaa' 'reply one')"
 expect_out "L15 a Post-nothing label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post nothing (draft aaaaaaaa)' 'reply one')"
+expect_out "L15 a curly-apostrophe Don't label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 "$(printf 'Don\342\200\231t post draft aaaaaaaa')" 'reply one')"
+expect_out "L15 a curly-apostrophe Can't label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 "$(printf 'Can\342\200\231t post draft aaaaaaaa')" 'reply one')"
+expect_out "L15 a hyphenated Post-mortem lead is not a post" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post-mortem note (draft aaaaaaaa)' 'reply one')"
 expect_file "L15 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 
 case_gate pq11
 pending aaaaaaaa 1 'reply one'
 expect_err "PQ11 a negated post label is refused as ambiguous" "is ambiguous" "$(payload_q s1 'Do not post draft aaaaaaaa' '' 'Post this draft? reply one')"
+expect_err "PQ11 a curly-apostrophe negated label is refused as ambiguous" "is ambiguous" "$(payload_q s1 "$(printf 'Don\342\200\231t post draft aaaaaaaa')" '' 'Post this draft? reply one')"
+expect_err "PQ11 a Post-led negated label names the negation rule" "avoid not/no/never/nothing/without/cannot/n't" "$(payload_q s1 'Post the reply, no mentions (draft aaaaaaaa)' '' 'Post this draft? reply one')"
 
 # --- P: an approval is per draft, per session, and survives other prompts ---
 

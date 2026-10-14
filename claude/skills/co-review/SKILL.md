@@ -749,7 +749,7 @@ python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-fil
 Show the printed `draft <hash>` line and the body. Then ask with
 `AskUserQuestion`: one single-select question for the draft, with the body
 in the question, and the options
-a post option ending `(draft <hash>)` and a skip option ending
+a post option starting `Post` and ending `(draft <hash>)` and a skip option ending
 `(skip draft <hash>)`, recommendation first. The
 chosen post option is the go. A PostToolUse hook approves
 that one draft when its body was in the question, and prints a
