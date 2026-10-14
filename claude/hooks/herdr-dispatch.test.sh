@@ -550,6 +550,12 @@ elif args[:2] == ["workspace", "close"]:
     apath = Path(os.environ["FAKE_AGENTS"])
     apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
                                  if a.get("workspace_id") != ws]))
+    if mode == "workspace-close-lost-reply":
+        # The close lands, then the reply is lost.
+        print(json.dumps({"id": "cli:workspace:close",
+                          "error": {"code": "server_unavailable", "message": "fake"}}),
+              file=sys.stderr)
+        raise SystemExit(1)
     print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
 elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
     wpath = Path(os.environ["FAKE_WORKSPACES"])
@@ -570,6 +576,11 @@ elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
     if verb == "rename" and mode == "rename-hang":
         import time
         time.sleep(float(os.environ.get("FAKE_HANG_SECS", "3")))
+    if verb == "get" and mode == "workspace-get-fail":
+        print(json.dumps({"id": "cli:workspace:get",
+                          "error": {"code": "server_unavailable", "message": "fake"}}),
+              file=sys.stderr)
+        raise SystemExit(1)
     if not match or (verb == "rename" and mode == "rename-fail"):
         code = "rename_refused" if match else "workspace_not_found"
         print(json.dumps({"id": f"cli:workspace:{verb}",
@@ -4689,6 +4700,168 @@ def test_present_all_exit_and_stop_rules():
         fx.close()
 
 
+ARCHIVE_ARGS = ("archive-task", "--repo-slug", None, "--session", "S", "--fence", "1",
+                "--task-id", "td-m")
+
+
+def archive_fixture(fx, spaces=("w1",), status="merged"):
+    gone = fx.root / "gone-tree"
+    put_task(fx, "td-m", status=status, worktree=str(gone),
+             workers=[{"workspace_id": w} for w in spaces])
+    write_workspaces(fx, [ws_entry(w, "td-m", gone) for w in spaces])
+    Path(fx.env["FAKE_PANES"]).write_text(json.dumps(
+        [{"pane_id": f"{w}:p1", "workspace_id": w} for w in spaces]))
+    Path(fx.env["FAKE_AGENTS"]).write_text("[]")
+    return gone
+
+
+def run_archive(fx, *extra):
+    argv = [fx.slug if a is None else a for a in ARCHIVE_ARGS]
+    return core_cli(fx, *argv, *extra, herdr_on_path=True)
+
+
+def close_calls(fx):
+    return [c for c in fx.calls() if c[:2] == ["workspace", "close"]]
+
+
+def live_record(fx):
+    return (fx.rd / "tasks" / "td-m.json").exists()
+
+
+def test_archive_task_closes_an_emptied_merged_workspace_then_archives():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        out = run_archive(fx)
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        assert re.fullmatch(r"archived td-m archive/\d{4}-\d{2} files=\d+\n", out.stdout), out.stdout
+        assert close_calls(fx) == [["workspace", "close", "w1"]], fx.calls()
+        assert list((fx.rd / "archive").glob("*/tasks/td-m.json")) and not live_record(fx)
+    finally:
+        fx.close()
+
+
+def test_archive_task_refuses_worktree_present_and_closes_nothing():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        put_task(fx, "td-m", status="merged", worktree=str(fx.repo),
+                 workers=[{"workspace_id": "w1"}])
+        out = run_archive(fx)
+        assert out.returncode == 1 and out.stdout == "refused td-m reason=worktree-present\n", out
+        assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_archive_task_keeps_a_workspace_with_a_live_agent_and_names_it():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        want = "refused td-m reason=workspace-listed workspace=w1 kept=live-agent\n"
+        for row in ({"name": "a", "pane_id": "w1:p1", "workspace_id": "w1"}, {"name": "ghost"}):
+            Path(fx.env["FAKE_AGENTS"]).write_text(json.dumps([row]))
+            out = run_archive(fx)
+            assert out.returncode == 1 and out.stdout == want, out
+            assert not close_calls(fx), fx.calls()
+            assert live_record(fx)
+    finally:
+        fx.close()
+
+
+def test_archive_task_keeps_a_workspace_whose_pane_runs_a_non_shell_process():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        for mode in ("process-info-foreground-busy", "process-info-empty-foreground"):
+            fx.env["FAKE_HERDR_MODE"] = mode
+            out = run_archive(fx)
+            assert out.returncode == 1, out
+            assert out.stdout == "refused td-m reason=workspace-listed workspace=w1 kept=busy-pane\n", out
+            assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_archive_task_keeps_a_workspace_on_another_worktree():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        want = "refused td-m reason=workspace-listed workspace=w1 kept=other-worktree\n"
+        write_workspaces(fx, [ws_entry("w1", "td-m", fx.root / "elsewhere")])
+        out = run_archive(fx)
+        assert out.returncode == 1 and out.stdout == want, out
+        archive_fixture(fx)
+        fx.env["FAKE_HERDR_MODE"] = "workspace-get-fail"
+        out = run_archive(fx)
+        assert out.returncode == 1 and out.stdout == want, out
+        assert not close_calls(fx), fx.calls()
+        assert live_record(fx)
+    finally:
+        fx.close()
+
+
+def test_archive_task_closes_nothing_for_an_abandoned_or_failed_task():
+    fx = Fixture()
+    try:
+        for status in ("abandoned", "failed"):
+            archive_fixture(fx, status=status)
+            out = run_archive(fx)
+            assert out.returncode == 1 and out.stdout == "refused td-m reason=workspace-listed\n", out
+            assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_archive_task_closes_nothing_on_a_stale_fence():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        argv = [fx.slug if a is None else a for a in ARCHIVE_ARGS]
+        argv[argv.index("--fence") + 1] = "2"
+        out = core_cli(fx, *argv, herdr_on_path=True)
+        assert out.returncode != 0, out
+        assert all(c[:2] in (["agent", "list"], ["workspace", "list"]) for c in fx.calls()), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_archive_task_reports_a_lost_close_reply_then_archives_on_rerun():
+    fx = Fixture()
+    try:
+        archive_fixture(fx)
+        fx.env["FAKE_HERDR_MODE"] = "workspace-close-lost-reply"
+        out = run_archive(fx)
+        assert out.returncode == 1, out
+        assert out.stdout == "refused td-m reason=workspace-listed workspace=w1 kept=close-failed\n", out
+        assert live_record(fx)
+        fx.env["FAKE_HERDR_MODE"] = "ok"
+        out = run_archive(fx)
+        assert out.returncode == 0 and out.stdout.startswith("archived td-m archive/"), out
+        assert len(close_calls(fx)) == 1, fx.calls()
+    finally:
+        fx.close()
+
+
+def test_archive_task_closes_what_it_can_names_the_kept_workspace_then_finishes_on_rerun():
+    fx = Fixture()
+    try:
+        archive_fixture(fx, spaces=("w1", "w2"))
+        agents = Path(fx.env["FAKE_AGENTS"])
+        agents.write_text(json.dumps([{"name": "a", "pane_id": "w2:p1", "workspace_id": "w2"}]))
+        out = run_archive(fx)
+        assert out.returncode == 1, out
+        assert out.stdout == "refused td-m reason=workspace-listed workspace=w2 kept=live-agent\n", out
+        assert close_calls(fx) == [["workspace", "close", "w1"]], fx.calls()
+        assert live_record(fx)
+        agents.write_text("[]")
+        out = run_archive(fx)
+        assert out.returncode == 0 and out.stdout.startswith("archived td-m archive/"), out
+        assert close_calls(fx) == [["workspace", "close", "w1"], ["workspace", "close", "w2"]], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_present_all_orders_terminal_first():
     fx = Fixture()
     try:
@@ -5807,6 +5980,15 @@ for name, test in (
     ("dispatch-gate ship refuses an unknown pinned agent state", test_dispatch_gate_ship_refuses_when_herdr_cannot_say_the_pinned_agent_state),
     ("dispatch-gate ship: a render failure leaves ship_relaunch_head unchanged", test_dispatch_gate_ship_render_failure_leaves_the_budget_unspent),
     ("dispatch-gate CLI reaches the function", test_dispatch_gate_cli_reaches_the_function),
+    ("archive-task closes an emptied merged workspace, then archives", test_archive_task_closes_an_emptied_merged_workspace_then_archives),
+    ("archive-task refuses worktree-present and closes nothing", test_archive_task_refuses_worktree_present_and_closes_nothing),
+    ("archive-task keeps a workspace with a live agent and names it", test_archive_task_keeps_a_workspace_with_a_live_agent_and_names_it),
+    ("archive-task keeps a workspace whose pane runs a non-shell process", test_archive_task_keeps_a_workspace_whose_pane_runs_a_non_shell_process),
+    ("archive-task keeps a workspace on another worktree", test_archive_task_keeps_a_workspace_on_another_worktree),
+    ("archive-task closes nothing for an abandoned or failed task", test_archive_task_closes_nothing_for_an_abandoned_or_failed_task),
+    ("archive-task closes nothing on a stale fence", test_archive_task_closes_nothing_on_a_stale_fence),
+    ("archive-task reports a lost close reply, then archives on rerun", test_archive_task_reports_a_lost_close_reply_then_archives_on_rerun),
+    ("archive-task closes what it can, names the kept workspace, then finishes on rerun", test_archive_task_closes_what_it_can_names_the_kept_workspace_then_finishes_on_rerun),
 ):
     check(name, test)
 

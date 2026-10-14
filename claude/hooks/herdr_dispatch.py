@@ -1772,6 +1772,42 @@ def _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
     return _same_directory(checkout, worktree)
 
 
+def _workspace_kept(herdr_cli, task, workspace_id, env):
+    """-> (kept code or None, pane ids): why the workspace may not be closed."""
+    if not _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
+        return "other-worktree", set()
+    agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    ids = _pane_ids(panes)
+    if any(_malformed_agent(a) or a["pane_id"] in ids for a in agents):
+        return "live-agent", ids
+    if not all(_pane_idle(herdr_cli, pane_id, env) for pane_id in sorted(ids)):
+        return "busy-pane", ids
+    return None, ids
+
+
+def close_emptied_workspace(herdr_cli, task, workspace_id, env):
+    """Close a merged task's emptied workspace. -> "closed" or a kept code.
+
+    Caller holds the owner fence. herdr has no compare-and-close, so the
+    checks run twice and the close follows the second.
+    """
+    try:
+        kept, ids = _workspace_kept(herdr_cli, task, workspace_id, env)
+        if kept:
+            return kept
+        kept, fresh_ids = _workspace_kept(herdr_cli, task, workspace_id, env)
+    except DispatchError:
+        return "changed"
+    if kept or fresh_ids != ids:
+        return "changed"
+    try:
+        _run_herdr(herdr_cli, ["workspace", "close", workspace_id], env=env,
+                   json_result=False)
+    except DispatchError:
+        return "close-failed"
+    return "closed"
+
+
 def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env):
     row = task["workers"][index]
     reason = reasons(index)

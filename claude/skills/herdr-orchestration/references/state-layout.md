@@ -1020,6 +1020,20 @@ archived records in two months), `not-found`, `unreadable`, `not-terminal`
 workspaces), `destination-exists`, `unexpected-type`. Success prints
 `archived <task> archive/<YYYY-MM> files=<n>`.
 
+For a `merged` task, when herdr itself was polled (no override files) and
+`workspace-listed` is the only refusal, `archive-task` closes the task's
+emptied herdr workspace under the held fence, then polls again and
+archives. A workspace is closed only when herdr's checkout for it is the
+task worktree, no agent sits in its panes, and every pane is an idle
+shell. Otherwise it prints
+`refused <task> reason=workspace-listed workspace=<ws> kept=<why>` (exit 1)
+and moves nothing. The `kept` codes: `other-worktree` (checkout is not the
+task worktree, or herdr could not say), `live-agent` (an agent in a pane,
+or a malformed agent row), `busy-pane` (a non-shell foreground process or
+failed inspection), `changed` (the pre-close re-check found a difference),
+`close-failed` (the close raised; a re-run polls fresh). `abandoned` and
+`failed` tasks never close a workspace.
+
 The month is the one holding the archived record, else the current UTC
 month; the record moves first, so an interrupted run finishes in the same
 month. Every call replans from disk, so a call after an interruption of

@@ -4528,7 +4528,7 @@ def archive_task(rd, task_id, poll, now=None):
     claimed = claimed_workspaces(rd, task_id)
     spaces = set(claimed) | {w["workspace_id"] for w in workers if w.get("workspace_id")}
     if spaces & poll["known"]:
-        return "refused", "workspace-listed", None
+        return "refused", "workspace-listed", sorted(spaces & poll["known"])
     moves = archive_moves(rd, task_id, claimed)
     dest = rd / "archive" / month
     if any(_entry_kind(dest / rel) for rel in moves):
@@ -4791,6 +4791,27 @@ def _require(cond, msg) -> None:
     if not cond:
         sys.stderr.write(f"[X] {msg}\n")
         raise SystemExit(2)
+
+
+def _close_listed_workspaces(ns, rd, listed):
+    """Close a merged task's emptied workspaces under the held fence.
+    -> None when no close applies, "" when all closed, else " workspace=<ws> kept=<why>"."""
+    if ns.agents_json or ns.workspaces_json:
+        return None
+    try:
+        task = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(task, dict) or task.get("status") != "merged":
+        return None
+    import shutil
+    from herdr_dispatch import close_emptied_workspace
+    for workspace_id in listed:
+        result = close_emptied_workspace(shutil.which("herdr"), task, workspace_id,
+                                         dict(os.environ))
+        if result != "closed":
+            return f" workspace={workspace_id} kept={result}"
+    return ""
 
 
 @contextlib.contextmanager
@@ -7868,10 +7889,21 @@ def _main(argv=None) -> int:
             return 0
     if ns.cmd == "archive-task":
         _require(valid_task_id(ns.task_id), "invalid task-id")
-        # Poll first: no herdr subprocess runs under the owner lock.
+        # The polls run outside the owner lock; the close runs under it, as settle's does.
         poll, _ = _checkin_poll(ns)
         with _fenced(ns) as rd:
             outcome, detail, count = archive_task(rd, ns.task_id, poll)
+            if outcome == "refused" and detail == "workspace-listed":
+                kept = _close_listed_workspaces(ns, rd, count)
+                if kept:
+                    print(f"refused {ns.task_id} reason=workspace-listed{kept}")
+                    return 1
+                if kept == "":
+                    outcome = "closed"
+        if outcome == "closed":
+            poll, _ = _checkin_poll(ns)
+            with _fenced(ns) as rd:
+                outcome, detail, count = archive_task(rd, ns.task_id, poll)
         if outcome == "refused":
             print(f"refused {ns.task_id} reason={detail}")
             return 1
