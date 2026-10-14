@@ -13,6 +13,10 @@ gh <args>`. A Jira comment has no draft.
 3. The options are `Post draft <hash>` and `Skip draft <hash>`. The
    recommended one comes first, with ` (Recommended)`.
 
+A PreToolUse hook refuses the prompt before the owner sees it when a
+`Post draft <hash>` option names an unregistered draft or one whose text is
+not in the question, and prints the fix.
+
 The answer is the go. A PostToolUse hook approves exactly the draft the
 chosen option names, and only when its text was in that question
 and the draft text and that question are each at most 2000 characters, the

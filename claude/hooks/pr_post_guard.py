@@ -28,6 +28,9 @@ a `draft` CLI:
   unspent approval. Typed prompts never approve.
 - UserPromptSubmit records which session this Claude process is on for the
   shim, removes legacy files and prunes old state.
+- PreToolUse AskUserQuestion refuses a prompt whose `Post draft <hash>`
+  option names an unregistered draft or one whose text is not in the
+  question, before the owner answers it.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
   shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv,
   reads the PR author, decides the audience and spends one approved draft
@@ -943,17 +946,19 @@ def shown(text, question: str) -> bool:
     return len(question) <= SHOWN_LIMIT and " ".join(text.split()) in " ".join(question.split())
 
 
-def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
-    """Approve a pending draft the owner chose to post (spec R3 step 5);
-    returns the context line."""
-    pending = draft_path(directory, sid, digest, "pending")
-    if not pending.exists():
+def approval_problem(directory: Path, sid: str, digest: str, question: str) -> str | None:
+    """Why choosing `Post draft <digest>` on `question` cannot approve the
+    draft now; None when it can. Shared by the answer and the pre-check."""
+    if not draft_path(directory, sid, digest, "pending").exists():
         if draft_path(directory, sid, digest, "approved").exists():
             return f"draft {digest} already approved; post it"
         if draft_path(directory, sid, digest, "spent").exists():
             return f"draft {digest} already posted once; read the PR, then register it again to post again"
-        return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
-    record = read_json(pending)
+        return (
+            f"draft {digest} not approved: no pending draft in this session; "
+            f"register it first with `{DRAFT_COMMAND} <args>`, then ask again"
+        )
+    record = read_json(draft_path(directory, sid, digest, "pending"))
     if (
         not isinstance(record, dict) or record.get("v") != 3 or "text" not in record
         or not (record["text"] is None or isinstance(record["text"], str))
@@ -970,9 +975,25 @@ def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
                 f"draft {digest} not approved: the question is over {SHOWN_LIMIT} characters, "
                 "more than a prompt displays; shorten it"
             )
-        return f"draft {digest} not approved: its text was not in the question"
+        return (
+            f"draft {digest} not approved: its text was not in the question; "
+            "put the full draft text in the question body, not the option preview"
+        )
+    return None
+
+
+def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
+    """Approve a pending draft the owner chose to post (spec R3 step 5);
+    returns the context line."""
+    problem = approval_problem(directory, sid, digest, question)
+    if problem:
+        return problem
+    pending = draft_path(directory, sid, digest, "pending")
     if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):
-        return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
+        return (
+            f"draft {digest} not approved: no pending draft in this session; "
+            f"register it first with `{DRAFT_COMMAND} <args>`, then ask again"
+        )
     return f"approved draft {digest}"
 
 
@@ -987,6 +1008,17 @@ def dismiss_draft(directory: Path, sid: str, digest: str) -> str:
     if draft_path(directory, sid, digest, "spent").exists():
         return f"draft {digest} not skipped: already posted; read the PR"
     return f"draft {digest} skipped (nothing to withdraw)"
+
+
+def decision_labels(options: list) -> list[tuple[dict, re.Match]]:
+    """(option, match) for each option labelled `Post|Skip draft <hash>`."""
+    named = []
+    for option in options:
+        label = option.get("label") if isinstance(option, dict) else None
+        hit = DECISION_RE.fullmatch(label) if isinstance(label, str) else None
+        if hit:
+            named.append((option, hit))
+    return named
 
 
 def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
@@ -1008,12 +1040,7 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
             continue
         text = question.get("question") if isinstance(question.get("question"), str) else ""
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        named = []
-        for option in options:
-            label = option.get("label") if isinstance(option, dict) else None
-            hit = DECISION_RE.fullmatch(label) if isinstance(label, str) else None
-            if hit:
-                named.append((option, hit))
+        named = decision_labels(options)
         if not named:
             continue
         why = stale
@@ -1189,6 +1216,38 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
     return check_replies(kinds, sid, directory)
 
 
+def handle_ask(payload: dict, directory: Path) -> str | None:
+    """Refuse an AskUserQuestion whose `Post draft <hash>` option could not
+    approve its draft, before the owner spends an answer on it. Read-only."""
+    sid = payload.get("session_id")
+    tool_input = payload.get("tool_input")
+    if not isinstance(sid, str) or not SID_RE.fullmatch(sid) or not isinstance(tool_input, dict):
+        return None
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list):
+        return None
+    problems = {}
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        text = question.get("question") if isinstance(question.get("question"), str) else ""
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        for _option, hit in decision_labels(options):
+            digest = hit.group(2)
+            if hit.group(1) != "Post" or draft_path(directory, sid, digest, "approved").exists():
+                continue
+            problem = approval_problem(directory, sid, digest, text)
+            if problem:
+                problems[(digest, text)] = problem
+    if not problems:
+        return None
+    return (
+        "Blocked: this prompt cannot approve its post, so it was not shown.\n"
+        + "\n".join(problems.values())
+        + "\nFix the prompt and ask again."
+    )
+
+
 def main() -> int:
     if os.environ.get("HERDR_ENV") != "1":
         return 0
@@ -1205,7 +1264,10 @@ def main() -> int:
         handle_prompt(payload, directory, now)
         return 0
     if event == "PreToolUse":
-        reason = handle_pretooluse(payload, directory, now)
+        if payload.get("tool_name") == "AskUserQuestion":
+            reason = handle_ask(payload, directory)
+        else:
+            reason = handle_pretooluse(payload, directory, now)
         if reason:
             print(reason, file=sys.stderr)
             return 2
