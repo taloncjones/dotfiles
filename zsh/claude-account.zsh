@@ -99,6 +99,10 @@ typeset -g DOTFILES_GH_SHIM_HOME="${${(%):-%N}:A:h:h}/bin/herdr-shims"
 # a launch. Resolved at source time for the same snapshot reason as above.
 typeset -g DOTFILES_OP_ENV="${${(%):-%N}:A:h:h}/bin/op-env"
 
+# The herdr-fleet mod loads into the director only, via --plugin-dir. Resolved
+# at source time for the same snapshot reason as above.
+typeset -g DOTFILES_FLEET_PLUGIN="${${(%):-%N}:A:h:h}/claude/plugins/herdr-fleet"
+
 function dotfiles_op_env_apply() {    # dotfiles_op_env_apply() loads a project's op-env exports into the current subshell; a no-op without op.env. ex: $ ( dotfiles_op_env_apply "$PWD"; command claude )
     [[ -x "${DOTFILES_OP_ENV:-}" ]] || return 0
     local exports
@@ -182,6 +186,8 @@ function director() {    # director() launches the herdr director with inbound m
     fi
     local arg
     local -a mode=(--permission-mode auto)
+    local -a fleet=()
+    [[ -d "$DOTFILES_FLEET_PLUGIN" ]] && fleet=(--plugin-dir "$DOTFILES_FLEET_PLUGIN")
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done
@@ -191,6 +197,6 @@ function director() {    # director() launches the herdr director with inbound m
             local launcher=$sysparams[pid]
             caffeinate -i -w "$launcher" &!
         fi
-        claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${mode[@]}" "$@"
+        claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "$@"
     )
 }

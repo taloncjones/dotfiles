@@ -1,0 +1,6 @@
+{
+  "name": "herdr-fleet",
+  "version": "0.1.0",
+  "description": "Docked pane showing herdr tasks, their leads and the repo's open PRs",
+  "types": "./types/index.d.ts"
+}
