@@ -200,6 +200,12 @@ export function summaryLine(
   )
 }
 
-export function clip(text: string, width: number): string {
+/** Replaces control characters so record or PR text cannot drive the terminal. */
+export function plain(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '?')
+}
+
+export function clip(raw: string, width: number): string {
+  const text = plain(raw)
   return text.length <= width ? text.padEnd(width) : text.slice(0, width)
 }

@@ -417,3 +417,15 @@ test('reload fence: an older read finishing later does not publish', async ($, o
   expect(rows.some(line => line.startsWith('new-item'))).toBe(true)
   expect(rows.some(line => line.startsWith('item '))).toBe(false)
 })
+
+test('control characters in PR titles never reach the drawing', async ($, on) => {
+  const w = newWorld(owner('a'))
+  w.gh = { exitCode: 0, stderr: '', stdout: prJson([
+    { number: 5, title: 'evil\u001b[2Jtitle\u0007', isDraft: false, headRefName: 'e', headRefOid: 'fffffff111', statusCheckRollup: [], reviewDecision: '' },
+  ]) }
+  const clock = stub(on, w)
+  await boot($, clock)
+  const text = await prsText(await pane($))
+  expect(text).toContain('evil?[2Jtitle?')
+  expect(text).not.toContain('\u001b')
+})

@@ -12,6 +12,7 @@ import {
   GH_ARGV,
   activeRows,
   clip,
+  plain,
   doneRows,
   ghReason,
   isRecordName,
@@ -392,7 +393,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text dimColor wrap="truncate-end">{header}</Text>
+        <Text dimColor wrap="truncate-end">{plain(header)}</Text>
         <Box flexDirection="row">
           {tabs.map(([name, hotkey, label]) => (
             <Button
@@ -404,7 +405,7 @@ export const register: Register = on => {
           ))}
         </Box>
         {lines.map(line => (
-          <Text wrap="truncate-end">{line}</Text>
+          <Text wrap="truncate-end">{plain(line)}</Text>
         ))}
       </Box>
     )
