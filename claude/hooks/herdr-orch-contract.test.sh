@@ -210,6 +210,8 @@ ok "skill: unverifiable evidence is the integrity halt, never retried" \
   "grep -Fq 'unverifiable-evidence' $SKILL && grep -Fq 'not retried' $SKILL"
 ok "skill: dirty worktree after a Claude review is reported" \
   "grep -Fq 'dirty=yes' $SKILL"
+ok "director-launch names the dotfiles guard-edit rules" \
+  "grep -Fq -- '--allowedTools' zsh/claude-account.zsh && grep -Fq 'allowedTools' $REFS/director-launch.md && grep -Fq 'as its own Bash call' $SKILL"
 ok "skill: run-think always runs in the background" \
   "grep -Fq 'run-think\` always runs under \`Bash run_in_background\`' $REFS/legacy-wrappers.md && ! grep -Fq 'both are watch wakes' $SKILL $REFS/legacy-wrappers.md"
 ok "agent: director describes the backstop and the launch function" \
