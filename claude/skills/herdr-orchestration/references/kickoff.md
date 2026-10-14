@@ -166,8 +166,8 @@ phase-appropriate brief (references/brief-template.md) and model.
    visibly retryable. Write the workspace index through `write-index`.
    For a repo TODO, persist its exact filename stem as `todo_id`; do not infer
    this field from a display label. Run the installed `todos.sh ready <id>
---offline` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
-   or unknown dependencies keep the task queued. The adapter checks this
+--online` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
+   or unknown dependencies (a failed lookup) keep the task queued. The adapter checks this
    persisted binding again outside the owner lock. An old record without a
    binding needs explicit source reconciliation before a new TODO kickoff.
 7. **Resolve and launch through the adapter** (section 8). The adapter reserves

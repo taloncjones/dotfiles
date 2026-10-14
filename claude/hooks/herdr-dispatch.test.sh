@@ -3012,7 +3012,7 @@ def test_task_designated_linked_worktree_rejects_other_checkout():
         fixture.close()
 
 
-def test_explicit_todo_binding_must_be_ready_offline_before_dispatch():
+def test_explicit_todo_binding_must_be_ready_online_before_dispatch():
     fixture = Fixture()
     try:
         task = json.loads(fixture.task_file.read_text())
@@ -3034,7 +3034,7 @@ def test_explicit_todo_binding_must_be_ready_offline_before_dispatch():
         else:
             raise AssertionError("blocked TODO dependency launched")
         assert (fixture.root / "todo-call").read_text().strip() == (
-            f"ready {todo_id} --offline"
+            f"ready {todo_id} --online"
         )
         assert fixture.calls() == [], fixture.calls()
         todos.write_text(
@@ -5720,7 +5720,7 @@ for name, test in (
     ("wrong pane worktree rejects before mutation", test_wrong_worktree_rejects_before_attempt_or_start),
     ("invalid task base SHA rejects before mutation", test_invalid_task_base_sha_rejects_before_attempt_or_start),
     ("task designated linked worktree rejects other checkout", test_task_designated_linked_worktree_rejects_other_checkout),
-    ("explicit TODO binding must be ready offline before dispatch", test_explicit_todo_binding_must_be_ready_offline_before_dispatch),
+    ("explicit TODO binding must be ready online before dispatch", test_explicit_todo_binding_must_be_ready_online_before_dispatch),
     ("stale agent readiness cannot confirm current attempt", test_stale_agent_readiness_marks_launch_failed),
     ("fresh Codex hook review modal blocks before prompt", test_fresh_codex_hook_review_modal_blocks_before_prompt),
     ("stale hook review text does not block a fresh ready boundary", test_stale_hook_review_text_does_not_block_fresh_ready_boundary),
