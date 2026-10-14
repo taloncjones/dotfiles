@@ -10,8 +10,8 @@ gh <args>`. A Jira comment has no draft.
 2. Ask one single-select question per draft, at most four per prompt. Put the
    full draft text in the question; an option preview is clipped by the
    terminal, so it never counts.
-3. Write each option so it reads as the action and ends with the hash in
-   parentheses: a post option such as `Post the closing comment on PR #1
+3. Write each option so it reads as the action and ends with `(draft <hash>)`
+   for a post or `(skip draft <hash>)` for a skip: a post option such as `Post the closing comment on PR #1
    (draft 9cb85c49)`, a skip option such as `Leave PR #1 open (skip draft
    9cb85c49)`. The recommended one comes first, with ` (Recommended)`.
    The verb rule: a label is a post when its leading word or the word
