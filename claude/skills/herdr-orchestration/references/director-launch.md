@@ -67,23 +67,31 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   `Bash(gh pr comment:*)`, `Bash(gh pr ready:*)`) live in
   `claude/settings.json.tmpl`, so `update --ai` carries them into every
   account's `settings.json`; the post gate hook still runs on each of
-  them. And it refuses any edit that loosens the
-  director's own guardrails (this skill's launch and posting rules, the
-  post gate, the `director` function's permission mode), from the
-  director and from every worker it launches, which also run in auto
-  mode. Those edits run from a manual-mode session
-  (`director --permission-mode manual`).
+  them. And it refuses any edit that loosens the director's own guardrails
+  (this skill's launch and posting rules, the post gate, the `director`
+  function's permission mode), from the director and from every worker it
+  launches, which also run in auto mode. In the personal dotfiles checkout,
+  where those files are the product, `director()` passes `--allowedTools`
+  rules (`Read` and `Edit` on the checkout and on
+  `~/.herdr/worktrees/dotfiles/**`, plus `Bash(sed -n:*)`) so the director
+  reads a guard file with the Read tool or `sed -n` and edits it under an
+  allow-edit marker without the classifier. Workers keep the classifier: a
+  refused worker reports `blocked:` with the denial text and the director
+  applies that edit. Paths under `.claude/` stay protected in every mode
+  and still need a manual-mode session. Other repositories keep the
+  classifier for the director too, and their guardrail edits run from a
+  manual-mode session (`director --permission-mode manual`).
 
   What the director runs, and what the classifier does with it:
 
-  | Action                                                                                                                 | Covering template rule              | Prompt in manual mode | Auto mode                                                 | Recovery                                                                                   |
-  | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | --------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-  | `gh pr view`, `gh pr comment`, `gh pr merge`                                                                           | `Bash(gh pr:*)`                     | no                    | allowed by the template allow rules; refused without them | run `update --ai` to reconcile the rules into settings.json                                |
-  | `gh repo view`, `gh api`                                                                                               | `Bash(gh repo:*)`, `Bash(gh api:*)` | no                    | allowed                                                   | none needed                                                                                |
-  | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready`                               | `Bash(python3:*)`                   | no                    | allowed; an occasional refusal is reported                | rerun the verb from a manual-mode session                                                  |
-  | `git worktree remove`                                                                                                  | `Bash(git worktree:*)`              | no                    | allowed                                                   | none needed                                                                                |
-  | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                                                    | none                                | accepted prompt       | refused                                                   | finish `/post-merge` by hand                                                               |
-  | an edit to this skill's launch or posting rules, the post gate, or the `director` permission mode (director or worker) | not applicable                      | accepted prompt       | refused as self-modification                              | make the edit from a manual-mode session; a worker reports `blocked:` with the denial text |
+  | Action                                                                                                                 | Covering template rule                                            | Prompt in manual mode | Auto mode                                                                                                    | Recovery                                                                                                                                                |
+  | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `gh pr view`, `gh pr comment`, `gh pr merge`                                                                           | `Bash(gh pr:*)`                                                   | no                    | allowed by the template allow rules; refused without them                                                    | run `update --ai` to reconcile the rules into settings.json                                                                                             |
+  | `gh repo view`, `gh api`                                                                                               | `Bash(gh repo:*)`, `Bash(gh api:*)`                               | no                    | allowed                                                                                                      | none needed                                                                                                                                             |
+  | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready`                               | `Bash(python3:*)`                                                 | no                    | allowed; an occasional refusal is reported                                                                   | rerun the verb from a manual-mode session                                                                                                               |
+  | `git worktree remove`                                                                                                  | `Bash(git worktree:*)`                                            | no                    | allowed                                                                                                      | none needed                                                                                                                                             |
+  | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                                                    | none                                                              | accepted prompt       | refused                                                                                                      | finish `/post-merge` by hand                                                                                                                            |
+  | an edit to this skill's launch or posting rules, the post gate, or the `director` permission mode (director or worker) | `--allowedTools` rules from `director()` in the dotfiles checkout | accepted prompt       | dotfiles director: allowed by the launch rules; workers and other repositories: refused as self-modification | a worker reports `blocked:` with the denial text and the director applies the edit under allow-edit; elsewhere make the edit from a manual-mode session |
 
   The explicit `accept` is safe here because every inbound message is
   wake-only (Safety); a bypass-mode director without it has every

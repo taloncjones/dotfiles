@@ -191,7 +191,7 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
    line); the new director sees them as `carried:` lines. The same notes
    also land in `decisions.jsonl` and show in the decisions block until the
    next rollover. If that log write fails, the verb prints `[WARNING]
-   rollover: carry notes not saved to decisions.jsonl` on stderr, closes the
+rollover: carry notes not saved to decisions.jsonl` on stderr, closes the
    new pane and keeps this lease (`handover-failed`, `carry-unsaved`); fix the
    log and roll over again.
 3. Run in the foreground, with a Bash timeout of 300000 ms:
@@ -601,7 +601,7 @@ Helper sessions a reviewer spawns, and which of them may emit: read
      event `changes-requested`, and surface the findings or incomplete evidence
      for deliberate development repair; render the repair brief (section 2
      step 7) with `--phase repair --findings <the review record's findings_ref
-     or the ship handoff's report_path>`. Run a scoped `review-change` only when
+or the ship handoff's report_path>`. Run a scoped `review-change` only when
      the repair needs fresh evidence; structural repairs return to design. An
      exhausted final `co-review --fix` budget never resets or re-enters its gate
      here. Record the stop in the task/handoff and return control to the user.
@@ -893,7 +893,9 @@ review dispatch of a Jira-kind task).
   case run
   `python3 "$CORE" allow-edit --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --minutes 5 --max-edits 3 --note "<what was approved>"`
   AFTER the approval and in the same turn, make the edit, and name it in
-  the turn summary. A git work-tree write (`commit`, `merge`, `cherry-pick`,
+  the turn summary. Run `allow-edit` as its own Bash call: the guard judges a
+  whole command before any part runs, so `allow-edit ... && sed -i ...` in
+  one call is refused. A git work-tree write (`commit`, `merge`, `cherry-pick`,
   `reset` and the like) is a write and spends marker budget, one unit per
   distinct repository per Bash call (chained git commands share a unit). A marker is
   for director maintenance (teardown, lessons, gate sync) or an
