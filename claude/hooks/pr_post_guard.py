@@ -76,6 +76,8 @@ CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflo
 # ("Post the reply (draft h)", "Leave it (skip draft h)", "Post draft h").
 DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
 LEAD_VERB_RE = re.compile(r"\s*(post|skip)\b", re.IGNORECASE)
+# A negation makes the verb unreliable ("Do not post draft h"): fail closed.
+NEGATION_RE = re.compile(r"\b(?:not|never|no|nothing|without|cannot)\b|n't\b", re.IGNORECASE)
 
 # GitHub sends no notification for a mention inside code.
 FENCED_CODE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
@@ -1025,7 +1027,7 @@ def label_decision(label: str) -> tuple[str | None, list[str]] | None:
     lead = LEAD_VERB_RE.match(label)
     if lead:
         signals.add(lead.group(1).lower())
-    if len(digests) != 1 or len(signals) != 1:
+    if len(digests) != 1 or len(signals) != 1 or NEGATION_RE.search(label):
         return None, digests
     return signals.pop().capitalize(), digests
 

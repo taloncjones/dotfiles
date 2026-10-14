@@ -550,6 +550,16 @@ pending aaaaaaaa 1 'reply one'
 expect_err "PQ10 a both-verb label is refused as ambiguous with the fix" "(skip draft <hash>)" "$(payload_q s1 'Post the reply (skip draft aaaaaaaa)' '' 'Post this draft? reply one')"
 expect_err "PQ10 and says is ambiguous" "is ambiguous" "$(payload_q s1 'Post the reply (skip draft aaaaaaaa)' '' 'Post this draft? reply one')"
 
+case_gate l15
+pending aaaaaaaa 1 'reply one'
+expect_out "L15 a negated post label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Do not post draft aaaaaaaa' 'reply one')"
+expect_out "L15 a Post-nothing label is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post nothing (draft aaaaaaaa)' 'reply one')"
+expect_file "L15 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+
+case_gate pq11
+pending aaaaaaaa 1 'reply one'
+expect_err "PQ11 a negated post label is refused as ambiguous" "is ambiguous" "$(payload_q s1 'Do not post draft aaaaaaaa' '' 'Post this draft? reply one')"
+
 # --- P: an approval is per draft, per session, and survives other prompts ---
 
 case_gate p1

@@ -17,7 +17,8 @@ gh <args>`. A Jira comment has no draft.
    The verb rule: a label is a post when its leading word or the word
    before the hash is `post`, and a skip when that word is `skip`. A `skip`
    elsewhere in the label does not count. A label with neither verb, both
-   verbs, or two hashes is ambiguous and never decides. The legacy labels
+   verbs, a negation (`not`, `never`, `nothing`), or two hashes is ambiguous
+   and never decides. The legacy labels
    `Post draft <hash>` and `Skip draft <hash>` still work.
 
 A PreToolUse hook refuses the prompt before the owner sees it when a
