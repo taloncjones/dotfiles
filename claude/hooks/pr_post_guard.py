@@ -23,14 +23,15 @@ a `draft` CLI:
   hash of its argv, the bytes it reads and where it lands, with the text
   it prints.
 - PostToolUse AskUserQuestion approves a pending draft when the chosen
-  option is `Post draft <hash>` and the draft's text is in that question;
-  `Skip draft <hash>` dismisses it or withdraws its
-  unspent approval. Typed prompts never approve.
+  option reads as a post and names `draft <hash>`, and the draft's text is
+  in that question; an option that reads as a skip (`skip draft <hash>`)
+  dismisses it or withdraws its unspent approval. Typed prompts never
+  approve.
 - UserPromptSubmit records which session this Claude process is on for the
   shim, removes legacy files and prunes old state.
-- PreToolUse AskUserQuestion refuses a prompt whose `Post draft <hash>`
-  option names an unregistered draft or one whose text is not in the
-  question, before the owner answers it.
+- PreToolUse AskUserQuestion refuses a prompt whose post option names an
+  unregistered draft or one whose text is not in the question, or whose
+  decision label is ambiguous, before the owner answers it.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
   shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv,
   reads the PR author, decides the audience and spends one approved draft
@@ -70,9 +71,11 @@ from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
-# The owner's answer to a post prompt (spec R2): `Post draft <hash>` approves
-# that draft, `Skip draft <hash>` dismisses it; the tool may add the suffix.
-DECISION_RE = re.compile(r"(Post|Skip) draft ([0-9a-f]{8})( \(Recommended\))?")
+# The owner's answer to a post prompt: a label naming `draft <hash>` decides
+# that draft. The verb is the leading word or the word before the token
+# ("Post the reply (draft h)", "Leave it (skip draft h)", "Post draft h").
+DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
+LEAD_VERB_RE = re.compile(r"\s*(post|skip)\b", re.IGNORECASE)
 
 # GitHub sends no notification for a mention inside code.
 FENCED_CODE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
@@ -388,7 +391,8 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
-    "`Post draft <hash>` and `Skip draft <hash>`, the full draft text in the question "
+    "that read as the action and end with `(draft <hash>)` for the post and "
+    "`(skip draft <hash>)` for the skip, the full draft text in the question "
     "(an option preview is clipped by the terminal and never counts). "
     "Post only after the answer approves it.\n"
     "An answer that printed no `post gate:` line means the answer hook is not active "
@@ -947,7 +951,7 @@ def shown(text, question: str) -> bool:
 
 
 def approval_problem(directory: Path, sid: str, digest: str, question: str) -> str | None:
-    """Why choosing `Post draft <digest>` on `question` cannot approve the
+    """Why choosing the post option for `draft <digest>` on `question` cannot approve the
     draft now; None when it can. Shared by the answer and the pre-check."""
     if not draft_path(directory, sid, digest, "pending").exists():
         if draft_path(directory, sid, digest, "approved").exists():
@@ -1010,14 +1014,30 @@ def dismiss_draft(directory: Path, sid: str, digest: str) -> str:
     return f"draft {digest} skipped (nothing to withdraw)"
 
 
-def decision_labels(options: list) -> list[tuple[dict, re.Match]]:
-    """(option, match) for each option labelled `Post|Skip draft <hash>`."""
+def label_decision(label: str) -> tuple[str | None, list[str]] | None:
+    """(verb, digests) for a label naming a draft, None for any other label;
+    verb is "Post" or "Skip", or None when the label is ambiguous."""
+    tokens = list(DRAFT_TOKEN_RE.finditer(label))
+    if not tokens:
+        return None
+    digests = list(dict.fromkeys(hit.group(2) for hit in tokens))
+    signals = {hit.group(1).lower() for hit in tokens if hit.group(1)}
+    lead = LEAD_VERB_RE.match(label)
+    if lead:
+        signals.add(lead.group(1).lower())
+    if len(digests) != 1 or len(signals) != 1:
+        return None, digests
+    return signals.pop().capitalize(), digests
+
+
+def decision_labels(options: list) -> list[tuple[dict, str | None, list[str]]]:
+    """(option, verb, digests) for each option label naming a draft."""
     named = []
     for option in options:
         label = option.get("label") if isinstance(option, dict) else None
-        hit = DECISION_RE.fullmatch(label) if isinstance(label, str) else None
-        if hit:
-            named.append((option, hit))
+        decision = label_decision(label) if isinstance(label, str) else None
+        if decision:
+            named.append((option, *decision))
     return named
 
 
@@ -1044,17 +1064,19 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
         if not named:
             continue
         why = stale
-        if not why and len({hit.group(2) for _option, hit in named}) > 1:
+        if not why and len({digest for _option, _verb, digests in named for digest in digests}) > 1:
             why = "the question names more than one draft"
         if not why and question.get("multiSelect"):
             why = "a multi-select question cannot approve"
-        chosen = next((pair for pair in named if pair[0]["label"] == answers.get(text)), None)
+        chosen = next((entry for entry in named if entry[0]["label"] == answers.get(text)), None)
+        if chosen and not why and chosen[1] is None:
+            why = "the chosen option label is ambiguous"
         if chosen and not why:
-            _option, hit = chosen
-            found.append((hit.group(1), hit.group(2), text, None))
+            _option, verb, digests = chosen
+            found.append((verb, digests[0], text, None))
             continue
         why = why or "no Post or Skip option was chosen"
-        for digest in dict.fromkeys(hit.group(2) for _option, hit in named):
+        for digest in dict.fromkeys(d for _option, _verb, digests in named for d in digests):
             found.append(("", digest, text, why))
     return found
 
@@ -1217,8 +1239,9 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
 
 
 def handle_ask(payload: dict, directory: Path) -> str | None:
-    """Refuse an AskUserQuestion whose `Post draft <hash>` option could not
-    approve its draft, before the owner spends an answer on it. Read-only."""
+    """Refuse an AskUserQuestion whose post option could not approve its
+    draft, or whose decision label is ambiguous, before the owner spends an
+    answer on it. Read-only."""
     sid = payload.get("session_id")
     tool_input = payload.get("tool_input")
     if not isinstance(sid, str) or not SID_RE.fullmatch(sid) or not isinstance(tool_input, dict):
@@ -1232,9 +1255,15 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
             continue
         text = question.get("question") if isinstance(question.get("question"), str) else ""
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        for _option, hit in decision_labels(options):
-            digest = hit.group(2)
-            if hit.group(1) != "Post" or draft_path(directory, sid, digest, "approved").exists():
+        for option, verb, digests in decision_labels(options):
+            if verb is None:
+                problems[("ambiguous", option["label"], text)] = (
+                    f"option `{option['label']}` is ambiguous: start a post option with `Post`, "
+                    "or write `(skip draft <hash>)` in a skip option, and name one draft"
+                )
+                continue
+            digest = digests[0]
+            if verb != "Post" or draft_path(directory, sid, digest, "approved").exists():
                 continue
             problem = approval_problem(directory, sid, digest, text)
             if problem:

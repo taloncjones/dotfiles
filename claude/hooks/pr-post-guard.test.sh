@@ -379,7 +379,7 @@ expect_out "A22 a posted draft is reported as posted" "post gate: draft aaaaaaaa
 
 case_gate a23
 payload_b s1 "$REVIEW" | python3 "$HOOK" >/dev/null 2>"$FIX/err"
-if grep -q 'AskUserQuestion' "$FIX/err" && grep -q 'Post draft <hash>' "$FIX/err" \
+if grep -q 'AskUserQuestion' "$FIX/err" && grep -qF '(draft <hash>)' "$FIX/err" && grep -qF '(skip draft <hash>)' "$FIX/err" \
     && grep -q 'update --ai' "$FIX/err" && ! grep -qi 'post it' "$FIX/err"; then
     printf 'PASS  A23 the reply denial names the prompt and the upgrade fix\n'; PASS=$((PASS + 1))
 else
@@ -437,6 +437,118 @@ pending aaaaaaaa 1 'reply one'
 expect_rc "PQ3 a registered draft shown in the question passes" 0 "$(payload_q s1 'Post draft aaaaaaaa' '' 'Post this draft? reply one')"
 expect_file "PQ3 still pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 expect_file "PQ3 not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+# --- L: option labels that read as the action, with the hash in parentheses ---
+
+NF_POST='Post the closing comment on PR #1 (draft aaaaaaaa)'
+NF_SKIP='Leave PR #1 open (skip draft aaaaaaaa)'
+
+case_gate l1
+pending aaaaaaaa 1 'reply one'
+expect_out "L1 a new-form post label approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 "$NF_POST" 'reply one')"
+expect_file "L1 the draft is approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+
+case_gate l2
+pending aaaaaaaa 1 'reply one'
+expect_out "L2 a new-form skip label skips" "post gate: draft aaaaaaaa skipped" "$(payload_a s1 "$NF_SKIP" '')"
+expect_file "L2 the draft is dismissed" "$GATE/s1.draft-aaaaaaaa.dismissed" present
+
+case_gate l3
+pending aaaaaaaa 1 'reply one'
+expect_out "L3 a new-form post label with (Recommended) approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 "$NF_POST (Recommended)" 'reply one')"
+
+case_gate l4
+pending aaaaaaaa 1 'reply one'
+expect_out "L4 a skip word inside a post label still approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 'Post the reply and skip the nit (draft aaaaaaaa)' 'reply one')"
+
+case_gate l5
+pending aaaaaaaa 1 'reply one'
+expect_out "L5 (post draft hash) after another leading word approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 'Close PR 5 with the reply (post draft aaaaaaaa)' 'reply one')"
+
+case_gate l6
+pending aaaaaaaa 1 'reply one'
+expect_out "L6 a leading Skip with (draft hash) skips" "post gate: draft aaaaaaaa skipped" "$(payload_a s1 'Skip the reply for now (draft aaaaaaaa)' '')"
+
+case_gate l7
+pending aaaaaaaa 1 'reply one'
+expect_out "L7 a label with no verb signal is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Leave PR 5 open (draft aaaaaaaa)' 'reply one')"
+expect_file "L7 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+
+case_gate l8
+pending aaaaaaaa 1 'reply one'
+expect_out "L8 a label with both verb signals is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post the reply (skip draft aaaaaaaa)' 'reply one')"
+expect_file "L8 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+
+case_gate l9
+pending aaaaaaaa 1 'reply one'
+pending bbbbbbbb 2 'reply two'
+L9=$(payload_a s1 'Post the reply (draft aaaaaaaa) (draft bbbbbbbb)' 'reply one')
+expect_out "L9 a label naming two hashes reports the first draft undecided" "post gate: draft aaaaaaaa not decided (the question names more than one draft)" "$L9"
+expect_out "L9 and the second" "post gate: draft bbbbbbbb not decided (the question names more than one draft)" "$L9"
+
+case_gate l10
+pending aaaaaaaa 1 'reply one'
+expect_out "L10 Draft in another case approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 'post the reply on PR 5 (Draft aaaaaaaa)' 'reply one')"
+
+case_gate l11
+expect_out "L11 a new-form post for an unregistered hash reports no pending draft" "post gate: draft aaaaaaaa not approved: no pending draft in this session" "$(payload_a s1 "$NF_POST" 'reply one')"
+
+case_gate l12
+pending aaaaaaaa 1 'reply one'
+expect_out "L12 the legacy Skip label with (Recommended) skips" "post gate: draft aaaaaaaa skipped" "$(payload_a s1 'Skip draft aaaaaaaa (Recommended)' '')"
+
+case_gate l13
+pending aaaaaaaa 1 'reply one'
+L13=$(python3 - <<'PY'
+import json
+q = "Post this draft?\nreply one"
+qs = [{"question": q, "multiSelect": False,
+       "options": [{"label": "Post the reply on PR 5 (draft aaaaaaaa)", "description": "posts it"},
+                   {"label": "Leave PR 5 open (draft aaaaaaaa)", "description": "skips it"}]}]
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs},
+                  "tool_response": {"questions": qs, "answers": {q: "Post the reply on PR 5 (draft aaaaaaaa)"}}}))
+PY
+)
+expect_out "L13 a clear chosen option beside an ambiguous one approves" "post gate: approved draft aaaaaaaa" "$L13"
+
+case_gate l14
+pending aaaaaaaa 1 'reply one'
+L14=$(payload_a s1 'Post the reply (draft aaaaaaaa0)' 'reply one' | python3 "$HOOK")
+case "$L14" in
+    *aaaaaaaa*) printf 'FAIL  L14 draft hash0 is not a draft label (stdout %s)\n' "$L14" >&2; FAIL=$((FAIL + 1)) ;;
+    *) [ -e "$GATE/s1.draft-aaaaaaaa.pending" ] && { printf 'PASS  L14 draft hash0 is not a draft label\n'; PASS=$((PASS + 1)); } \
+        || { printf 'FAIL  L14 the draft left pending\n' >&2; FAIL=$((FAIL + 1)); } ;;
+esac
+
+case_gate pq4
+expect_err "PQ4 a new-form post for an unregistered hash is refused with the register command" "pr_post_guard.py draft -- gh" "$(payload_q s1 "$NF_POST" '' 'Post this draft? reply one')"
+
+case_gate pq5
+pending aaaaaaaa 1 'reply one'
+expect_rc "PQ5 a new-form post for a registered, shown draft passes" 0 "$(payload_q s1 "$NF_POST" '' 'Post this draft? reply one')"
+
+case_gate pq6
+pending aaaaaaaa 1 'reply one'
+expect_err "PQ6 a no-verb label is refused as ambiguous with the fix" "(skip draft <hash>)" "$(payload_q s1 'Leave PR 5 open (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ6 and says is ambiguous" "is ambiguous" "$(payload_q s1 'Leave PR 5 open (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+
+case_gate pq7
+expect_rc "PQ7 a new-form skip for an unregistered hash passes" 0 "$(payload_q s1 "$NF_SKIP" '' 'Skip this draft?')"
+
+case_gate pq8
+pending aaaaaaaa 1 'reply one'
+expect_err "PQ8 a two-hash label is refused as ambiguous" "is ambiguous" "$(payload_q s1 'Post the reply (draft aaaaaaaa) (draft bbbbbbbb)' '' 'Post this draft? reply one')"
+
+case_gate pq9
+mkdir -p "$GATE"
+: >"$GATE/s1.draft-aaaaaaaa.spent"
+expect_err "PQ9 a new-form post for a spent draft is refused" "already posted once" "$(payload_q s1 "$NF_POST" '' 'Post this draft? reply one')"
+
+case_gate pq10
+pending aaaaaaaa 1 'reply one'
+expect_err "PQ10 a both-verb label is refused as ambiguous with the fix" "(skip draft <hash>)" "$(payload_q s1 'Post the reply (skip draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ10 and says is ambiguous" "is ambiguous" "$(payload_q s1 'Post the reply (skip draft aaaaaaaa)' '' 'Post this draft? reply one')"
 
 # --- P: an approval is per draft, per session, and survives other prompts ---
 

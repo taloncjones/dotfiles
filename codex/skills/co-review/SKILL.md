@@ -555,8 +555,9 @@ python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-fil
 ```
 
 Show the printed `draft <hash>` line and the body. Only a Claude session
-mints the go: its `AskUserQuestion` answer `Post draft <hash>` approves that
-one draft through a PostToolUse hook, and `Skip draft <hash>` dismisses it.
+mints the go: its `AskUserQuestion` answer to a post option ending `(draft <hash>)`
+approves that one draft through a PostToolUse hook, and a skip option
+ending `(skip draft <hash>)` dismisses it.
 A typed message never approves a post. A Codex session cannot mint one.
 Leave the draft in `RUN_DIR` and report it as ready, so the Claude director
 can ask the owner. Never ask the owner to type a phrase.
