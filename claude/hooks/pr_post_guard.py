@@ -79,6 +79,8 @@ CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflo
 DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
 LEAD_VERB_RE = re.compile(r"\s*\(?(post|skip)(?=\s)", re.IGNORECASE)
 LEAD_PUNCT_POST_RE = re.compile(r"\s*\(?post(?=[^\w\s])", re.IGNORECASE)
+# A negation makes the verb unreliable ("Post nothing (draft h)"): fail closed.
+NEGATION_RE = re.compile(r"\b(?:not|never|no|nothing|without|cannot)\b|n't\b", re.IGNORECASE)
 HASH_WORD_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?![0-9A-Za-z])")
 
 # GitHub sends no notification for a mention inside code.
@@ -1043,7 +1045,7 @@ def label_decision(label: str) -> tuple[str | None, list[str]] | None:
         signals.add(lead_verb)
     if "post" in signals and lead_verb != "post":
         return None, digests
-    if len(digests) != 1 or len(hashes) != 1 or len(signals) != 1:
+    if len(digests) != 1 or len(hashes) != 1 or len(signals) != 1 or NEGATION_RE.search(label):
         return None, digests
     return signals.pop().capitalize(), digests
 
@@ -1275,7 +1277,9 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
         options = question.get("options") if isinstance(question.get("options"), list) else []
         for option, verb, digests in decision_labels(options):
             if verb is None:
-                if LEAD_PUNCT_POST_RE.match(normalize_label(option["label"])):
+                if NEGATION_RE.search(normalize_label(option["label"])):
+                    fix = "avoid not/no/never/nothing/without/cannot/n't anywhere in the label"
+                elif LEAD_PUNCT_POST_RE.match(normalize_label(option["label"])):
                     fix = (
                         "`Post` must be followed by a space, not punctuation or a dash "
                         "(`Post the reply (draft <hash>)`)"
