@@ -529,6 +529,20 @@ case "$L14" in
         || { printf 'FAIL  L14 the draft left pending\n' >&2; FAIL=$((FAIL + 1)); } ;;
 esac
 
+AMB="post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)"
+n=0
+for label in 'Post none of it (draft aaaaaaaa)' 'Post neither reply (draft aaaaaaaa)' 'Post zero replies (draft aaaaaaaa)' 'Post to nobody (draft aaaaaaaa)' 'Post nor skip (draft aaaaaaaa)'; do
+    n=$((n + 1))
+    case_gate "l16-$n"
+    pending aaaaaaaa 1 'reply one'
+    expect_out "L16.$n [$label] is ambiguous" "$AMB" "$(payload_a s1 "$label" 'reply one')"
+    expect_file "L16.$n the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+done
+
+case_gate l17
+pending aaaaaaaa 1 'reply one'
+expect_out "L17 an uppercase second hash is ambiguous" "post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)" "$(payload_a s1 'Post draft aaaaaaaa or 142E31F6' 'reply one')"
+
 case_gate pq4
 expect_err "PQ4 a new-form post for an unregistered hash is refused with the register command" "pr_post_guard.py draft -- gh" "$(payload_q s1 "$NF_POST" '' 'Post this draft? reply one')"
 
@@ -596,8 +610,8 @@ pending aaaaaaaa 1 'reply one'
 expect_err "PQ11 a negated post label is refused as ambiguous" "is ambiguous" "$(payload_q s1 'Do not post draft aaaaaaaa' '' 'Post this draft? reply one')"
 expect_err "PQ11 a curly-apostrophe negated label is refused as ambiguous" "is ambiguous" "$(payload_q s1 "$(printf 'Don\342\200\231t post draft aaaaaaaa')" '' 'Post this draft? reply one')"
 
-expect_err "PQ11 a Post-nothing label names the negation rule" "avoid not/no/never/nothing/without/cannot/n't" "$(payload_q s1 'Post nothing (draft aaaaaaaa)' '' 'Post this draft? reply one')"
-expect_err "PQ11 a Post-led no-mentions label names the negation rule" "avoid not/no/never/nothing/without/cannot/n't" "$(payload_q s1 'Post the reply, no mentions (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ11 a Post-nothing label names the negation rule" "avoid not/no/none/never/nothing/nobody/neither/nor/zero/without/cannot/n't" "$(payload_q s1 'Post nothing (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+expect_err "PQ11 a Post-led no-mentions label names the negation rule" "avoid not/no/none/never/nothing/nobody/neither/nor/zero/without/cannot/n't" "$(payload_q s1 'Post the reply, no mentions (draft aaaaaaaa)' '' 'Post this draft? reply one')"
 
 case_gate pq12
 pending aaaaaaaa 1 'reply one'
