@@ -42,7 +42,7 @@ IN_FLIGHT_STATUSES = ("kickoff", "in-progress", "blocked", "review-dispatched",
                       "changes-requested", "reviewed", "completed")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
-JIRA_URL_RE = re.compile(r"https?://[^\s<>\"'()\[\]]+?/browse/([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9-])")
+JIRA_URL_RE = re.compile(r"https?://[A-Za-z0-9.-]+\.atlassian\.net/browse/([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9-])")
 PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
 # Open-section grouping (D8): computed state (blocked-by-deps, in-flight-by-
 # herdr) always wins over the manual `status:` field, since it reflects
@@ -344,25 +344,12 @@ def task_index(rd, confined):
 
 
 def pr_number(rec):
+    """PR number: core's label rule, after reading a bounded digit string as an int."""
     for key in ("pr_number", "pr"):
         v = rec.get(key)
-        if isinstance(v, bool):
-            continue
-        if isinstance(v, int) and v > 0:
-            return v
-        if isinstance(v, str) and re.fullmatch(r"[0-9]+", v) and int(v) > 0:
-            return int(v)
-    return None
-
-
-def ship_handoff(rd, rec, task_id, confined):
-    """The ship.json named by the record's ship_launch_id, else None."""
-    launch = rec.get("ship_launch_id")
-    launch_dir = core.ship_launch_dir(rd, task_id, launch)
-    if launch_dir is None:
-        return None
-    data, _ = read_json(launch_dir / "ship.json", confined=confined)
-    return data if data is not None and data.get("launch_id") == launch else None
+        if isinstance(v, str) and re.fullmatch(r"[0-9]{1,9}", v):
+            rec = {**rec, key: int(v)}
+    return core._label_pr_number(rec)
 
 
 def state_token(rec, bad, archived, rd, task_id, confined):
@@ -371,10 +358,17 @@ def state_token(rec, bad, archived, rd, task_id, confined):
     status = rec.get("status")
     if not isinstance(status, str) or not status:
         return "recorded"
-    if archived:
-        return "done" if status == "merged" else core.task_state_token(rec)
-    handoff = ship_handoff(rd, rec, task_id, confined) if status == "reviewed" else None
-    return core.task_state_token(rec, handoff)
+    pr = pr_number(rec)
+    rec = {**rec, "pr_number": pr, "pr": None}
+    try:
+        if archived:
+            return "done" if status == "merged" else core.task_state_token(rec)
+        handoff = None
+        if status == "reviewed":
+            handoff = core.task_ship_handoff(rd, task_id, rec)
+        return core.task_state_token(rec, handoff)
+    except Exception:
+        return "unreadable record"
 
 
 def herdr_status(entry, rd, pr_base, *, confined=False):

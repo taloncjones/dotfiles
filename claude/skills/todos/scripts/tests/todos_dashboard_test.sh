@@ -1477,6 +1477,14 @@ title: Has Jira
 
 Tracked as [ABC-123](https://example.atlassian.net/browse/ABC-123) under [ABC-1](https://example.atlassian.net/browse/ABC-1).
 EOF
+  mk_todo "$repo" pending 2026-05-03-github <<'EOF'
+---
+created: 2026-05-03
+title: Not Jira
+---
+
+See https://github.com/o/r/blob/main/browse/ZZZ-7 for context.
+EOF
   mk_todo "$repo" pending 2026-05-02-nojira <<'EOF'
 ---
 created: 2026-05-02
@@ -1490,9 +1498,62 @@ EOF
   assert_file_has "jira: Links entry labelled with the key" "$f" '<li><a href="https://example.atlassian.net/browse/ABC-123">ABC-123</a></li>'
   assert_file_lacks "jira: first URL wins over the epic" "$f" 'badge jira">ABC-1<'
   assert_file_lacks "jira: bare key shows no chip" "$f" 'ABC-5'
+  assert_file_lacks "jira: non-Atlassian /browse/ URL shows no chip" "$f" 'badge jira">ZZZ-7<'
   rm_fixture "$repo" "$sr"
 }
 test_jira_chip
+
+test_malformed_records_degrade() {
+  local repo sr f slug rd tasks big id
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); rd="$sr/$slug"; tasks="$rd/tasks"
+  mkdir -p "$tasks"
+  for id in 2026-05-01-ok 2026-05-02-toplist 2026-05-03-rowdict 2026-05-04-bigpr 2026-05-05-rev; do
+    mk_todo "$repo" pending "$id" <<EOT
+---
+created: 2026-05-01
+title: Todo $id
+---
+EOT
+  done
+  big=$(python3 -c 'print("9" * 5000)')
+  printf '{"task_id":"2026-05-01-ok","status":"in-progress","workers":[{"phase":"implement","status":"launched"}]}' >"$tasks/2026-05-01-ok.json"
+  printf '{"task_id":"2026-05-02-toplist","status":"in-progress","phase":[]}' >"$tasks/2026-05-02-toplist.json"
+  printf '{"task_id":"2026-05-03-rowdict","status":"in-progress","workers":[{"phase":{},"status":"launched"}]}' >"$tasks/2026-05-03-rowdict.json"
+  printf '{"task_id":"2026-05-04-bigpr","status":"in-progress","pr_number":"%s"}' "$big" >"$tasks/2026-05-04-bigpr.json"
+  printf '{"task_id":"2026-05-05-rev","status":"reviewed","pr_number":"12"}' >"$tasks/2026-05-05-rev.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "malformed: board builds, exit 0" "$(rc)" "0"
+  assert_file_has "malformed: healthy card keeps its token" "$f" 'data-todo="2026-05-01-ok" data-state="open" data-task-status="in-progress" data-task-state="impl"'
+  assert_file_has "malformed: list phase card present" "$f" 'data-todo="2026-05-02-toplist"'
+  assert_file_has "malformed: dict phase card present" "$f" 'data-todo="2026-05-03-rowdict"'
+  assert_file_has "malformed: oversized PR card present" "$f" 'data-todo="2026-05-04-bigpr"'
+  assert_file_lacks "malformed: oversized PR renders no badge" "$f" 'PR #99999'
+  assert_file_lacks "malformed: PR badge never pairs with open-pr?" "$f" 'data-task-state="open-pr?"'
+  rm_fixture "$repo" "$sr"
+}
+test_malformed_records_degrade
+
+test_confined_state_reads() {
+  local sr rd out
+  sr=$(mk_dir) || exit 2; rd="$sr/slug"
+  mkdir -p "$rd/tasks" "$rd/archive/2026-09/tasks"
+  printf '{"task_id":"a","status":"in-progress"}' >"$rd/tasks/a.json"
+  printf '{"task_id":"b","status":"merged"}' >"$rd/archive/2026-09/tasks/b.json"
+  out=$(env -u TODOS_STATE_ROOT python3 -I - "$HERE/.." "$rd" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import todos_dashboard as d
+from pathlib import Path
+rd = Path(sys.argv[2])
+idx = d.task_index(rd, True)
+print(sorted(idx), d.list_months(rd, True), d.read_json(rd / "tasks" / "a.json", confined=True)[1])
+PY
+)
+  assert_eq "confined: tier, month and record reads work" "$out" "['a', 'b'] ['2026-09'] False"
+  rm_fixture "$sr"
+}
+test_confined_state_reads
 
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
