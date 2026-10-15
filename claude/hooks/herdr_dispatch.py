@@ -378,7 +378,7 @@ def _check_todo_ready(
         raise DispatchError("persisted TODO binding is invalid")
     try:
         process = subprocess.run(
-            ["bash", os.fspath(cli), "ready", todo_id, "--offline"],
+            ["bash", os.fspath(cli), "ready", todo_id, "--online"],
             cwd=cwd,
             check=False,
             capture_output=True,

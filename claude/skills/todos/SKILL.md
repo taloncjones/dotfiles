@@ -165,7 +165,9 @@ Prefer a `pr:` ref once the PR number is known. `TODOS_BASE_REF`
 (default `origin/main`) and `TODOS_GH` (default `gh`) are overrides for
 tests and unusual setups.
 
-For controller dispatch, run `ready` from the source repository and pass
+For controller dispatch, the herdr dispatch gate runs
+`todos.sh ready <id> --online`, so a merged `pr:` dependency clears it.
+Run `ready` from the source repository and pass
 the task's explicitly bound todo ID, such as `2026-09-06-fix-cache`.
 The command accepts the exact pending basename without `.md`; it never
 selects a substring, the newest item, or a task from another repository.

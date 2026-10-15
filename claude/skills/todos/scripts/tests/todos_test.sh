@@ -1085,6 +1085,28 @@ EOF
 }
 test_ready_online_bounded
 
+test_ready_online_pr_states() {
+  local TODOS_GH
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-prdep <<'EOF'
+---
+created: 2026-05-01
+title: PR dep
+depends_on:
+  - pr:1
+---
+EOF
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  export TODOS_GH="$stub"
+  assert_ready 'ready: online merged PR is ready' "$repo" 0 \
+    '{"ready":true,"task_id":"2026-05-01-prdep","dependencies":[{"ref":"pr:1","state":"merged"}]}' 2026-05-01-prdep --online
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$stub"
+  assert_ready 'ready: online failed lookup stays unknown' "$repo" 3 \
+    '{"ready":false,"task_id":"2026-05-01-prdep","dependencies":[{"ref":"pr:1","state":"unknown"}]}' 2026-05-01-prdep --online
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_ready_online_pr_states
+
 test_ready_malformed_dependencies() {
   local repo; repo=$(mk_repo)
   local value
