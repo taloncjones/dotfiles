@@ -822,7 +822,8 @@ section 4; `<ship_ws>` is the ship row's `workspace_id`; report non-`settled`.
    `write-task` `teardown_blocked: "<reason>"` (carrying every field) and
    surface it; a human finishes `/post-merge`. Lessons distillation stays a
    human step. Director-mode teardown ends with `archive-task` for the
-   task; a refusal is reported as `archive deferred` and the task stays in
+   task; for a merged task it closes the task's emptied herdr workspace
+   itself before archiving, so no hand close is needed. A refusal is reported as `archive deferred` and the task stays in
    place for the backfill.
 
 ## 7. Worker-created panes (self-managed)
