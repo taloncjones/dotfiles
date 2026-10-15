@@ -195,7 +195,7 @@ function director() {    # director() launches the herdr director with inbound m
     # let the director read and edit them without the auto-mode classifier.
     # Workers keep the classifier and report blocked:; the director applies
     # that edit under an allow-edit marker. The rules precede a fixed flag so
-    # the variadic --allowedTools cannot swallow a prompt in "$@".
+    # the variadic allow list cannot swallow a prompt in "$@".
     local -a guard=()
     local dotfiles_root="${HOME}/Git/personal/dotfiles"
     dotfiles_root="${dotfiles_root:A}"
