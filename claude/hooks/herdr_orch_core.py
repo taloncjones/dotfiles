@@ -5708,6 +5708,7 @@ def _main(argv=None) -> int:
     add("review-deadlines")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
+    add("activate-task-leads", fenced=True)
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
@@ -7821,28 +7822,9 @@ def _main(argv=None) -> int:
         }, sort_keys=True))
         return 0
     if ns.cmd == "deactivate-task-leads":
-        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
-        # Selection BEFORE rd, for the same reason as task-lead-status, and
-        # because owner_transaction only fills expected_slug from a pinned
-        # selection. Without it this verb -- the documented off switch, and
-        # step 2 of the rollback runbook -- exited 2 on its default args.
-        select_payload(ns)
-        selection = _PAYLOAD_SELECTION.get()
-        context, scope = selection["context"], selection["scope"]
-        rd = repo_dir(ns.repo_slug)
-        with owner_transaction(rd, ns.session, ns.fence, context=context, scope=scope) as tx:
-            _require(
-                tx.current.get("control_tier", "launcher") == "launcher",
-                "only a launcher owner may deactivate task leads",
-            )
-            write_json_atomic(herdr_caps.gate_path(rd), {
-                "schema_version": herdr_caps.GATE_SCHEMA_VERSION,
-                "repo_slug": ns.repo_slug,
-                "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
-                "account_id": tx.account_id,
-                "enabled": False,
-            })
-        return 0
+        return _publish_task_lead_gate(ns, False)
+    if ns.cmd == "activate-task-leads":
+        return _publish_task_lead_gate(ns, True)
     if ns.cmd == "should-dispatch-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -8305,6 +8287,33 @@ def select_payload(ns):
     _require(ns.repo_slug == _context_slug(context),
              "repo-slug does not match repository identity")
     _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
+
+
+def _publish_task_lead_gate(ns, enabled):
+    """Write the task-lead gate record for one repo under the launcher fence."""
+    verb = "activate" if enabled else "deactivate"
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    # Selection BEFORE rd, for the same reason as task-lead-status, and
+    # because owner_transaction only fills expected_slug from a pinned
+    # selection. Without it the off switch (step 2 of the rollback runbook)
+    # exited 2 on its default args.
+    select_payload(ns)
+    selection = _PAYLOAD_SELECTION.get()
+    context, scope = selection["context"], selection["scope"]
+    rd = repo_dir(ns.repo_slug)
+    with owner_transaction(rd, ns.session, ns.fence, context=context, scope=scope) as tx:
+        _require(
+            tx.current.get("control_tier", "launcher") == "launcher",
+            f"only a launcher owner may {verb} task leads",
+        )
+        write_json_atomic(herdr_caps.gate_path(rd), {
+            "schema_version": herdr_caps.GATE_SCHEMA_VERSION,
+            "repo_slug": ns.repo_slug,
+            "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
+            "account_id": tx.account_id,
+            "enabled": enabled,
+        })
+    return 0
 
 
 def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):

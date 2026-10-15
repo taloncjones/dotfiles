@@ -955,6 +955,6 @@ accept` on the director launch line safe. The hook side posts only a
 
 Read `references/task-leads.md` before any `--binding` lead dispatch.
 
-## Rolling back task leads
+## Enabling and rolling back task leads
 
-Read `references/task-leads.md` before rolling back task leads.
+Read `references/task-leads.md` before enabling or rolling back task leads.
