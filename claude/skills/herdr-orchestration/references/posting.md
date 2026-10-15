@@ -18,7 +18,10 @@ gh <args>`. A Jira comment has no draft.
    `Post`. Any other leading word before `post draft <hash>` (`Hold off on`, `Cancel`,
    `Decline to`, `Maybe`) is a refusal. `Post:`, `Post,` and `Post` plus a dash fail the
    space rule. A skip is a leading `Skip` or `skip draft <hash>`. A `skip` elsewhere
-   in the label does not count. A label with neither verb, both verbs, a
+   in the label does not count. A post label that carries a negation (`not`, `no`, `never`, `nothing`, `without`,
+   `n't`) or a hedge (`if`, `unless`, `after`, `until`, `later`, `wait`, `hold`, `or`,
+   `maybe`, `but`, `only`, `again`, `for now`, a `?`, a dash aside) is ambiguous too.
+   A label with neither verb, both verbs, a
    non-`Post` lead before `post draft`, or two hashes is ambiguous and never
    decides. The legacy labels
    `Post draft <hash>` and `Skip draft <hash>` still work.

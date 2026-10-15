@@ -583,16 +583,23 @@ expect_out "L15 a hyphenated Post-mortem lead is not a post" "post gate: draft a
 expect_file "L15 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 
 AMB="post gate: draft aaaaaaaa not decided (the chosen option label is ambiguous)"
-case_gate l16
+case_gate l16b
 pending aaaaaaaa 1 'reply one'
 for lab in 'Hold off on post draft aaaaaaaa' 'Cancel post draft aaaaaaaa' 'Decline to post draft aaaaaaaa' 'Maybe post draft aaaaaaaa' 'Stop post draft aaaaaaaa' 'Save post draft aaaaaaaa' 'Cancel "Post draft aaaaaaaa"'; do
-  expect_out "L16 refusal-led label is ambiguous: $lab" "$AMB" "$(payload_a s1 "$lab" 'reply one')"
+  expect_out "L16b refusal-led label is ambiguous: $lab" "$AMB" "$(payload_a s1 "$lab" 'reply one')"
 done
-expect_file "L16 the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
-expect_file "L16 the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
-case_gate l17
+expect_file "L16b the draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+expect_file "L16b the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+case_gate l17b
 pending aaaaaaaa 1 'reply one'
-expect_out "L17 a (Post lead approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 '(Post the reply) (draft aaaaaaaa)' 'reply one')"
+expect_out "L17b a (Post lead approves" "post gate: approved draft aaaaaaaa" "$(payload_a s1 '(Post the reply) (draft aaaaaaaa)' 'reply one')"
+case_gate l19
+pending aaaaaaaa 1 'reply one'
+for lab in 'Post the reply only if I confirm again (draft aaaaaaaa)' 'Post after CI passes (draft aaaaaaaa)' 'Post the reply? Hold off for now (draft aaaaaaaa)' 'Post -- wait (draft aaaaaaaa)' 'Post the reply (draft aaaaaaaa) - or skip it'; do
+  expect_out "L19 hedged post label is ambiguous: $lab" "$AMB" "$(payload_a s1 "$lab" 'reply one')"
+  expect_err "PQ19 hedged post label is refused: $lab" "is ambiguous" "$(payload_q s1 "$lab" '' 'Post this draft? reply one')"
+done
+expect_file "L19 the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 case_gate l18
 pending aaaaaaaa 1 'reply one'
 expect_out "L18 two hashes joined by or are ambiguous" "$AMB" "$(payload_a s1 'Post draft aaaaaaaa or bbbbbbbb' 'reply one')"

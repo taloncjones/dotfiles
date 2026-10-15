@@ -81,6 +81,11 @@ LEAD_VERB_RE = re.compile(r"\s*\(?(post|skip)(?=\s)", re.IGNORECASE)
 LEAD_PUNCT_POST_RE = re.compile(r"\s*\(?post(?=[^\w\s])", re.IGNORECASE)
 # A negation makes the verb unreliable ("Post nothing (draft h)"): fail closed.
 NEGATION_RE = re.compile(r"\b(?:not|never|no|none|nothing|nobody|neither|nor|zero|without|cannot)\b|n't\b", re.IGNORECASE)
+# A conditional, deferred or hedged post ("Post after CI passes") is no go: fail closed.
+HEDGE_RE = re.compile(
+    r"\b(?:if|unless|after|until|later|wait|hold|or|maybe|but|only|again|for now)\b|\?|--|\s[-\u2013\u2014]\s",
+    re.IGNORECASE,
+)
 HASH_WORD_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?![0-9A-Za-z])", re.IGNORECASE)
 
 # GitHub sends no notification for a mention inside code.
@@ -398,7 +403,9 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
     "that read as the action: a post starts with `Post` plus a space and ends with `(draft <hash>)` "
-    "(or is `Post draft <hash>`), with exactly one hash, and a skip ends with "
+    "(or is `Post draft <hash>`), with exactly one hash and none of "
+    "not/no/never/nothing/without/n't or if/unless/after/until/later/wait/hold/or/maybe/but/only/again/for now, "
+    "a `?` or a dash aside, and a skip ends with "
     "`(skip draft <hash>)`, the full draft text in the question "
     "(an option preview is clipped by the terminal and never counts). "
     "Post only after the answer approves it.\n"
@@ -1047,6 +1054,8 @@ def label_decision(label: str) -> tuple[str | None, list[str]] | None:
         return None, digests
     if len(digests) != 1 or len(hashes) != 1 or len(signals) != 1 or NEGATION_RE.search(label):
         return None, digests
+    if lead_verb == "post" and HEDGE_RE.search(label):
+        return None, digests
     return signals.pop().capitalize(), digests
 
 
@@ -1279,6 +1288,11 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
             if verb is None:
                 if NEGATION_RE.search(normalize_label(option["label"])):
                     fix = "avoid not/no/none/never/nothing/nobody/neither/nor/zero/without/cannot/n't anywhere in the label"
+                elif LEAD_VERB_RE.match(normalize_label(option["label"])) and HEDGE_RE.search(normalize_label(option["label"])):
+                    fix = (
+                        "a post label must be a plain statement: avoid if/unless/after/until/later/wait/"
+                        "hold/or/maybe/but/only/again/for now, a question mark, and a dash-separated aside"
+                    )
                 elif LEAD_PUNCT_POST_RE.match(normalize_label(option["label"])):
                     fix = (
                         "`Post` must be followed by a space, not punctuation or a dash "
