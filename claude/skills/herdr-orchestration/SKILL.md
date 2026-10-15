@@ -894,7 +894,9 @@ review dispatch of a Jira-kind task).
   case run
   `python3 "$CORE" allow-edit --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --minutes 5 --max-edits 3 --note "<what was approved>"`
   AFTER the approval and in the same turn, make the edit, and name it in
-  the turn summary. A git work-tree write (`commit`, `merge`, `cherry-pick`,
+  the turn summary. Run `allow-edit` as its own Bash call: the guard judges a
+  whole command before any part runs, so `allow-edit ... && sed -i ...` in
+  one call is refused. A git work-tree write (`commit`, `merge`, `cherry-pick`,
   `reset` and the like) is a write and spends marker budget, one unit per
   distinct repository per Bash call (chained git commands share a unit). A marker is
   for director maintenance (teardown, lessons, gate sync) or an

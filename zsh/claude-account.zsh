@@ -191,12 +191,23 @@ function director() {    # director() launches the herdr director with inbound m
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done
+    # In the dotfiles checkout the guard hooks are the product: allow rules
+    # let the director read and edit them without the auto-mode classifier.
+    # Workers keep the classifier and report blocked:; the director applies
+    # that edit under an allow-edit marker. The rules precede a fixed flag so
+    # the variadic allow list cannot swallow a prompt in "$@".
+    local -a guard=()
+    local dotfiles_root="${HOME}/Git/personal/dotfiles"
+    dotfiles_root="${dotfiles_root:A}"
+    if [[ "${PWD:A}" == "$dotfiles_root" || "${PWD:A}" == "$dotfiles_root"/* ]]; then
+        guard=(--allowedTools 'Read(/**)' 'Edit(/**)' 'Read(~/.herdr/worktrees/dotfiles/**)' 'Edit(~/.herdr/worktrees/dotfiles/**)')
+    fi
     (
         if (( $+commands[caffeinate] )); then
             zmodload zsh/system
             local launcher=$sysparams[pid]
             caffeinate -i -w "$launcher" &!
         fi
-        claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "$@"
+        claude --agent director "${guard[@]}" --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "$@"
     )
 }

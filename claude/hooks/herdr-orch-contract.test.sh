@@ -197,7 +197,7 @@ ok "skill: native adapter owns named worker launch" \
   "grep -Fq -- 'herdr_dispatch.py launch' $REFS/dispatch-adapter.md $REFS/task-leads.md && grep -Fq -- 'unique agent name' $REFS/dispatch-adapter.md $REFS/task-leads.md"
 ok "skill: native launch checks route readiness and availability" \
   "grep -Fq -- 'returned readiness, availability reason, model, and effort' $REFS/dispatch-adapter.md"
-DIRECTOR_SETTINGS=$(sed -n "s/^ *claude --agent director --settings '\([^']*\)'.*/\1/p" zsh/claude-account.zsh)
+DIRECTOR_SETTINGS=$(sed -n "s/^ *claude --agent director .*--settings '\([^']*\)'.*/\1/p" zsh/claude-account.zsh)
 ok "skill: director launch line carries director()'s settings, inbound accept" \
   "[ -n \"\$DIRECTOR_SETTINGS\" ] && printf '%s' \"\$DIRECTOR_SETTINGS\" | grep -Fq '\"crossSessionInbound\":\"accept\"' && grep -Fq -- \"--settings '\$DIRECTOR_SETTINGS'\" $REFS/director-launch.md"
 ok "skill: messaging-live director arms only the undelivered backstop" \
@@ -210,6 +210,8 @@ ok "skill: unverifiable evidence is the integrity halt, never retried" \
   "grep -Fq 'unverifiable-evidence' $SKILL && grep -Fq 'not retried' $SKILL"
 ok "skill: dirty worktree after a Claude review is reported" \
   "grep -Fq 'dirty=yes' $SKILL"
+ok "director-launch names the dotfiles guard-edit rules" \
+  "grep -Fq -- '--allowedTools' zsh/claude-account.zsh && grep -Fq -- \"'Edit(/**)'\" zsh/claude-account.zsh && grep -Fq 'allowedTools' $REFS/director-launch.md && grep -Fq 'as its own Bash call' $SKILL"
 ok "skill: run-think always runs in the background" \
   "grep -Fq 'run-think\` always runs under \`Bash run_in_background\`' $REFS/legacy-wrappers.md && ! grep -Fq 'both are watch wakes' $SKILL $REFS/legacy-wrappers.md"
 ok "agent: director describes the backstop and the launch function" \
