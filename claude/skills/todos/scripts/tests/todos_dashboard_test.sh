@@ -1466,6 +1466,54 @@ PY
 }
 test_task_state_on_board
 
+test_alias_remote_pr_link() {
+  local repo sr f slug tasks
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  git -C "$repo" config 'url.git@Git-Personal:.insteadOf' 'git@github.com:'
+  slug=$(core_slug git@Git-Personal:Org/Repo.git); tasks="$sr/$slug/tasks"
+  mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-alias <<'EOF2'
+---
+created: 2026-05-01
+title: Alias remote
+---
+EOF2
+  printf '{"task_id":"2026-05-01-alias","status":"in-progress","pr_number":42}' >"$tasks/2026-05-01-alias.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "alias remote: exit 0" "$(rc)" "0"
+  assert_file_has "alias remote: PR still links to GitHub" "$f" 'href="https://github.com/Org/Repo/pull/42"'
+  rm_fixture "$repo" "$sr"
+}
+test_alias_remote_pr_link
+
+test_archive_never_in_flight() {
+  local repo sr f slug rd
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); rd="$sr/$slug"
+  mkdir -p "$rd/tasks" "$rd/archive/2026-09/tasks"
+  mk_todo "$repo" pending 2026-05-01-old <<'EOF2'
+---
+created: 2026-05-01
+title: Archived but not completed
+---
+EOF2
+  mk_todo "$repo" pending 2026-05-02-both <<'EOF2'
+---
+created: 2026-05-02
+title: Live and archived record
+---
+EOF2
+  printf '{"task_id":"2026-05-01-old","status":"in-progress"}' >"$rd/archive/2026-09/tasks/2026-05-01-old.json"
+  printf '{"task_id":"2026-05-02-both","status":"changes-requested"}' >"$rd/tasks/2026-05-02-both.json"
+  printf '{"task_id":"2026-05-02-both","status":"merged"}' >"$rd/archive/2026-09/tasks/2026-05-02-both.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "archive tier: exit 0" "$(rc)" "0"
+  assert_file_has "archive tier: archived in-progress is not in flight" "$f" 'data-count="in-flight">1<'
+  assert_file_has "archive tier: live record wins over archive" "$f" 'data-todo="2026-05-02-both" data-state="open" data-task-status="changes-requested"'
+  rm_fixture "$repo" "$sr"
+}
+test_archive_never_in_flight
+
 test_jira_chip() {
   local repo sr f
   repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"

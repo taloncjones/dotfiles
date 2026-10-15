@@ -1681,7 +1681,9 @@ def board_context(args):
         remote = ""
     slug = core.repo_slug(remote, context["common_dir"])
     state_root = default_state_root(scope)
-    gh = core.GITHUB_REMOTE_RE.match(remote)
+    # get-url applies insteadOf, so an SSH alias hides the GitHub URL; read it as stored.
+    rc, stored = git(["config", "--get", "remote.origin.url"], cwd=root)
+    gh = core.GITHUB_REMOTE_RE.match(stored if rc == 0 else remote) or core.GITHUB_REMOTE_RE.match(remote)
     return {
         "root": root,
         "pr_base": f"https://github.com/{gh.group(1)}/{gh.group(2)}/pull/" if gh else "",

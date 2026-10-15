@@ -226,7 +226,7 @@ A card shows the title, a one-sentence summary (the first sentence of
 the first `## Problem` paragraph, at most 220 characters) and badges: the
 task state token (the herdr workspace-label vocabulary, such as `impl`,
 `review`, `merge?`; `done` for an archived merged task), `PR #<n>`, the
-Jira key when the todo text holds a `/browse/<KEY>` URL, `blocked by <n>` or `<n> deps met`, the
+Jira key when the todo text holds an Atlassian `/browse/<KEY>` URL (other hosts need a `jira_url:` front-matter line), `blocked by <n>` or `<n> deps met`, the
 priority, the area, and `due <date>` (red once overdue) or `surfaces
 <date>` while the surface date is still ahead. Each lane header's
 underline and each card's thin left stripe carry the lane's status colour
