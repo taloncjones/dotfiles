@@ -118,6 +118,21 @@ print(t.count("<form class=\"note\"", a, t.index("</article></div>", a)))')" "2"
 }
 test_serve_page
 
+test_serve_task_state() {
+  local slug r
+  slug=$(python3 -c '
+import importlib.util, sys
+s = importlib.util.spec_from_file_location("c", sys.argv[1])
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print(m.repo_slug("", sys.argv[2]))' "$HERE/../../../../hooks/herdr_orch_core.py" "$REPO/.git")
+  mkdir -p "$STATE/$slug/tasks"
+  printf '{"task_id":"%s","status":"blocked","pr_number":5}' "$ID" >"$STATE/$slug/tasks/$ID.json"
+  r=$(http "$URL" GET "/?t=$TOKEN")
+  assert_contains "serve: joined todo carries its task state" "$r" 'data-task-state="blocked"'
+  rm -rf "$STATE/$slug"
+}
+test_serve_task_state
+
 test_serve_host_and_token() {
   local r before
   before=$(cksum <"$F")

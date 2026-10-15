@@ -225,8 +225,10 @@ any other value, or none, defaults to Ready. The count pills at the top
 mirror the five open lanes and jump to each one.
 
 A card shows the title, a one-sentence summary (the first sentence of
-the first `## Problem` paragraph, at most 220 characters) and badges: in
-flight with the herdr phase, `blocked by <n>` or `<n> deps met`, the
+the first `## Problem` paragraph, at most 220 characters) and badges: the
+task state token (the herdr workspace-label vocabulary, such as `impl`,
+`review`, `merge?`; `done` for an archived merged task), `PR #<n>`, the
+Jira key when the todo text holds an Atlassian `/browse/<KEY>` URL (other hosts need a `jira_url:` front-matter line), `blocked by <n>` or `<n> deps met`, the
 priority, the area, and `due <date>` (red once overdue) or `surfaces
 <date>` while the surface date is still ahead. Each lane header's
 underline and each card's thin left stripe carry the lane's status colour
@@ -251,18 +253,23 @@ The facts panel shows:
   lets it call `gh` and overrides an exported `TODOS_OFFLINE`. A
   `todo:<id>` ref with a card on the board links to its modal.
 - **Herdr**: the task record under
-  `<selected-account-root>/herdr-orch/<repo_slug>/tasks/<id>.json`, or the
-  older `td-<id>.json` when no bare-id record exists
-  (resolved by the shared workflow context; `TODOS_STATE_ROOT` is an explicit
-  test/development override)
-  when one exists: status pill, `phase role model`, the review verdict
+  `<selected-account-root>/herdr-orch/<repo_slug>/tasks/` (then
+  `archive/<YYYY-MM>/tasks/`, newest month first) whose `todo_id`, else file
+  name (a `td-` prefix ignored), is the todo id; a file named for the todo
+  wins (resolved by the shared workflow context; `TODOS_STATE_ROOT` is an
+  explicit test/development override)
+  when one exists: state token pill, `phase role model`, the PR (linked
+  when origin is a GitHub remote), `updated <time>`, `archived <YYYY-MM>`,
+  the review verdict
   (tagged `(stale)` unless its `reviewed_head_sha` matches the record),
   and the done record (tagged `(stale)` unless its phase and agent match
   the live worker). Records are read only, never written. An unreadable
   record shows `unreadable`.
 - **Files**: the `files:` list.
 - **Links**: `http(s)` URLs from the body, GitHub PRs as `PR #n`,
-  `claude.ai` artifacts as `artifact`.
+  `claude.ai` artifacts as `artifact`, Jira issues as their key.
+
+The modal header repeats the card badges, with the PR and Jira key as links.
 
 The renderer never writes under `.todos/` or the state root (it refuses
 such an output path), never regenerates `TODO.md`, and writes the page

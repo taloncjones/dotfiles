@@ -282,6 +282,7 @@ test_render_fixture() {
   assert_file_has "render: blocked count" "$f" 'data-count="blocked">1<'
   assert_file_has "render: in-flight count" "$f" 'data-count="in-flight">1<'
   assert_file_has "render: bad record unreadable" "$f" 'data-todo="2026-05-05-bad-record" data-state="open" data-task-status="unreadable"'
+  assert_file_has "render: bad record card token" "$f" 'data-task-status="unreadable" data-task-state="unreadable"'
   assert_file_has "render: title escaped" "$f" '&lt;script&gt;alert(1)&lt;/script&gt;'
   assert_file_lacks "render: no raw script tag" "$f" '<script'
   assert_file_lacks "render: no filter form" "$f" 'class="filters"'
@@ -1073,17 +1074,19 @@ test_card_summary
 test_herdr_lookup() {
   local d out
   d=$(mk_dir) || exit 2
-  printf '{"status":"in-progress","workers":[{"phase":"plan","agent":"a"}]}' >"$d/2026-05-01-x.json"
-  printf '{"status":"merged"}' >"$d/td-2026-05-01-x.json"
-  printf '{"status":"reviewed"}' >"$d/td-2026-05-02-y.json"
+  mkdir -p "$d/tasks"
+  printf '{"status":"in-progress","workers":[{"phase":"plan","agent":"a"}]}' >"$d/tasks/2026-05-01-x.json"
+  printf '{"status":"merged"}' >"$d/tasks/td-2026-05-01-x.json"
+  printf '{"status":"reviewed"}' >"$d/tasks/td-2026-05-02-y.json"
   out=$(python3 - "$HERE/.." "$d" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from todos_dashboard import herdr_status
+from todos_dashboard import herdr_status, task_index
 d = Path(sys.argv[2])
+index = task_index(d, False)
 for b in ("2026-05-01-x", "2026-05-02-y", "2026-05-03-z"):
-    h = herdr_status(d, b)
+    h = herdr_status(index.get(b), d, "", confined=False)
     print(b, "none" if h is None else f'{h["task_id"]}|{h["status"]}|{h["phase"]}')
 PY
 )
@@ -1252,7 +1255,7 @@ created: 2026-05-07
 title: Flying
 ---
 EOF
-  printf '{"status":"in-progress","workers":[{"phase":"implement","agent":"impl-a"}]}' >"$tasks/2026-05-07-flying.json"
+  printf '{"status":"in-progress","workers":[{"phase":"implement","status":"launched","agent":"impl-a"}]}' >"$tasks/2026-05-07-flying.json"
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_eq "badges: exit 0" "$(rc)" "0"
   main=$(between "$f" '<main>' '</main>')
@@ -1265,7 +1268,7 @@ EOF
   assert_missing "badges: past surface date has no badge" "$main" 'surfaces 2026-05-01'
   assert_contains "badges: unmet dependencies" "$main" '<span class="badge blocked">blocked by 2</span>'
   assert_contains "badges: met dependencies" "$main" '<span class="badge deps-ok">1 deps met</span>'
-  assert_contains "badges: in flight with phase" "$main" '<span class="badge in-flight">in flight - implement</span>'
+  assert_contains "badges: in flight with phase" "$main" '<span class="badge in-flight">impl</span>'
   assert_contains "badges: high priority card edge" "$main" 'data-todo="2026-05-02-due" data-state="open" data-task-status="" data-priority="high">'
   assert_file_has "facts: todo dependency links to its modal" "$f" '<a href="#todo-2026-05-01-prio">todo:2026-05-01-prio (open)</a>'
   assert_file_has "facts: files listed" "$f" '<h3>Files</h3><ul><li class="mono">claude/x.py</li></ul>'
@@ -1406,6 +1409,207 @@ PY
   assert_eq "contrast: every text token passes 4.5:1 in both themes" "$out" "all pairs pass"
 }
 test_text_contrast
+
+test_task_state_on_board() {
+  local repo sr f slug rd tasks arch card
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); rd="$sr/$slug"; tasks="$rd/tasks"; arch="$rd/archive/2026-09/tasks"
+  mkdir -p "$tasks" "$arch"
+  mk_todo "$repo" pending 2026-05-01-live <<'EOF'
+---
+created: 2026-05-01
+title: Live task
+---
+EOF
+  mk_todo "$repo" pending 2026-05-02-none <<'EOF'
+---
+created: 2026-05-02
+title: No task
+---
+EOF
+  mk_todo "$repo" pending 2026-05-03-joined <<'EOF'
+---
+created: 2026-05-03
+title: Joined by todo id
+---
+EOF
+  mk_todo "$repo" completed 2026-04-01-shipped <<'EOF'
+---
+created: 2026-04-01
+title: Shipped long ago
+---
+EOF
+  printf '{"task_id":"2026-05-01-live","status":"in-progress","pr_number":42,"updated":"2026-05-01T12:00:00Z","workers":[{"phase":"implement","status":"launched","agent":"a"}]}' >"$tasks/2026-05-01-live.json"
+  printf '{"task_id":"ABC-9","todo_id":"2026-05-03-joined","status":"changes-requested","pr_number":"12"}' >"$tasks/ABC-9.json"
+  printf '{"task_id":"2026-04-01-shipped","status":"merged","pr_number":7}' >"$arch/2026-04-01-shipped.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "task state: exit 0" "$(rc)" "0"
+  card=$(python3 - "$f" 2026-05-01-live <<'PY'
+import re, sys
+t = open(sys.argv[1]).read()
+print(re.search(r'<a class="card"[^>]*data-todo="%s"[^>]*>.*?</a>' % sys.argv[2], t, re.S).group(0))
+PY
+)
+  assert_contains "task state: live card token" "$card" 'data-task-state="impl"'
+  assert_contains "task state: live card PR badge" "$card" '<span class="badge pr">PR #42</span>'
+  assert_file_has "task state: modal PR link" "$f" '<a href="https://github.com/Org/Repo/pull/42">PR #42</a>'
+  assert_file_has "task state: modal header PR link" "$f" '<a class="badge pr" href="https://github.com/Org/Repo/pull/42">PR #42</a>'
+  assert_file_has "task state: updated shown" "$f" 'updated 2026-05-01T12:00:00Z'
+  assert_file_has "task state: todo_id join" "$f" 'data-todo="2026-05-03-joined" data-state="open" data-task-status="changes-requested" data-task-state="repair"'
+  assert_file_has "task state: digit-string PR links" "$f" 'href="https://github.com/Org/Repo/pull/12"'
+  assert_file_has "task state: archived task is done" "$f" 'data-todo="2026-04-01-shipped" data-task-status="merged" data-task-state="done"'
+  assert_file_has "task state: archived PR link" "$f" 'href="https://github.com/Org/Repo/pull/7"'
+  assert_file_has "task state: archived month" "$f" 'archived 2026-09'
+  assert_file_has "task state: no task, no state" "$f" 'data-todo="2026-05-02-none" data-state="open" data-task-status="">'
+  assert_file_has "task state: in-flight count ignores archive" "$f" 'data-count="in-flight">2<'
+  rm_fixture "$repo" "$sr"
+}
+test_task_state_on_board
+
+test_alias_remote_pr_link() {
+  local repo sr f slug tasks
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  git -C "$repo" config 'url.git@Git-Personal:.insteadOf' 'git@github.com:'
+  slug=$(core_slug git@Git-Personal:Org/Repo.git); tasks="$sr/$slug/tasks"
+  mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-alias <<'EOF2'
+---
+created: 2026-05-01
+title: Alias remote
+---
+EOF2
+  printf '{"task_id":"2026-05-01-alias","status":"in-progress","pr_number":42}' >"$tasks/2026-05-01-alias.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "alias remote: exit 0" "$(rc)" "0"
+  assert_file_has "alias remote: PR still links to GitHub" "$f" 'href="https://github.com/Org/Repo/pull/42"'
+  rm_fixture "$repo" "$sr"
+}
+test_alias_remote_pr_link
+
+test_archive_never_in_flight() {
+  local repo sr f slug rd
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); rd="$sr/$slug"
+  mkdir -p "$rd/tasks" "$rd/archive/2026-09/tasks"
+  mk_todo "$repo" pending 2026-05-01-old <<'EOF2'
+---
+created: 2026-05-01
+title: Archived but not completed
+---
+EOF2
+  mk_todo "$repo" pending 2026-05-02-both <<'EOF2'
+---
+created: 2026-05-02
+title: Live and archived record
+---
+EOF2
+  printf '{"task_id":"2026-05-01-old","status":"in-progress"}' >"$rd/archive/2026-09/tasks/2026-05-01-old.json"
+  printf '{"task_id":"2026-05-02-both","status":"changes-requested"}' >"$rd/tasks/2026-05-02-both.json"
+  printf '{"task_id":"2026-05-02-both","status":"merged"}' >"$rd/archive/2026-09/tasks/2026-05-02-both.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "archive tier: exit 0" "$(rc)" "0"
+  assert_file_has "archive tier: archived in-progress is not in flight" "$f" 'data-count="in-flight">1<'
+  assert_file_has "archive tier: live record wins over archive" "$f" 'data-todo="2026-05-02-both" data-state="open" data-task-status="changes-requested"'
+  rm_fixture "$repo" "$sr"
+}
+test_archive_never_in_flight
+
+test_jira_chip() {
+  local repo sr f
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-01-jira <<'EOF'
+---
+created: 2026-05-01
+title: Has Jira
+---
+
+Tracked as [ABC-123](https://example.atlassian.net/browse/ABC-123) under [ABC-1](https://example.atlassian.net/browse/ABC-1).
+EOF
+  mk_todo "$repo" pending 2026-05-03-github <<'EOF'
+---
+created: 2026-05-03
+title: Not Jira
+---
+
+See https://github.com/o/r/blob/main/browse/ZZZ-7 for context.
+EOF
+  mk_todo "$repo" pending 2026-05-04-selfhosted <<'EOF'
+---
+created: 2026-05-04
+title: Self-hosted Jira
+jira_url: https://jira.example.com/browse/XYZ-77
+---
+EOF
+  mk_todo "$repo" pending 2026-05-02-nojira <<'EOF'
+---
+created: 2026-05-02
+title: No Jira
+jira: ABC-5
+---
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_file_has "jira: card chip" "$f" '<span class="badge jira">ABC-123</span>'
+  assert_file_has "jira: modal header link" "$f" '<a class="badge jira" href="https://example.atlassian.net/browse/ABC-123">ABC-123</a>'
+  assert_file_has "jira: Links entry labelled with the key" "$f" '<li><a href="https://example.atlassian.net/browse/ABC-123">ABC-123</a></li>'
+  assert_file_lacks "jira: first URL wins over the epic" "$f" 'badge jira">ABC-1<'
+  assert_file_lacks "jira: bare key shows no chip" "$f" 'ABC-5'
+  assert_file_lacks "jira: non-Atlassian /browse/ URL shows no chip" "$f" 'badge jira">ZZZ-7<'
+  assert_file_has "jira: declared jira_url on another host shows a chip" "$f" '<span class="badge jira">XYZ-77</span>'
+  rm_fixture "$repo" "$sr"
+}
+test_jira_chip
+
+test_malformed_records_degrade() {
+  local repo sr f slug rd tasks big id
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); rd="$sr/$slug"; tasks="$rd/tasks"
+  mkdir -p "$tasks"
+  for id in 2026-05-01-ok 2026-05-02-toplist 2026-05-03-rowdict 2026-05-04-bigpr 2026-05-05-rev; do
+    mk_todo "$repo" pending "$id" <<EOT
+---
+created: 2026-05-01
+title: Todo $id
+---
+EOT
+  done
+  big=$(python3 -c 'print("9" * 5000)')
+  printf '{"task_id":"2026-05-01-ok","status":"in-progress","workers":[{"phase":"implement","status":"launched"}]}' >"$tasks/2026-05-01-ok.json"
+  printf '{"task_id":"2026-05-02-toplist","status":"in-progress","phase":[]}' >"$tasks/2026-05-02-toplist.json"
+  printf '{"task_id":"2026-05-03-rowdict","status":"in-progress","workers":[{"phase":{},"status":"launched"}]}' >"$tasks/2026-05-03-rowdict.json"
+  printf '{"task_id":"2026-05-04-bigpr","status":"in-progress","pr_number":"%s"}' "$big" >"$tasks/2026-05-04-bigpr.json"
+  printf '{"task_id":"2026-05-05-rev","status":"reviewed","pr_number":"12"}' >"$tasks/2026-05-05-rev.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "malformed: board builds, exit 0" "$(rc)" "0"
+  assert_file_has "malformed: healthy card keeps its token" "$f" 'data-todo="2026-05-01-ok" data-state="open" data-task-status="in-progress" data-task-state="impl"'
+  assert_file_has "malformed: list phase card present" "$f" 'data-todo="2026-05-02-toplist"'
+  assert_file_has "malformed: dict phase card present" "$f" 'data-todo="2026-05-03-rowdict"'
+  assert_file_has "malformed: oversized PR card present" "$f" 'data-todo="2026-05-04-bigpr"'
+  assert_file_lacks "malformed: oversized PR renders no badge" "$f" 'PR #99999'
+  assert_file_lacks "malformed: PR badge never pairs with open-pr?" "$f" 'data-task-state="open-pr?"'
+  rm_fixture "$repo" "$sr"
+}
+test_malformed_records_degrade
+
+test_confined_state_reads() {
+  local sr rd out
+  sr=$(mk_dir) || exit 2; rd="$sr/slug"
+  mkdir -p "$rd/tasks" "$rd/archive/2026-09/tasks"
+  printf '{"task_id":"a","status":"in-progress"}' >"$rd/tasks/a.json"
+  printf '{"task_id":"b","status":"merged"}' >"$rd/archive/2026-09/tasks/b.json"
+  out=$(env -u TODOS_STATE_ROOT python3 -I - "$HERE/.." "$rd" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import todos_dashboard as d
+from pathlib import Path
+rd = Path(sys.argv[2])
+idx = d.task_index(rd, True)
+print(sorted(idx), d.list_months(rd, True), d.read_json(rd / "tasks" / "a.json", confined=True)[1])
+PY
+)
+  assert_eq "confined: tier, month and record reads work" "$out" "['a', 'b'] ['2026-09'] False"
+  rm_fixture "$sr"
+}
+test_confined_state_reads
 
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

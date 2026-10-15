@@ -42,6 +42,8 @@ IN_FLIGHT_STATUSES = ("kickoff", "in-progress", "blocked", "review-dispatched",
                       "changes-requested", "reviewed", "completed")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
+JIRA_ANY_HOST_RE = re.compile(r"https?://[^\s<>\"'()\[\]]+?/browse/([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9-])")
+JIRA_URL_RE = re.compile(r"https?://[A-Za-z0-9.-]+\.atlassian\.net/browse/([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9-])")
 PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
 # Open-section grouping (D8): computed state (blocked-by-deps, in-flight-by-
 # herdr) always wins over the manual `status:` field, since it reflects
@@ -164,6 +166,12 @@ def first_body_line(body):
     return ""
 
 
+def jira_link(text, declared=""):
+    """-> (key, url): a declared jira_url on any host, else the first Atlassian issue URL in text."""
+    m = JIRA_ANY_HOST_RE.fullmatch(declared) or JIRA_URL_RE.search(text)
+    return (m.group(1), m.group(0)) if m else None
+
+
 def body_links(body):
     seen, out = set(), []
     for m in URL_RE.finditer(body):
@@ -176,6 +184,8 @@ def body_links(body):
             label = f"PR #{pr.group(1)}"
         elif ARTIFACT_URL_RE.match(url):
             label = "artifact"
+        elif JIRA_URL_RE.match(url):
+            label = JIRA_URL_RE.match(url).group(1)
         else:
             label = re.sub(r"^https?://", "", url).split("/")[0]
         out.append((label, url))
@@ -275,11 +285,95 @@ def field(d, key):
     return ""
 
 
-def herdr_status(tasks_dir, basename, *, confined=False):
-    """Read-only view of tasks/<task>.{json,review.json,done.json}.
+def list_tier(directory, confined):
+    """Primary task records (no dot in the stem) in directory; [] on any error."""
+    try:
+        if confined:
+            return core.task_record_files(directory)
+        return sorted(f for f in directory.glob("*.json") if "." not in f.stem)
+    except (OSError, ValueError):
+        return []
 
-    herdr names a todo's task by the bare todo id; older records used
-    td-<basename>, read when no bare-id record exists.
+
+def list_months(rd, confined):
+    """archive/<YYYY-MM> names, newest first; [] on any error."""
+    try:
+        if confined:
+            months = core.archive_months(rd)
+        else:
+            months = sorted(p.name for p in (rd / "archive").iterdir()
+                            if core.ARCHIVE_MONTH_RE.match(p.name))
+    except (OSError, ValueError):
+        return []
+    return months[::-1]
+
+
+def pick_claimant(stem, claimants):
+    """The record a todo takes among claimants: a file named for the todo,
+    then td-<stem>, then the greatest `updated`, ties by file stem."""
+    best, best_key = None, None
+    for c in sorted(claimants, key=lambda c: c["task_id"]):
+        rank = 0 if c["task_id"] == stem else 1 if c["task_id"] == f"td-{stem}" else 2
+        updated = field(c["record"] or {}, "updated")
+        if best is None or rank < best_key[0] or (rank == best_key[0] == 2 and updated > best_key[1]):
+            best, best_key = c, (rank, updated)
+    return best
+
+
+def task_index(rd, confined):
+    """{todo stem: entry}. Each primary record is read once here; entry holds
+    the parsed snapshot. Live tier first, then archive months newest first."""
+    tiers = [(rd / "tasks", "", list_tier(rd / "tasks", confined))]
+    for month in list_months(rd, confined):
+        tier = rd / "archive" / month / "tasks"
+        tiers.append((tier, month, list_tier(tier, confined)))
+    index = {}
+    for tier_dir, month, files in tiers:
+        claims = {}
+        for f in files:
+            rec, bad = read_json(f, confined=confined)
+            if rec is None and not bad:
+                continue
+            todo_id = rec.get("todo_id") if rec else None
+            stem = todo_id if isinstance(todo_id, str) and todo_id else f.stem.removeprefix("td-")
+            claims.setdefault(stem, []).append(
+                {"dir": tier_dir, "task_id": f.stem, "month": month, "record": rec, "unreadable": bad})
+        for stem, claimants in claims.items():
+            if stem not in index:
+                index[stem] = pick_claimant(stem, claimants)
+    return index
+
+
+def pr_number(rec):
+    """PR number: core's label rule, after reading a bounded digit string as an int."""
+    for key in ("pr_number", "pr"):
+        v = rec.get(key)
+        if isinstance(v, str) and re.fullmatch(r"[0-9]{1,9}", v):
+            rec = {**rec, key: int(v)}
+    return core._label_pr_number(rec)
+
+
+def state_token(rec, bad, archived, rd, task_id, confined):
+    if bad or rec is None:
+        return "unreadable"
+    status = rec.get("status")
+    if not isinstance(status, str) or not status:
+        return "recorded"
+    pr = pr_number(rec)
+    rec = {**rec, "pr_number": pr, "pr": None}
+    try:
+        if archived:
+            return "done" if status == "merged" else core.task_state_token(rec)
+        handoff = None
+        if status == "reviewed":
+            handoff = core.task_ship_handoff(rd, task_id, rec)
+        return core.task_state_token(rec, handoff)
+    except Exception:
+        return "unreadable record"
+
+
+def herdr_status(entry, rd, pr_base, *, confined=False):
+    """Read-only view of a task record (from task_index) and its sidecars.
 
     The task record is authoritative for status and the live worker. The
     review record is shown as-is only when its reviewed_head_sha equals the
@@ -287,18 +381,23 @@ def herdr_status(tasks_dir, basename, *, confined=False):
     its phase and agent both equal the live worker's (herdr reuses one
     workspace across phases, so workspace_id proves nothing), else stale.
     """
-    task_id = basename if (tasks_dir / f"{basename}.json").exists() else f"td-{basename}"
-    rec, bad = read_json(tasks_dir / f"{task_id}.json", confined=confined)
-    if rec is None and not bad:
+    if entry is None:
         return None
+    task_id, tasks_dir, rec, bad = entry["task_id"], entry["dir"], entry["record"], entry["unreadable"]
+    archived = entry["month"]
     st = {"task_id": task_id, "status": "", "phase": "", "role": "", "model": "",
           "agent": "", "workspace_id": "", "branch": "", "review_head_sha": "",
           "review_outcome": "", "review": "", "review_stale": False,
           "blocking_count": "", "findings_ref": "", "done_outcome": "",
-          "done_phase": "", "done_stale": False, "unreadable": bad}
+          "done_phase": "", "done_stale": False, "unreadable": bad,
+          "archived": archived, "updated": "", "pr_number": None, "pr_url": "",
+          "token": state_token(rec, bad, archived, rd, task_id, confined)}
     if rec is not None:
-        for k in ("status", "branch", "review_head_sha", "review_outcome"):
+        for k in ("status", "branch", "review_head_sha", "review_outcome", "updated"):
             st[k] = field(rec, k)
+        st["pr_number"] = pr_number(rec)
+        if st["pr_number"] and pr_base:
+            st["pr_url"] = f"{pr_base}{st['pr_number']}"
         workers = rec.get("workers")
         if isinstance(workers, list) and workers and isinstance(workers[-1], dict):
             w = workers[-1]
@@ -344,7 +443,7 @@ def read_text(path):
     return None if data is None else decode_text(data)
 
 
-def load_todo(path, resolver, tasks_dir, pending, confined_state):
+def load_todo(path, resolver, board, pending):
     # One read feeds both the rendered body and the hash the note form
     # sends back, so the page never shows one version and hashes another.
     data = read_bytes(path)
@@ -371,20 +470,22 @@ def load_todo(path, resolver, tasks_dir, pending, confined_state):
         "summary": card_summary(text),
         "links": body_links(body),
         "deps": resolver.resolve_all(path, basename) if pending else [],
-        "herdr": herdr_status(tasks_dir, basename, confined=confined_state),
+        "jira": jira_link(text, scalars.get("jira_url", "")),
+        "herdr": herdr_status(board["index"].get(basename), board["rd"], board["pr_base"],
+                              confined=board["confined"]),
     }
     t["blocked"] = any(state not in SATISFIED for _, state in t["deps"])
     h = t["herdr"]
-    t["in_flight"] = bool(pending and h and h["status"] in IN_FLIGHT_STATUSES)
+    t["in_flight"] = bool(pending and h and not h["archived"] and h["status"] in IN_FLIGHT_STATUSES)
     return t
 
 
-def load_dir(d, resolver, tasks_dir, pending, confined_state):
+def load_dir(d, resolver, board, pending):
     if not d.is_dir():
         return []
     out = []
     for p in sorted(d.glob("*.md")):
-        t = load_todo(p, resolver, tasks_dir, pending, confined_state)
+        t = load_todo(p, resolver, board, pending)
         if t is not None:
             out.append(t)
     return out
@@ -762,6 +863,8 @@ a.card[data-state="blocked"] { background: var(--blocked-soft); }
 
 .badge.in-flight { font-weight: 600; }
 
+a.badge { text-decoration: none; color: var(--accent); }
+
 .badge.merged {
   background: var(--done-soft);
   border-color: var(--done-rule);
@@ -1080,19 +1183,26 @@ def chip(text, cls=""):
     # cls is always a literal from this file, never user data; escaped anyway.
     return f'<span class="chip {esc(cls)}">{esc(text)}</span>' if text else ""
 
+def state_class(h, pending):
+    """Badge class for a task's state token."""
+    if h["token"] == "unreadable":
+        return "unreadable"
+    if h["token"] == "done" or (h["status"] == "merged" and not h["archived"]):
+        return "merged"
+    if pending and not h["archived"] and h["status"] in IN_FLIGHT_STATUSES:
+        return "in-flight"
+    return "state"
+
+
+def pr_text(h):
+    return f"PR #{h['pr_number']}"
+
+
 def render_herdr(h):
     if h is None:
         return ""
-    status = h["status"]
-    if status == "merged":
-        cls = "merged"
-    elif status == "unreadable":
-        cls = "unreadable"
-    elif status in IN_FLIGHT_STATUSES:
-        cls = "in-flight"
-    else:
-        cls = "other"
-    parts = [f'<span class="pill {cls}">{esc(status or "recorded")}</span>']
+    cls = state_class(h, True)
+    parts = [f'<span class="pill {"other" if cls == "state" else cls}">{esc(h["token"])}</span>']
     line = " ".join(x for x in (h["phase"], h["role"], h["model"]) if x)
     if line:
         parts.append(f'<div class="sub">{esc(line)}</div>')
@@ -1105,6 +1215,14 @@ def render_herdr(h):
     if h["done_outcome"]:
         stale = " (stale)" if h["done_stale"] and h["done_outcome"] != "unreadable" else ""
         parts.append(f'<div class="sub">done {esc(h["done_outcome"])} {esc(h["done_phase"])}{stale}</div>')
+    if h["pr_number"]:
+        pr = esc(pr_text(h))
+        link = f'<a href="{esc(h["pr_url"])}">{pr}</a>' if h["pr_url"] else pr
+        parts.append(f'<div class="sub">{link}</div>')
+    if h["updated"]:
+        parts.append(f'<div class="sub">updated {esc(h["updated"])}</div>')
+    if h["archived"]:
+        parts.append(f'<div class="sub">archived {esc(h["archived"])}</div>')
     return "".join(parts)
 
 def note_form(t, section, token):
@@ -1158,17 +1276,25 @@ def badge(text, cls):
     return f'<span class="badge {esc(cls)}">{esc(text)}</span>'
 
 
-def herdr_badge(t, pending):
+def herdr_badges(t, pending, linked):
     h = t["herdr"]
     if h is None:
         return ""
-    if pending and h["status"] in IN_FLIGHT_STATUSES:
-        return badge("in flight" + (f" - {h['phase']}" if h["phase"] else ""), "in-flight")
-    if h["status"] == "merged":
-        return badge("merged", "merged")
-    if h["status"] == "unreadable":
-        return badge("herdr unreadable", "unreadable")
-    return ""
+    parts = [badge(h["token"], state_class(h, pending))]
+    if h["pr_number"] and linked and h["pr_url"]:
+        parts.append(f'<a class="badge pr" href="{esc(h["pr_url"])}">{esc(pr_text(h))}</a>')
+    elif h["pr_number"]:
+        parts.append(badge(pr_text(h), "pr"))
+    return "".join(parts)
+
+
+def jira_badge(t, linked):
+    if not t["jira"]:
+        return ""
+    key, url = t["jira"]
+    if linked:
+        return f'<a class="badge jira" href="{esc(url)}">{esc(key)}</a>'
+    return badge(key, "jira")
 
 
 def deps_badge(t, pending):
@@ -1188,9 +1314,9 @@ def date_badge(t):
     return ""
 
 
-def card_badges(t, pending):
+def card_badges(t, pending, linked=False):
     prio = t["priority"]
-    parts = [herdr_badge(t, pending), deps_badge(t, pending),
+    parts = [herdr_badges(t, pending, linked), jira_badge(t, linked), deps_badge(t, pending),
              badge(prio, f"prio-{prio}" if prio in PRIORITY_WEIGHT else "prio-other") if prio else "",
              badge(t["area"], "area") if t["area"] else "",
              date_badge(t)]
@@ -1199,11 +1325,12 @@ def card_badges(t, pending):
 
 def render_card(t, pending):
     status = t["herdr"]["status"] if t["herdr"] else ""
+    token = f' data-task-state="{esc(t["herdr"]["token"])}"' if t["herdr"] else ""
     state = f' data-state="{"blocked" if t["blocked"] else "open"}"' if pending else ""
     prio = f' data-priority="{t["priority"]}"' if t["priority"] in PRIORITY_WEIGHT else ""
     summary = f'<span class="card-summary">{esc(t["summary"])}</span>' if t["summary"] else ""
     return (f'<li><a class="card" href="#todo-{esc(t["basename"])}" data-todo="{esc(t["basename"])}"'
-            f'{state} data-task-status="{esc(status)}"{prio}>'
+            f'{state} data-task-status="{esc(status)}"{token}{prio}>'
             f'<span class="card-title">{esc(t["title"])}</span>{summary}'
             f'{card_badges(t, pending)}</a></li>')
 
@@ -1281,7 +1408,7 @@ def render_modal(t, pending, edit, on_page):
             '<article class="sheet" tabindex="-1"><header class="sheet-head">'
             f'<h2 id="title-{bid}">{esc(t["title"])}</h2>'
             '<a class="close" href="#board" aria-label="Close">&times;</a>'
-            f'{card_badges(t, pending)}</header>'
+            f'{card_badges(t, pending, True)}</header>'
             f'<div class="sheet-body"><div class="prd">{body}</div>'
             f'<aside class="facts">{render_facts(t, pending, edit, on_page)}</aside></div>'
             "</article></div>")
@@ -1554,8 +1681,12 @@ def board_context(args):
         remote = ""
     slug = core.repo_slug(remote, context["common_dir"])
     state_root = default_state_root(scope)
+    # get-url applies insteadOf, so an SSH alias hides the GitHub URL; read it as stored.
+    rc, stored = git(["config", "--get", "remote.origin.url"], cwd=root)
+    gh = core.GITHUB_REMOTE_RE.match(stored if rc == 0 else remote) or core.GITHUB_REMOTE_RE.match(remote)
     return {
         "root": root,
+        "pr_base": f"https://github.com/{gh.group(1)}/{gh.group(2)}/pull/" if gh else "",
         "scope": scope,
         "slug": slug,
         "todos_dir": root / TODOS_DIRNAME,
@@ -1571,8 +1702,11 @@ def build_page(ctx, args, edit=None):
     root, todos_dir = ctx["root"], ctx["todos_dir"]
     _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
     resolver = Resolver(root, args.online)
-    pending = load_dir(todos_dir / "pending", resolver, ctx["tasks_dir"], True, ctx["confined_state"])
-    completed = load_dir(todos_dir / "completed", resolver, ctx["tasks_dir"], False, ctx["confined_state"])
+    rd = ctx["tasks_dir"].parent
+    board = {"rd": rd, "pr_base": ctx["pr_base"], "confined": ctx["confined_state"],
+             "index": task_index(rd, ctx["confined_state"])}
+    pending = load_dir(todos_dir / "pending", resolver, board, True)
+    completed = load_dir(todos_dir / "completed", resolver, board, False)
     view = edit["view"] if edit else None
     filters = ""
     if view:
