@@ -1485,6 +1485,13 @@ title: Not Jira
 
 See https://github.com/o/r/blob/main/browse/ZZZ-7 for context.
 EOF
+  mk_todo "$repo" pending 2026-05-04-selfhosted <<'EOF'
+---
+created: 2026-05-04
+title: Self-hosted Jira
+jira_url: https://jira.example.com/browse/XYZ-77
+---
+EOF
   mk_todo "$repo" pending 2026-05-02-nojira <<'EOF'
 ---
 created: 2026-05-02
@@ -1499,6 +1506,7 @@ EOF
   assert_file_lacks "jira: first URL wins over the epic" "$f" 'badge jira">ABC-1<'
   assert_file_lacks "jira: bare key shows no chip" "$f" 'ABC-5'
   assert_file_lacks "jira: non-Atlassian /browse/ URL shows no chip" "$f" 'badge jira">ZZZ-7<'
+  assert_file_has "jira: declared jira_url on another host shows a chip" "$f" '<span class="badge jira">XYZ-77</span>'
   rm_fixture "$repo" "$sr"
 }
 test_jira_chip

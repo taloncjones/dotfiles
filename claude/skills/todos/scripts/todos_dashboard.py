@@ -42,6 +42,7 @@ IN_FLIGHT_STATUSES = ("kickoff", "in-progress", "blocked", "review-dispatched",
                       "changes-requested", "reviewed", "completed")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
+JIRA_ANY_HOST_RE = re.compile(r"https?://[^\s<>\"'()\[\]]+?/browse/([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9-])")
 JIRA_URL_RE = re.compile(r"https?://[A-Za-z0-9.-]+\.atlassian\.net/browse/([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9-])")
 PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
 # Open-section grouping (D8): computed state (blocked-by-deps, in-flight-by-
@@ -165,9 +166,9 @@ def first_body_line(body):
     return ""
 
 
-def jira_link(text):
-    """-> (key, url) for the first Jira issue URL in text, else None."""
-    m = JIRA_URL_RE.search(text)
+def jira_link(text, declared=""):
+    """-> (key, url): a declared jira_url on any host, else the first Atlassian issue URL in text."""
+    m = JIRA_ANY_HOST_RE.fullmatch(declared) or JIRA_URL_RE.search(text)
     return (m.group(1), m.group(0)) if m else None
 
 
@@ -469,7 +470,7 @@ def load_todo(path, resolver, board, pending):
         "summary": card_summary(text),
         "links": body_links(body),
         "deps": resolver.resolve_all(path, basename) if pending else [],
-        "jira": jira_link(text),
+        "jira": jira_link(text, scalars.get("jira_url", "")),
         "herdr": herdr_status(board["index"].get(basename), board["rd"], board["pr_base"],
                               confined=board["confined"]),
     }
