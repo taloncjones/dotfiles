@@ -50,7 +50,7 @@ objects). Exit `0` nothing to change, `1` rewrite proposed, `2` error.
    In a herdr session a `gh pr edit` apply on a PR this account authored
    needs no go; print `[INFO] edited PR #n body: <why>`. On another
    author's PR the shim refuses it: register the draft and ask
-   a post option starting `Post` and ending `(draft <hash>)` as the herdr skill's section 4 describes.
+   a post option starting `Post` plus a space and ending `(draft <hash>)`, with no negation, hedge or dash aside (refusal words in `references/posting.md`) as the herdr skill's section 4 describes.
 5. `unchanged`: say so in one line and post the original.
 6. Exit `2` with `invariant violated`: Codex dropped a URL, ticket key,
    code span, or protected line. Do not hand-merge; re-run once, then

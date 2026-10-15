@@ -83,7 +83,8 @@ LEAD_PUNCT_POST_RE = re.compile(r"\s*\(?post(?=[^\w\s])", re.IGNORECASE)
 NEGATION_RE = re.compile(r"\b(?:not|never|no|none|nothing|nobody|neither|nor|zero|without|cannot)\b|n't\b", re.IGNORECASE)
 # A conditional, deferred or hedged post ("Post after CI passes") is no go: fail closed.
 HEDGE_RE = re.compile(
-    r"\b(?:if|unless|after|until|later|wait|hold|or|maybe|but|only|again|for now)\b|\?|--|\s[-\u2013\u2014]\s",
+    r"(?<![\w-])(?:if|unless|after|until|later|wait|hold|or|maybe|but|only|again|for now)(?![\w-])"
+    r"|\?|--|[\u2010-\u2015\u2212]|\s-\s",
     re.IGNORECASE,
 )
 HASH_WORD_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?![0-9A-Za-z])", re.IGNORECASE)

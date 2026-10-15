@@ -920,7 +920,7 @@ marker on #n: APPROVE`. Non-green evidence (a `CHANGES` marker, failing
   this account did not author, a body with an `@login`) needs the owner's
   go, asked as section 4 says: register it with
   `python3 ~/.claude/hooks/pr_post_guard.py draft -- gh <args>`, then ask
-  a post option starting `Post` and ending `(draft <hash>)` and a skip option ending `(skip draft <hash>)`, with the text in the question; after posting, print `[INFO] posted reply on #n`. If an
+  a post option starting `Post` plus a space and ending `(draft <hash>)`, with no negation, hedge or dash aside (refusal words in `references/posting.md`) and a skip option ending `(skip draft <hash>)`, with the text in the question; after posting, print `[INFO] posted reply on #n`. If an
   approved post fails, let the Bash call return, read the PR, and
   re-register only when the text is absent, telling the owner that a
   duplicate is possible. It never replies to a human reviewer's thread on

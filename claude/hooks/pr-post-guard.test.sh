@@ -605,12 +605,29 @@ pending aaaaaaaa 1 'reply one'
 expect_out "L18 two hashes joined by or are ambiguous" "$AMB" "$(payload_a s1 'Post draft aaaaaaaa or bbbbbbbb' 'reply one')"
 expect_out "L18 two hashes joined by a dash are ambiguous" "$AMB" "$(payload_a s1 'Post draft aaaaaaaa-bbbbbbbb' 'reply one')"
 expect_file "L18 the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
-case_gate l19
+case_gate l20
 pending aaaaaaaa 1 'reply one'
-expect_out "L19 Post colon is ambiguous" "$AMB" "$(payload_a s1 'Post: the closing comment (draft aaaaaaaa)' 'reply one')"
-expect_out "L19 Post comma is ambiguous" "$AMB" "$(payload_a s1 'Post, then close (draft aaaaaaaa)' 'reply one')"
-expect_out "L19 Post dash is ambiguous" "$AMB" "$(payload_a s1 'Post-the comment (draft aaaaaaaa)' 'reply one')"
-expect_out "L19 Post em dash is ambiguous" "$AMB" "$(payload_a s1 "$(printf 'Post\342\200\224the comment (draft aaaaaaaa)')" 'reply one')"
+EM=$(printf '\342\200\224'); EN=$(printf '\342\200\223'); HB=$(printf '\342\200\225'); FD=$(printf '\342\200\222'); MN=$(printf '\342\210\222')
+for lab in "Post the reply${EM}pending approval (draft aaaaaaaa)" "Post the reply${EN}pending approval (draft aaaaaaaa)" "Post the reply (draft aaaaaaaa)${EM}pending approval" "Post the reply ${EM}pending approval (draft aaaaaaaa)" "Post the reply${HB}pending approval (draft aaaaaaaa)" "Post the reply${FD}pending approval (draft aaaaaaaa)" "Post the reply ${MN} pending (draft aaaaaaaa)"; do
+  expect_out "L20 unspaced dash aside is ambiguous: $lab" "$AMB" "$(payload_a s1 "$lab" 'reply one')"
+  expect_err "PQ20 unspaced dash aside is refused: $lab" "is ambiguous" "$(payload_q s1 "$lab" '' 'Post this draft? reply one')"
+done
+expect_file "L20 the draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+for lab in 'Post the follow-up (draft aaaaaaaa)' 'Post the hold-harmless clause (draft aaaaaaaa)' 'Post the if-statement bug note (draft aaaaaaaa)'; do
+  expect_out "L20 hyphenated compound approves: $lab" "post gate: approved draft aaaaaaaa" "$(payload_a s1 "$lab" 'reply one')"
+  pending aaaaaaaa 1 'reply one'
+done
+for w in not never no none nothing nobody neither nor zero without cannot "don't"; do
+  expect_out "L20 negation word $w is ambiguous" "$AMB" "$(payload_a s1 "Post the reply $w now (draft aaaaaaaa)" 'reply one')"
+done
+expect_err "PQ20 a hedge refusal names the plain-statement rule" "a post label must be a plain statement: avoid if/unless/after/until/later/wait/hold/or/maybe/but/only/again/for now, a question mark, and a dash-separated aside" "$(payload_q s1 'Post after CI passes (draft aaaaaaaa)' '' 'Post this draft? reply one')"
+
+case_gate l21
+pending aaaaaaaa 1 'reply one'
+expect_out "L21 Post colon is ambiguous" "$AMB" "$(payload_a s1 'Post: the closing comment (draft aaaaaaaa)' 'reply one')"
+expect_out "L21 Post comma is ambiguous" "$AMB" "$(payload_a s1 'Post, then close (draft aaaaaaaa)' 'reply one')"
+expect_out "L21 Post dash is ambiguous" "$AMB" "$(payload_a s1 'Post-the comment (draft aaaaaaaa)' 'reply one')"
+expect_out "L21 Post em dash is ambiguous" "$AMB" "$(payload_a s1 "$(printf 'Post\342\200\224the comment (draft aaaaaaaa)')" 'reply one')"
 
 case_gate pq11
 pending aaaaaaaa 1 'reply one'
