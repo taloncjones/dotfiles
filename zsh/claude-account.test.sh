@@ -546,7 +546,7 @@ run_case "director keeps work-account routing" \
 
 mkdir -p "$SBHOME/Git/personal/dotfiles/sub"
 GUARD="--allowedTools Read(/**) Edit(/**) Read(~/.herdr/worktrees/dotfiles/**) Edit(~/.herdr/worktrees/dotfiles/**)"
-GPREFIX="${PREFIX/--agent director /--agent director $GUARD }"
+GPREFIX="--agent director $GUARD ${PREFIX#--agent director }"
 run_case "director in the dotfiles checkout passes the guard-edit rules once" \
     "$SBHOME/Git/personal/dotfiles" "HERDR_ENV=1 director" "UNSET" \
     "$GPREFIX --permission-mode auto"
