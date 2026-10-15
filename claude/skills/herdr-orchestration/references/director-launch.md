@@ -73,10 +73,9 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   launches, which also run in auto mode. In the personal dotfiles checkout,
   where those files are the product, `director()` passes `--allowedTools`
   rules (`Read` and `Edit` on the checkout and on
-  `~/.herdr/worktrees/dotfiles/**`, plus `Bash(sed -n:*)`) so the director
-  reads a guard file with the Read tool or `sed -n` and edits it under an
-  allow-edit marker without the classifier. Workers keep the classifier: a
-  refused worker reports `blocked:` with the denial text and the director
+  `~/.herdr/worktrees/dotfiles/**`) so the director reads a guard file
+  and edits it under an allow-edit marker without the classifier. Workers
+  keep the classifier: a refused worker reports `blocked:` with the denial text and the director
   applies that edit. Paths under `.claude/` stay protected in every mode
   and still need a manual-mode session. Other repositories keep the
   classifier for the director too, and their guardrail edits run from a

@@ -545,13 +545,18 @@ run_case "director keeps work-account routing" \
     "$SBHOME/Git/work/proj" "HERDR_ENV=1 director" "$SBHOME/.claude-work"
 
 mkdir -p "$SBHOME/Git/personal/dotfiles/sub"
-GUARD="--allowedTools Read(/**) Edit(/**) Read(~/.herdr/worktrees/dotfiles/**) Edit(~/.herdr/worktrees/dotfiles/**) Bash(sed -n:*)"
+GUARD="--allowedTools Read(/**) Edit(/**) Read(~/.herdr/worktrees/dotfiles/**) Edit(~/.herdr/worktrees/dotfiles/**)"
+GPREFIX="${PREFIX/--agent director /--agent director $GUARD }"
 run_case "director in the dotfiles checkout passes the guard-edit rules once" \
     "$SBHOME/Git/personal/dotfiles" "HERDR_ENV=1 director" "UNSET" \
-    "$PREFIX $GUARD --permission-mode auto"
+    "$GPREFIX --permission-mode auto"
 run_case "director under the dotfiles checkout passes the guard-edit rules" \
     "$SBHOME/Git/personal/dotfiles/sub" "HERDR_ENV=1 director" "UNSET" \
-    "$PREFIX $GUARD --permission-mode auto"
+    "$GPREFIX --permission-mode auto"
+
+run_case "director keeps a prompt clear of the variadic guard rules" \
+    "$SBHOME/Git/personal/dotfiles" "HERDR_ENV=1 director fix-it --permission-mode manual" "UNSET" \
+    "$GPREFIX fix-it --permission-mode manual"
 
 # With the plugin directory missing, director launches with no --plugin-dir.
 rec="$TMP/rec"; : >"$rec"
