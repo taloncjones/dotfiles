@@ -81,6 +81,8 @@ STATE_ROOT/
       <binding_id>/                   # one lead's private record subtree
         owner.json                    # mirror of the lead's per-workspace lease
         tasks/                        # lead-scoped task/done/review records
+                                      # (and tasks/<t>.policy.jsonl, the scratch
+                                      # audit of a worker the lead launched)
         workspaces/                   # lead-scoped workspace index records
         envelope.json                 # versioned terminal return envelope
                                       # (schema_version 1; outcome pr_ready|
@@ -472,7 +474,10 @@ introducing and mutating worker rows respectively.
 `herdr_dispatch.py` still writes launcher-scope records directly. Binding-scoped
 rows are introduced only by `reserve-dispatch` and mutated only by
 `enrich-dispatch`; `launch --binding` calls those verbs and never writes a
-`leads/` record itself.
+`leads/` record itself. A bound row's `reprompts` list is written only by
+`$CORE reserve-reprompt` (appends a `starting` entry) and
+`$CORE enrich-reprompt` (records its outcome); `enrich-dispatch` refuses the
+key, and `reprompt --binding` calls those verbs.
 
 ```json
 {

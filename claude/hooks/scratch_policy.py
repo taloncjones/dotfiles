@@ -16,7 +16,8 @@ is the durable summary.
 
 When HERDR_ENV=1 and HERDR_WORKSPACE_ID resolves to a validated index in
 the selected repository/account, each allow is audited to
-<repo dir>/tasks/<task_id>.policy.jsonl. Unbound legacy indexes must be unique. The
+<repo dir>/tasks/<task_id>.policy.jsonl, or to leads/<binding>/tasks/ for a
+worker a task lead launched. Unbound legacy indexes must be unique. The
 allow is printed and flushed before logging; logging failures never
 change the decision.
 """
@@ -358,6 +359,22 @@ def audit_target(payload: dict, ws: str):
     if task is None and f"{task_id}.json" in task_names:
         return None  # corrupt or unreadable is not an absent legacy task
     workers = task.get("workers", []) if task else []
+    base = rd
+    pane = os.environ.get("HERDR_PANE_ID")
+    last = workers[-1] if isinstance(workers, list) and workers else None
+    if (
+        context is not None
+        and pane
+        and isinstance(last, dict)
+        and "runtime" in last
+        and pane != last.get("pane_id")
+    ):
+        # A worker a task lead launched runs in the lead's workspace: audit
+        # into the lead subtree, under its own task record.
+        hit = lifecycle.bound_attempt(rd, task_id, ws, pane, context["root"], root)
+        if hit is not None:
+            _binding_id, base, task, _row = hit
+            workers = task["workers"]
     strict = (
         bound
         or isinstance(workers, list)
@@ -387,7 +404,7 @@ def audit_target(payload: dict, ws: str):
         or task.get("repo_slug", rd.name) != rd.name
     ):
         return None
-    return rd / "tasks" / f"{task_id}.policy.jsonl", task_id
+    return base / "tasks" / f"{task_id}.policy.jsonl", task_id
 
 
 def log_allow(payload: dict, command: str) -> None:
