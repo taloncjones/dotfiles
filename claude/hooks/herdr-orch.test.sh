@@ -12142,7 +12142,7 @@ for phrase in ("post all", "post <hash>", "typed go", "the go is a typed"):
 for name, text in (("herdr", herdr), ("director", director)):
     assert "prose ask" not in text and "asks once in prose" not in text, name
 for name, text in (("herdr", herdr), ("co-review", cc), ("codex co-review", cx)):
-    assert "Post draft <hash>" in text and "Skip draft <hash>" in text, name
+    assert "(draft <hash>)" in text and "(skip draft <hash>)" in text, name
 assert "AskUserQuestion" in director
 for token in ("Answers are not stored", "post gate:", "update --ai"):
     assert token in herdr, token
@@ -12153,7 +12153,7 @@ assert "Resolved by <PR URL>" in section(pm, "## Step 4", "## Step 5")
 assert "<owner>/<repo>/pull/<n>" in section(pm, "## Step 4", "## Step 5")
 assert "AskUserQuestion" in section(voice, "3. Ask", "4. Apply")
 assert "AskUserQuestion" in ops
-assert "Post draft <hash>" in layout
+assert "(draft <hash>)" in layout and "(skip draft <hash>)" in layout
 PY
 
 check "brief template keeps the turn alive on long runs" <<'PY'

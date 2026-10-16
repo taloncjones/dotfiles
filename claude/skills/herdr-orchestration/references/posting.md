@@ -10,12 +10,25 @@ gh <args>`. A Jira comment has no draft.
 2. Ask one single-select question per draft, at most four per prompt. Put the
    full draft text in the question; an option preview is clipped by the
    terminal, so it never counts.
-3. The options are `Post draft <hash>` and `Skip draft <hash>`. The
-   recommended one comes first, with ` (Recommended)`.
+3. Write each option so it reads as the action and ends with `(draft <hash>)`
+   for a post or `(skip draft <hash>)` for a skip: a post option such as `Post the closing comment on PR #1
+   (draft 9cb85c49)`, a skip option such as `Leave PR #1 open (skip draft
+   9cb85c49)`. The recommended one comes first, with ` (Recommended)`.
+   The verb rule: a post label starts with `Post` followed by a space, or with `(` then
+   `Post`. Any other leading word before `post draft <hash>` (`Hold off on`, `Cancel`,
+   `Decline to`, `Maybe`) is a refusal. `Post:`, `Post,` and `Post` plus a dash fail the
+   space rule. A skip is a leading `Skip` or `skip draft <hash>`. A `skip` elsewhere
+   in the label does not count. A post label that carries a negation (`not`, `no`, `never`, `nothing`, `without`,
+   `n't`) or a hedge (`if`, `unless`, `after`, `until`, `later`, `wait`, `hold`, `or`,
+   `maybe`, `but`, `only`, `again`, `for now`, a `?`, a dash aside) is ambiguous too.
+   A label with neither verb, both verbs, a
+   non-`Post` lead before `post draft`, or two hashes is ambiguous and never
+   decides. The legacy labels
+   `Post draft <hash>` and `Skip draft <hash>` still work.
 
 A PreToolUse hook refuses the prompt before the owner sees it when a
-`Post draft <hash>` option names an unregistered draft or one whose text is
-not in the question, and prints the fix.
+post option names an unregistered draft or one whose text is
+not in the question, or when an option label is ambiguous, and prints the fix.
 
 The answer is the go. A PostToolUse hook approves exactly the draft the
 chosen option names, and only when its text was in that question
@@ -30,9 +43,9 @@ turn. After any interruption (a crash, `/clear`, compaction, a resume),
 re-derive the state from live sources and ask again: the PR's state and head,
 the worktree and branch, the Jira issue, and a draft's state file. Only an
 approved draft outlives the turn. It stays approved until it is posted,
-withdrawn with `Skip draft <hash>`, or pruned 24 hours later.
+withdrawn with the skip option, or pruned 24 hours later.
 
-When a `Post draft <hash>` answer prints no `post gate:` line, the answer hook
+When a post answer prints no `post gate:` line, the answer hook
 is not active in this session. Do not ask again. Try the post once. If the
 shim refuses it, tell the owner to run `update --ai` and restart Claude, and
 leave the draft in the report.
