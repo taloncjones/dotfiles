@@ -4905,6 +4905,8 @@ def _bound_reprompt_verb(ns):
                           if e.get("reservation_id") == ns.reservation_id), None)
             _require(index is not None, "no reprompt entry carries that reservation-id")
             entry = entries[index]
+            _require(ns.seq is None or entry.get("seq") == ns.seq,
+                     "reprompt entry seq does not match --seq")
             if (entry.get("status") == ns.status
                     and entry.get("prompt_state") == ns.prompt_state):
                 return 0
@@ -5723,6 +5725,7 @@ def _main(argv=None) -> int:
               "--reservation-id", "--status", fenced=True)
     erp.add_argument("--binding", required=True)
     erp.add_argument("--prompt-state", default=None)
+    erp.add_argument("--seq", type=int, default=None)
     wi = add("write-index", "--workspace", "--json", fenced=True)
     wi.add_argument("--binding", default=None)
     add("write-capabilities", "--json", fenced=True)
