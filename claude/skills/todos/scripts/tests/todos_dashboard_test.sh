@@ -1486,6 +1486,27 @@ EOF2
 }
 test_alias_remote_pr_link
 
+test_stored_alias_remote_pr_link() {
+  local repo sr f slug tasks bin
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"; bin=$(mk_dir) || exit 2
+  printf '#!/bin/sh\necho "hostname github.com"\n' >"$bin/ssh"; chmod +x "$bin/ssh"
+  git -C "$repo" remote set-url origin git@FakeAlias:Org/Repo.git
+  slug=$(core_slug git@FakeAlias:Org/Repo.git); tasks="$sr/$slug/tasks"
+  mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-stored <<'EOF2'
+---
+created: 2026-05-01
+title: Stored alias remote
+---
+EOF2
+  printf '{"task_id":"2026-05-01-stored","status":"in-progress","pr_number":42}' >"$tasks/2026-05-01-stored.json"
+  PATH="$bin:$PATH" render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "stored alias remote: exit 0" "$(rc)" "0"
+  assert_file_has "stored alias remote: PR links to GitHub" "$f" 'href="https://github.com/Org/Repo/pull/42"'
+  rm_fixture "$repo" "$sr" "$bin"
+}
+test_stored_alias_remote_pr_link
+
 test_archive_never_in_flight() {
   local repo sr f slug rd
   repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
