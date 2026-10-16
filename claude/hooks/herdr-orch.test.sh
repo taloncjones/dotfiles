@@ -10047,7 +10047,7 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activa
 test "$before" = "$(shasum "$g" | cut -d' ' -f1)"
 SH
 
-check "activate-task-leads and deactivate-task-leads are refused for a lead-tier owner" <<'SH'
+check "activate-task-leads is refused for a lead-tier owner" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-al.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d); ws=$(mktemp -d)
