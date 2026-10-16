@@ -771,5 +771,141 @@ class StopGateTests(unittest.TestCase):
         self.assertEqual(result, {"action": "allow"})
 
 
+    # --- bound (task-lead) workers -------------------------------------
+
+    BID = "ldb-" + "a" * 32
+
+    def _bound_fixture(self, phase="implement", pane="pane-5", status="claimed",
+                       bid=None, workspace_root=None):
+        bid = bid or self.BID
+        row = {
+            **self.entry,
+            "role": "development_reviewer" if phase == "review" else "implementation",
+            "phase": phase,
+            "agent": "bound-agent",
+            "launch_id": f"bound-{bid[-4:]}",
+            "pane_id": pane,
+        }
+        (self.rd / "bindings").mkdir(exist_ok=True)
+        record = {
+            "schema_version": 1,
+            "binding_id": bid,
+            "tier": "lead",
+            "parent": {"tier": "launcher", "task_id": "parent", "session_id": "s-1"},
+            "task_id": self.task_id,
+            "repo_slug": self.slug,
+            "workspace_root": workspace_root or str(self.worktree),
+            "account_id": self.scope["account_id"],
+            "account_kind": self.scope["kind"],
+            "runtime": "codex",
+            "expected_session_id": "lead-session",
+            "created_fence": 1,
+            "status": status,
+            "created_ts": "2026-09-07T12:00:00Z",
+            "updated_ts": "2026-09-07T12:00:00Z",
+        }
+        (self.rd / "bindings" / f"{bid}.json").write_text(json.dumps(record))
+        base = self.rd / "leads" / bid
+        (base / "tasks").mkdir(parents=True, exist_ok=True)
+        (base / "tasks" / f"{self.task_id}.json").write_text(json.dumps({
+            "task_id": self.task_id, "repo_slug": self.slug,
+            "worktree": str(self.worktree), "base_sha": self.base_sha,
+            "workers": [row],
+        }))
+        return bid, base, row
+
+    def _bound_done(self, base, row, **overrides):
+        done = {
+            "task_id": self.task_id, "workspace_id": self.workspace,
+            "agent": row["agent"], "phase": row["phase"], "outcome": "completed",
+            "head_sha": self.head_sha, "base_sha": self.base_sha,
+            "launch_id": row["launch_id"], "runtime": row["runtime"],
+            "pane_id": row["pane_id"], "source_head_sha": row["source_head_sha"],
+            "ts": "2026-09-07T12:00:01Z",
+        }
+        done.update(overrides)
+        (base / "tasks" / f"{self.task_id}.done.json").write_text(json.dumps(done))
+
+    def test_bound_worker_stop_is_refused_with_binding_emitter(self):
+        bid, _base, _row = self._bound_fixture()
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "refuse")
+        self.assertIn(f"--task-id {self.task_id} --binding {bid} --workspace", result["command"])
+        self.assertIn("--pane-id pane-5", result["command"])
+        self.assertIn(f"--repo-slug {self.slug}", result["command"])
+        # The lead's own pane is still gated by the director row.
+        lead = gate.evaluate(self._payload(), native=True)
+        self.assertEqual(lead["action"], "refuse")
+        self.assertNotIn("--binding", lead["command"])
+
+    def test_bound_worker_with_matching_record_is_allowed(self):
+        _bid, base, row = self._bound_fixture()
+        self._bound_done(base, row)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result, {"action": "allow"})
+
+    def test_bound_review_worker_emitter_carries_review_binding_fields(self):
+        bid, _base, _row = self._bound_fixture(phase="review")
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "refuse")
+        command = result["command"]
+        self.assertIn("emit-review", command)
+        self.assertIn(f"--binding {bid}", command)
+        self.assertIn(f"--reviewed-base-sha {self.base_sha}", command)
+        self.assertIn("--reviewer-session '<session>'", command)
+
+    def test_unclaimed_foreign_or_superseded_binding_pane_is_released(self):
+        cases = {
+            "revoked": dict(status="revoked"),
+            "completed": dict(status="completed"),
+            "other worktree": dict(workspace_root=str(self.root / "elsewhere")),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                if "elsewhere" in str(kwargs.get("workspace_root", "")):
+                    (self.root / "elsewhere").mkdir(exist_ok=True)
+                self._bound_fixture(**kwargs)
+                with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+                    self.assertEqual(
+                        gate.evaluate(self._payload(), native=True), {"action": "allow"}
+                    )
+        with self.subTest("superseded"):
+            bid, base, row = self._bound_fixture()
+            task = json.loads((base / "tasks" / f"{self.task_id}.json").read_text())
+            task["workers"].append({**row, "launch_id": "later", "pane_id": "pane-6"})
+            (base / "tasks" / f"{self.task_id}.json").write_text(json.dumps(task))
+            with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+                self.assertEqual(
+                    gate.evaluate(self._payload(), native=True), {"action": "allow"}
+                )
+        with self.subTest("unbound pane"):
+            self._bound_fixture()
+            with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-9"}):
+                self.assertEqual(
+                    gate.evaluate(self._payload(), native=True), {"action": "allow"}
+                )
+
+    def test_bound_worker_active_stop_releases(self):
+        self._bound_fixture()
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(active=True), native=True)
+
+        self.assertEqual(result["action"], "release")
+
+    def test_two_matching_bindings_release_without_instruction(self):
+        self._bound_fixture()
+        self._bound_fixture(bid="ldb-" + "b" * 32)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result, {"action": "allow"})
+
+
 if __name__ == "__main__":
     unittest.main()
