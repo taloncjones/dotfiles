@@ -68,7 +68,10 @@ for that repository.
 
 1. Run `task-lead-status` and read `gate_enabled` and `admit`.
 2. Get the owner's explicit go to enable task leads for this repository.
-3. Run `activate-task-leads` under the director's fence. Idempotent.
+3. Run `activate-task-leads --repo-path <repo> --repo-slug <slug> --session <director session> --fence <director fence>`.
+   Idempotent. Exit 0 means the record is written; exit 2 means a refusal
+   (invalid slug, stale fence, wrong session, or a non-launcher owner) and
+   nothing is written.
 4. Confirm with `task-lead-status`: `gate_enabled` must read true.
 
 The verb writes only this repository's gate record; repositories without a
@@ -90,7 +93,8 @@ verb exited zero before resuming any service.
 
 1. Stop dispatching new leads. A human decision; nothing durable records it,
    so re-assert it by running step 2.
-2. Run `deactivate-task-leads`. Idempotent; re-run it if interrupted, and
+2. Run `deactivate-task-leads` with the same flags and exit codes as the
+   activate verb. Idempotent; re-run it if interrupted, and
    confirm the committed state with `task-lead-status`.
 3. Settle or stop leads and descendants. If interrupted, re-run; outstanding
    work is re-reported by `outstanding_descendants`.

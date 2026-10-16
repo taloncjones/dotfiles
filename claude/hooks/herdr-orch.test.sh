@@ -10047,12 +10047,15 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activa
 test "$before" = "$(shasum "$g" | cut -d' ' -f1)"
 SH
 
-check "activate-task-leads is refused for a lead-tier owner" <<'SH'
+check "activate-task-leads and deactivate-task-leads are refused for a lead-tier owner" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-al.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d); ws=$(mktemp -d)
 g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
-f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
-   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+# A valid lead-tier slug owner record (tier and workspace_root edited together).
+# The owner fence check (OwnerTransaction.check) refuses it before the verb's own
+# launcher-tier guard runs, so that is the refusal asserted here.
 python3 -c '
 import json, os, sys
 reg = os.path.join(os.environ["HERDR_COORDINATION_ROOT"], sys.argv[3], "owner.json")
@@ -10064,15 +10067,12 @@ rec2 = json.load(open(mirror))
 rec2["control_tier"] = "lead"; rec2["workspace_root"] = sys.argv[1]
 json.dump(rec2, open(mirror, "w"))
 ' "$ws" "$root" "$LF_SLUG"
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
-   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>/dev/null; then exit 1; fi
-test ! -f "$g"
-mkdir -p "$(dirname "$g")"
-printf '%s' '{"schema_version":1,"repo_slug":"x","repo_id":null,"account_id":"a","enabled":false}' > "$g"
-before=$(shasum "$g" | cut -d' ' -f1)
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
-   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>/dev/null; then exit 1; fi
-test "$before" = "$(shasum "$g" | cut -d' ' -f1)"
+for verb in activate-task-leads deactivate-task-leads; do
+  if CLAUDE_CONFIG_DIR="$root" $CLI "$verb" \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>"$ERRFILE"; then exit 1; fi
+  grep -q "stale, foreign-account, or missing owner fence" "$ERRFILE" || { cat "$ERRFILE"; exit 1; }
+  test ! -f "$g"
+done
 SH
 
 check "reserve-dispatch: a settled identity cannot be reserved again; an unsettled one can" <<'SH'
