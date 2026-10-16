@@ -406,8 +406,8 @@ the branch as reviewed and leave push and PR to the owner. A malformed block
 
 ### `task-lead-gate.json`
 
-The task-lead activation gate record. The intended writer is
-`deactivate-task-leads`, under a launcher fence.
+The task-lead activation gate record. The writers are `activate-task-leads`
+and `deactivate-task-leads`, both under a launcher fence.
 
 ```json
 {
@@ -438,9 +438,9 @@ the installed procedure each advertise a capability at or above the required
 level (the procedure's advertised level is carried by the capability marker
 in the skill's `SKILL.md`).
 
-There is no verb that turns the gate on. `deactivate-task-leads` is the only
-verb this record has; enabling it means writing the record by hand or
-restoring an older one.
+`activate-task-leads` writes `enabled: true` and `deactivate-task-leads`
+writes `enabled: false`. Both write the same five fields, with the live
+`repo_id`, so a rerun leaves identical bytes.
 
 ### `capabilities.json` -- legacy Claude strong-model availability
 

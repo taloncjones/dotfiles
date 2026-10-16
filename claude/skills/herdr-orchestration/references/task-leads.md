@@ -61,6 +61,30 @@ brief is re-dispatched or prompted by hand (follow-up todo). The worker-side
 hooks (`herdr_stop_gate.py`, `scratch_policy.py`) still read launcher scope
 only, so a bound worker's stop is not gated (follow-up todo).
 
+## Enabling task leads
+
+Run these steps for one repository at a time, only on the owner's explicit go
+for that repository.
+
+1. Run `task-lead-status` and read `gate_enabled` and `admit`.
+2. Get the owner's explicit go to enable task leads for this repository.
+3. Run `activate-task-leads --repo-path <repo> --repo-slug <slug> --session <director session> --fence <director fence>`.
+   Idempotent. Exit 0 means the record is written; exit 2 means a refusal
+   (invalid slug, stale fence, wrong session, or a non-launcher owner) and
+   nothing is written.
+4. Confirm with `task-lead-status`: `gate_enabled` must read true.
+
+The verb writes only this repository's gate record; repositories without a
+record keep refusing. It admits no lead while the `SKILL.md` capability marker
+is `0`; `admit` stays false until the marker reaches the required level.
+`deactivate-task-leads` is the off switch.
+
+Uncertain outcome: after an activation that did not exit zero, or whose result
+you did not see, read `task-lead-status` first. If it reads
+`gate_enabled: true`, stop. If it reads disabled or absent, run the verb again
+only with a fresh go, because a deactivation may have landed in between and a
+blind retry would undo it.
+
 ## Rolling back task leads
 
 Step 0, before everything else -- restore handling: if rollback follows a
@@ -69,7 +93,8 @@ verb exited zero before resuming any service.
 
 1. Stop dispatching new leads. A human decision; nothing durable records it,
    so re-assert it by running step 2.
-2. Run `deactivate-task-leads`. Idempotent; re-run it if interrupted, and
+2. Run `deactivate-task-leads` with the same flags and exit codes as the
+   activate verb. Idempotent; re-run it if interrupted, and
    confirm the committed state with `task-lead-status`.
 3. Settle or stop leads and descendants. If interrupted, re-run; outstanding
    work is re-reported by `outstanding_descendants`.

@@ -9956,9 +9956,123 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deacti
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
 SH
 
-check "there is no activation verb: the CLI rejects one and no handler writes an enabled gate" <<'SH'
-if python3 claude/hooks/herdr_orch_core.py activate-task-leads 2>/dev/null; then exit 1; fi
-if grep -qE '"enabled"[[:space:]]*:[[:space:]]*True' claude/hooks/herdr_orch_core.py; then exit 1; fi
+check "activate-task-leads writes an enabled record that task-lead-status reads as enabled" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ae.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+st=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO")
+python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as c
+d = json.load(open(os.path.join(sys.argv[1], "herdr-orch", sys.argv[2], "task-lead-gate.json")))
+assert sorted(d) == ["account_id", "enabled", "repo_id", "repo_slug", "schema_version"], d
+assert d["enabled"] is True and d["schema_version"] == 1 and d["repo_slug"] == sys.argv[2], d
+assert d["repo_id"] == c.repository_context(sys.argv[3])["repo_id"], d
+s = json.loads(sys.argv[4])
+assert s["gate_enabled"] is True and s["gate_reason"] == "task-lead dispatch is enabled", s
+' "$root" "$LF_SLUG" "$LF_REPO" "$st"
+SH
+
+check "activate-task-leads on one repo leaves a repo without a record refusing" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-aa.git
+repo_a="$LF_REPO"; slug_a="$LF_SLUG"
+lead_fixture https://example.com/repo-ab.git
+repo_b="$LF_REPO"; slug_b="$LF_SLUG"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$slug_a" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$slug_a" --repo-path "$repo_a" --session L1 --fence "$f"
+st=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$slug_b" --repo-path "$repo_b")
+test ! -f "$root/herdr-orch/$slug_b/task-lead-gate.json"
+python3 -c '
+import json, sys
+s = json.loads(sys.argv[1])
+assert s["gate_enabled"] is False and s["gate_reason"] == "gate record absent", s
+assert s["admit"] is False, s
+' "$st"
+SH
+
+check "activate-task-leads is idempotent and deactivate-task-leads turns it back off" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ai.git
+root=$(mktemp -d)
+g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+a=$(shasum "$g" | cut -d' ' -f1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+b=$(shasum "$g" | cut -d' ' -f1)
+test "$a" = "$b"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["enabled"] is False
+' "$g"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["enabled"] is True
+' "$g"
+SH
+
+check "activate-task-leads is refused for a wrong session or an invalid fence" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ar.git
+root=$(mktemp -d)
+g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session IMPOSTOR --fence "$f" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
+test ! -f "$g"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+before=$(shasum "$g" | cut -d' ' -f1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session IMPOSTOR --fence "$f" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
+test "$before" = "$(shasum "$g" | cut -d' ' -f1)"
+SH
+
+check "activate-task-leads is refused for a lead-tier owner" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-al.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d); ws=$(mktemp -d)
+g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+# A valid lead-tier slug owner record (tier and workspace_root edited together).
+# The owner fence check (OwnerTransaction.check) refuses it before the verb's own
+# launcher-tier guard runs, so that is the refusal asserted here.
+python3 -c '
+import json, os, sys
+reg = os.path.join(os.environ["HERDR_COORDINATION_ROOT"], sys.argv[3], "owner.json")
+rec = json.load(open(reg))
+rec["control_tier"] = "lead"; rec["workspace_root"] = sys.argv[1]
+json.dump(rec, open(reg, "w"))
+mirror = os.path.join(sys.argv[2], "herdr-orch", sys.argv[3], "owner.json")
+rec2 = json.load(open(mirror))
+rec2["control_tier"] = "lead"; rec2["workspace_root"] = sys.argv[1]
+json.dump(rec2, open(mirror, "w"))
+' "$ws" "$root" "$LF_SLUG"
+for verb in activate-task-leads deactivate-task-leads; do
+  if CLAUDE_CONFIG_DIR="$root" $CLI "$verb" \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>"$ERRFILE"; then exit 1; fi
+  grep -q "stale, foreign-account, or missing owner fence" "$ERRFILE" || { cat "$ERRFILE"; exit 1; }
+  test ! -f "$g"
+done
 SH
 
 check "reserve-dispatch: a settled identity cannot be reserved again; an unsettled one can" <<'SH'
