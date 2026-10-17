@@ -179,9 +179,9 @@ Constraints and recovery:
   unmoved. `teardown-binding --abandon` is refused while a consumption record
   exists.
 - A bound review row carries `review_base_sha`, copied from the task record by
-  `reserve-dispatch`. A review reservation fails with "a review reservation
-  requires a 40-hex base_sha on the task record" when the record has no
-  40-hex `base_sha`, so the lead writes the base before launching a reviewer.
+  `reserve-dispatch`. When the record has no 40-hex `base_sha`, the reservation
+  fails with "a review reservation requires a 40-hex base_sha on the task record",
+  so the lead writes the base before launching a reviewer.
 - A launcher reprompt entry left `starting` or `uncertain` is never resent and
   blocks later launcher reprompts of the lead. If the binding reads `claimed`,
   the lead holds it and the run continues; otherwise stop for the owner, who
