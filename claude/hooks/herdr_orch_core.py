@@ -18,11 +18,13 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -222,29 +224,38 @@ def contract_sha256(path) -> str:
 
 
 def run_contract_commands(commands, worktree) -> int:
-    """Run each contract command via sh -c in the worktree, streaming output.
-    Own process group per command; on timeout the whole group is SIGKILLed
-    (best-effort -- a double-forked daemon can escape). First failure stops
-    the run. Returns 0 iff every command exited 0."""
-    for cmd in commands:
-        t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
-        proc = subprocess.Popen(
-            ["sh", "-c", cmd["run"]], cwd=worktree, start_new_session=True
-        )
-        try:
-            rc = proc.wait(timeout=t)
-        except subprocess.TimeoutExpired:
+    """Run each contract command via /bin/sh -c with the system grep in the
+    worktree, streaming output. Own process group per command; on timeout the
+    whole group is SIGKILLed (best-effort -- a double-forked daemon can
+    escape). First failure stops the run. Returns 0 iff every command exited
+    0."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "BASH_ENV" and not k.startswith("BASH_FUNC_")}
+    system_grep = shutil.which("grep", path="/usr/bin:/bin")
+    with tempfile.TemporaryDirectory() as shim:
+        if system_grep:
+            os.symlink(system_grep, os.path.join(shim, "grep"))
+            env["PATH"] = shim + os.pathsep + env.get("PATH", os.defpath)
+        for cmd in commands:
+            t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", cmd["run"]], cwd=worktree,
+                start_new_session=True, env=env
+            )
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()
-            print(f"FAIL {cmd['name']} exit=timeout", flush=True)
-            return 1
-        if rc != 0:
-            print(f"FAIL {cmd['name']} exit={rc}", flush=True)
-            return 1
-        print(f"ok {cmd['name']} exit=0", flush=True)
+                rc = proc.wait(timeout=t)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait()
+                print(f"FAIL {cmd['name']} exit=timeout", flush=True)
+                return 1
+            if rc != 0:
+                print(f"FAIL {cmd['name']} exit={rc}", flush=True)
+                return 1
+            print(f"ok {cmd['name']} exit=0", flush=True)
     print(f"PASS {len(commands)} commands", flush=True)
     return 0
 

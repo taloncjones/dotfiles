@@ -990,8 +990,9 @@ recovery source when the worktree copy is missing; a mech contract has none).
 
 Validation is fail-closed: `v` must be integer 1; `task_id` must match; 1-32
 commands, each `{name, run[, timeout_secs 1-3600]}` with unique non-blank
-names and no unknown keys. Commands run via `sh -c` from the worktree root
-and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
+names and no unknown keys. Commands run via `/bin/sh -c` from the worktree root with the
+system grep first on PATH and `BASH_ENV` and `BASH_FUNC_*` dropped from the
+environment, and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
 writes, no machine-state mutation, no network, no secret echo. Full
 requirements: the task's private PRD under `docs/superpowers/specs/` and the
 authoring rules echoed in `brief-template.md`.
