@@ -56,10 +56,59 @@ the pane it names from teardown.
 `inspect --binding <bid>` reads the bound attempt and its settlement record.
 `emit-done --binding` and `emit-review --binding` require a live,
 registry-corroborated lead lease, so a worker cannot settle on a dead lead's
-behalf. `reprompt` has no bound form yet: a bound worker that needs a second
-brief is re-dispatched or prompted by hand (follow-up todo). The worker-side
-hooks (`herdr_stop_gate.py`, `scratch_policy.py`) still read launcher scope
-only, so a bound worker's stop is not gated (follow-up todo).
+behalf.
+
+## Reprompting a bound worker
+
+`herdr_dispatch.py reprompt --binding <bid>` sends a second brief to the
+worker a lead launched, with the lead's own `--session` and `--fence`. The
+other flags are the launcher form's. The adapter validates the binding the
+way `launch --binding` does, then requires the named launch to be the final
+bound row (`workers[-1]`) of the lead's task record. Otherwise it refuses with
+"named launch is not the final bound attempt; re-dispatch instead". A lead
+repairs after review by re-dispatching an implement worker, not by
+reprompting an earlier row.
+
+The order is: read the row, probe the agent (`agent get`, idle or done), then
+`reserve-reprompt` (appends a `starting` entry), deliver with no lock held,
+then `enrich-reprompt` (records `delivered`, `uncertain` or
+`delivered-unrecorded`). The adapter never writes a `leads/` record itself.
+
+Exit codes:
+
+- Adapter: `exit 0` with status `reprompted`, `uncertain` or
+  `delivered-unrecorded`; `exit 2` with error JSON and a reason for any
+  refusal (an invalid, unknown, revoked or foreign binding; a non-final row;
+  a failed probe; an unresolved earlier entry).
+- Core verbs (`reserve-reprompt`, `enrich-reprompt`): `exit 0` when written or
+  a replayed no-op; `exit 2` refused, with `[X] <reason>` on stderr.
+
+A launcher fence with `--binding` is refused by the lead-fence check, and a
+lead fence without it is refused by the launcher owner check. Neither writes.
+
+Recovery: an unresolved `starting` or `uncertain` entry blocks further
+reprompts on that row and keeps its pane outstanding for teardown. Before
+re-dispatching, end the prior worker. A re-dispatch into the same pane proves
+the prior agent exited. A re-dispatch into another pane is the lead's
+assertion that the prior pane's occupancy ended, so close that pane first. An
+operator who terminated the pane passes `--descendants-terminated` to
+teardown.
+
+A reprompt after the worker's `emit-done` keeps its pane outstanding until a
+later emit settles the new turn. A review worker cannot replace a verdict at
+the same head with a different outcome: the core refuses with "a same-revision
+review verdict cannot be replaced".
+
+## Worker-side hooks
+
+A worker a lead launched runs in the lead's workspace, so its pane differs
+from the director row's pane. `herdr_stop_gate.py` finds the one claimed
+binding whose final row names that workspace and pane and gates the stop
+against the lead subtree. The refusal's emitter line carries `--binding`, and
+a review line carries `--reviewed-base-sha` and `--reviewer-session`. A pane
+with no match, or with several, is allowed silently. `scratch_policy.py`
+audits the same worker's scratch allows to
+`leads/<bid>/tasks/<task_id>.policy.jsonl`.
 
 ## Enabling task leads
 

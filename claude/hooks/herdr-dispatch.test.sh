@@ -3697,19 +3697,13 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
             capture_output=True, text=True, check=True,
         ).stdout
         assert "--binding" in help_text, (command, help_text)
-    # No --help here: argparse's help action exits 0 before it reports an
-    # unrecognized flag, so the rejection is only observable without it.
-    # argparse also checks required arguments before unrecognized ones, so
-    # every other required reprompt flag must be present or the "unrecognized
-    # arguments" error never fires.
-    rejected = subprocess.run(
-        [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), "reprompt",
-         "--repo-slug", "r", "--task-id", "t", "--session", "s",
-         "--workspace-id", "w1", "--launch-id", "l", "--phase", "implement",
-         "--cwd", ".", "--prompt-file", "p", "--fence", "1", "--binding", "x"],
-        capture_output=True, text=True, check=False,
-    )
-    assert rejected.returncode == 2 and "unrecognized arguments" in rejected.stderr, rejected
+    # reprompt gained --binding (bound reprompt); the old rejection check is
+    # superseded by the help assertion above.
+    help_text = subprocess.run(
+        [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), "reprompt", "--help"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "--binding" in help_text, help_text
 
 
 def test_reprompt_cli_subcommand_reaches_the_function():
@@ -5772,6 +5766,356 @@ def test_dispatch_gate_cli_reaches_the_function():
         fx.close()
 
 
+def bound_reprompt(fixture, launch_id, prompt="incorporate the review findings", **kwargs):
+    options = {
+        "session": "LS", "fence": fixture.lead_fence, "cwd": fixture.lead_ws,
+        "binding": fixture.binding, "task_id": "td-a", "workspace_id": "w1",
+        "phase": "implement", **kwargs,
+    }
+    return herdr_dispatch.reprompt(
+        repo_slug=fixture.slug, launch_id=launch_id, prompt=prompt, runtime="codex",
+        herdr_cli=str(fixture.bin), env=fixture.env, prompt_timeout_ms=1000, **options,
+    )
+
+
+def bound_entries(fixture):
+    return fixture.bound_workers()[-1].get("reprompts")
+
+
+def bound_emit_done(fixture, row):
+    fixture.core(
+        "emit-done", "--binding", fixture.binding, "--task-id", "td-a",
+        "--workspace", "w1", "--agent", "impl-td-a", "--phase", "implement",
+        "--outcome", "completed", "--head-sha", fixture.lead_context["head"],
+        "--base-sha", fixture.lead_context["head"], "--runtime", "codex",
+        "--launch-id", row["launch_id"], "--pane-id", "w1:p1",
+        "--source-head-sha", row["source_head_sha"], repo_path=fixture.lead_ws,
+    )
+
+
+def bound_core_reprompt(fixture, verb, row, *args, fence=None):
+    fixture.core(
+        verb, "--session", "LS", "--fence", str(fence or fixture.lead_fence),
+        "--binding", fixture.binding, "--task-id", "td-a",
+        "--launch-id", row["launch_id"], "--phase", "implement",
+        "--workspace-id", "w1", "--pane-id", "w1:p1",
+        "--source-head-sha", row["source_head_sha"], "--runtime", "codex",
+        *args, repo_path=fixture.lead_ws,
+    )
+
+
+def patch_attr(obj, name, value):
+    original = getattr(obj, name)
+    setattr(obj, name, value)
+    return lambda: setattr(obj, name, original)
+
+
+def test_bound_reprompt_reaches_a_lead_launched_worker_and_records_in_lead_subtree():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        prompts_before = len(fixture.prompt_calls())
+        result = bound_reprompt(fixture, lid)
+        assert result["status"] == "reprompted", result
+        assert result["launch_id"] == lid and result["reprompt_seq"] == 0, result
+        assert len(fixture.prompt_calls()) == prompts_before + 1, fixture.calls()
+        entries = bound_entries(fixture)
+        assert len(entries) == 1 and entries[0]["status"] == "delivered", entries
+        assert len(entries[0]["reservation_id"]) == 32, entries
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_refuses_unbound_and_cross_scope_callers_with_the_binding_reason():
+    def refused(fixture, lid, message, **kwargs):
+        before = len(fixture.prompt_calls())
+        try:
+            bound_reprompt(fixture, lid, **kwargs)
+        except herdr_dispatch.DispatchError as exc:
+            assert message in str(exc), (message, exc)
+        else:
+            raise AssertionError(f"accepted: {message}")
+        assert bound_entries(fixture) is None, bound_entries(fixture)
+        assert len(fixture.prompt_calls()) == before, fixture.calls()
+
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        refused(fixture, lid, "missing owner fence", binding=None)
+        try:
+            bound_reprompt(fixture, lid, session="S", fence=1)
+        except herdr_dispatch.DispatchError as exc:
+            assert "bound record write refused: reserve-reprompt" in str(exc), exc
+            assert "lead fence" in str(exc), exc
+        else:
+            raise AssertionError("launcher fence with --binding was accepted")
+        assert bound_entries(fixture) is None
+        refused(fixture, lid, "invalid binding id", binding="ldb-not-hex")
+        refused(fixture, lid, "unknown or corrupt dispatch binding",
+                binding="ldb-" + "0" * 32)
+        refused(fixture, lid, "binding does not name this task", task_id="td-b")
+        refused(fixture, lid, "binding workspace does not match", cwd=fixture.repo)
+        path = fixture.rd / "bindings" / f"{fixture.binding}.json"
+        original = path.read_text()
+        path.write_text("{ not json")
+        try:
+            refused(fixture, lid, "unknown or corrupt dispatch binding")
+        finally:
+            path.write_text(original)
+        fixture.core("set-binding-status", "--session", "S", "--fence", "1",
+                     "--binding", fixture.binding, "--status", "revoked",
+                     repo_path=fixture.repo)
+        refused(fixture, lid, "binding is not claimed")
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_refuses_a_non_final_bound_row():
+    fixture = LeadFixture()
+    try:
+        first = fixture.launch()["launch_id"]
+        fixture.env["FAKE_PANE"] = "w1:p2"
+        for name in ("read-count", "attempt-seen"):
+            (fixture.root / name).unlink(missing_ok=True)
+        fixture.launch(pane_id="w1:p2")
+        before = len(fixture.prompt_calls())
+        try:
+            bound_reprompt(fixture, first)
+        except herdr_dispatch.DispatchError as exc:
+            assert "final bound attempt" in str(exc), exc
+        else:
+            raise AssertionError("a superseded bound row was reprompted")
+        assert len(fixture.prompt_calls()) == before
+        assert all("reprompts" not in row for row in fixture.bound_workers())
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_keeps_a_settled_pane_outstanding_until_a_newer_settlement():
+    fixture = LeadFixture()
+    try:
+        row = None
+        lid = fixture.launch()["launch_id"]
+        row = fixture.bound_workers()[-1]
+        bound_emit_done(fixture, row)
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == []
+        bound_reprompt(fixture, lid)
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == ["w1:p1"]
+        time.sleep(1.1)
+        bound_emit_done(fixture, row)
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == []
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_refuses_to_stack_on_an_unresolved_entry():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        restore = patch_attr(herdr_dispatch, "_deliver_reprompt",
+                             lambda *a, **k: ("uncertain", None))
+        try:
+            first = bound_reprompt(fixture, lid)
+        finally:
+            restore()
+        assert first["status"] == "uncertain", first
+        assert bound_entries(fixture)[0]["status"] == "uncertain", bound_entries(fixture)
+        before = len(fixture.prompt_calls())
+        try:
+            bound_reprompt(fixture, lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "unresolved" in str(exc), exc
+        else:
+            raise AssertionError("stacked on an unresolved entry")
+        assert len(fixture.prompt_calls()) == before
+        assert len(bound_entries(fixture)) == 1
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_readiness_failure_writes_no_entry():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        before = len(fixture.prompt_calls())
+        fixture.env["FAKE_HERDR_MODE"] = "agent-busy"
+        try:
+            bound_reprompt(fixture, lid)
+        except herdr_dispatch.DispatchError:
+            pass
+        else:
+            raise AssertionError("a busy agent was reprompted")
+        assert bound_entries(fixture) is None
+        assert len(fixture.prompt_calls()) == before
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_provable_rejection_marks_the_entry_failed():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+
+        def reject(*args, **kwargs):
+            raise herdr_dispatch._RejectedDelivery("reprompt delivery could not start")
+
+        restore = patch_attr(herdr_dispatch, "_deliver_reprompt", reject)
+        try:
+            bound_reprompt(fixture, lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "rejected before acceptance" in str(exc), exc
+        else:
+            raise AssertionError("a rejected delivery was reported as sent")
+        finally:
+            restore()
+        assert [e["status"] for e in bound_entries(fixture)] == ["failed"]
+        second = bound_reprompt(fixture, lid)
+        assert second["status"] == "reprompted" and second["reprompt_seq"] == 1, second
+        assert [e["status"] for e in bound_entries(fixture)] == ["failed", "delivered"]
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_reports_delivered_unrecorded_when_the_outcome_write_is_refused():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        bound_emit_done(fixture, fixture.bound_workers()[-1])
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == []
+
+        def revoke_then_deliver(*args, **kwargs):
+            fixture.core("set-binding-status", "--session", "S", "--fence", "1",
+                         "--binding", fixture.binding, "--status", "revoked",
+                         repo_path=fixture.repo)
+            return ("delivered", "working")
+
+        restore = patch_attr(herdr_dispatch, "_deliver_reprompt", revoke_then_deliver)
+        try:
+            result = bound_reprompt(fixture, lid)
+        finally:
+            restore()
+        assert result["status"] == "delivered-unrecorded", result
+        assert [e["status"] for e in bound_entries(fixture)] == ["starting"]
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == ["w1:p1"]
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_marks_a_committed_reservation_failed_when_its_acknowledgment_is_lost():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        before = len(fixture.prompt_calls())
+        original = herdr_dispatch._BoundRecords._core
+
+        def lose_ack(self, verb, *args):
+            original(self, verb, *args)
+            if verb == "reserve-reprompt":
+                raise herdr_dispatch.DispatchError("bound record write failed: lost ack")
+
+        restore = patch_attr(herdr_dispatch._BoundRecords, "_core", lose_ack)
+        try:
+            bound_reprompt(fixture, lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "lost ack" in str(exc), exc
+        else:
+            raise AssertionError("a lost reservation acknowledgment was accepted")
+        finally:
+            restore()
+        assert [e["status"] for e in bound_entries(fixture)] == ["failed"]
+        assert len(fixture.prompt_calls()) == before
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_reports_reprompted_when_a_committed_delivered_outcome_loses_its_acknowledgment():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        original = herdr_dispatch._BoundRecords._core
+
+        def lose_ack(self, verb, *args):
+            original(self, verb, *args)
+            if verb == "enrich-reprompt" and "delivered" in args:
+                raise herdr_dispatch.DispatchError("bound record write failed: lost ack")
+
+        restore = patch_attr(herdr_dispatch._BoundRecords, "_core", lose_ack)
+        try:
+            result = bound_reprompt(fixture, lid)
+        finally:
+            restore()
+        entry = bound_entries(fixture)[0]
+        assert entry["status"] == "delivered", entry
+        assert result["status"] == "reprompted", result
+        assert result["prompt_state"] == entry["prompt_state"], (result, entry)
+    finally:
+        fixture.close()
+
+
+def test_bound_reprompt_refuses_a_reservation_whose_readiness_probe_went_stale():
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        row = fixture.bound_workers()[-1]
+        original = herdr_dispatch._run_herdr
+        competitor = "c" * 32
+
+        def probe_then_compete(cli, argv, **kwargs):
+            result = original(cli, argv, **kwargs)
+            if argv[:2] == ["agent", "get"]:
+                bound_core_reprompt(
+                    fixture, "reserve-reprompt", row, "--prompt-sha256", "a" * 64,
+                    "--expected-seq", "0", "--reservation-id", competitor)
+                bound_core_reprompt(
+                    fixture, "enrich-reprompt", row, "--reservation-id", competitor,
+                    "--status", "delivered")
+            return result
+
+        before = len(fixture.prompt_calls())
+        restore = patch_attr(herdr_dispatch, "_run_herdr", probe_then_compete)
+        try:
+            bound_reprompt(fixture, lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "probe again" in str(exc), exc
+        else:
+            raise AssertionError("a stale probe was used")
+        finally:
+            restore()
+        entries = bound_entries(fixture)
+        assert len(entries) == 1 and entries[0]["reservation_id"] == competitor, entries
+        assert entries[0]["status"] == "delivered", entries
+        assert len(fixture.prompt_calls()) == before
+        snapshot = json.dumps(entries, sort_keys=True)
+        assert json.dumps(bound_entries(fixture), sort_keys=True) == snapshot
+    finally:
+        fixture.close()
+    # A competitor still starting when this call reads the row is refused at
+    # the snapshot, so no reservation from this call ever exists.
+    fixture = LeadFixture()
+    try:
+        lid = fixture.launch()["launch_id"]
+        row = fixture.bound_workers()[-1]
+        bound_core_reprompt(
+            fixture, "reserve-reprompt", row, "--prompt-sha256", "a" * 64,
+            "--expected-seq", "0", "--reservation-id", "d" * 32)
+        before = len(fixture.prompt_calls())
+        try:
+            bound_reprompt(fixture, lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "unresolved" in str(exc), exc
+        else:
+            raise AssertionError("reserved over a starting competitor")
+        bound_core_reprompt(
+            fixture, "enrich-reprompt", row, "--reservation-id", "d" * 32,
+            "--status", "delivered")
+        entries = bound_entries(fixture)
+        assert [e["reservation_id"] for e in entries] == ["d" * 32], entries
+        assert len(fixture.prompt_calls()) == before
+    finally:
+        fixture.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -5989,6 +6333,17 @@ for name, test in (
     ("archive-task closes nothing on a stale fence", test_archive_task_closes_nothing_on_a_stale_fence),
     ("archive-task reports a lost close reply, then archives on rerun", test_archive_task_reports_a_lost_close_reply_then_archives_on_rerun),
     ("archive-task closes what it can, names the kept workspace, then finishes on rerun", test_archive_task_closes_what_it_can_names_the_kept_workspace_then_finishes_on_rerun),
+    ("bound reprompt reaches a lead-launched worker and records in the lead subtree", test_bound_reprompt_reaches_a_lead_launched_worker_and_records_in_lead_subtree),
+    ("bound reprompt refuses unbound and cross-scope callers with the binding reason", test_bound_reprompt_refuses_unbound_and_cross_scope_callers_with_the_binding_reason),
+    ("bound reprompt refuses a non-final bound row", test_bound_reprompt_refuses_a_non_final_bound_row),
+    ("bound reprompt keeps a settled pane outstanding until a newer settlement", test_bound_reprompt_keeps_a_settled_pane_outstanding_until_a_newer_settlement),
+    ("bound reprompt refuses to stack on an unresolved entry", test_bound_reprompt_refuses_to_stack_on_an_unresolved_entry),
+    ("bound reprompt readiness failure writes no entry", test_bound_reprompt_readiness_failure_writes_no_entry),
+    ("bound reprompt provable rejection marks the entry failed", test_bound_reprompt_provable_rejection_marks_the_entry_failed),
+    ("bound reprompt reports delivered-unrecorded when the outcome write is refused", test_bound_reprompt_reports_delivered_unrecorded_when_the_outcome_write_is_refused),
+    ("bound reprompt marks a committed reservation failed when its acknowledgment is lost", test_bound_reprompt_marks_a_committed_reservation_failed_when_its_acknowledgment_is_lost),
+    ("bound reprompt reports reprompted when a committed delivered outcome loses its acknowledgment", test_bound_reprompt_reports_reprompted_when_a_committed_delivered_outcome_loses_its_acknowledgment),
+    ("bound reprompt refuses a reservation whose readiness probe went stale", test_bound_reprompt_refuses_a_reservation_whose_readiness_probe_went_stale),
 ):
     check(name, test)
 

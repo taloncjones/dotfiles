@@ -347,6 +347,9 @@ MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
                 "needs_design", "blocked_on_human", "other")
 
 SHELL_SAFE_RE = re.compile(r"[A-Za-z0-9_./+:@-]+\Z")
+HEX32_RE = re.compile(r"[0-9a-f]{32}\Z")
+HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+REPROMPT_OUTCOMES = ("failed", "delivered", "uncertain", "delivered-unrecorded")
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 _CAP_SUBTYPES = {"error_max_turns": "max_turns", "error_max_budget_usd": "max_budget"}
 _ERRORS_MAX, _ERROR_LEN = 5, 500
@@ -4583,16 +4586,27 @@ def _attempt_stopped(row, done, reprompts):
     if not _attempt_settled(row, done):
         return False
     try:
-        stopped = calendar.timegm(time.strptime(done.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
+        calendar.timegm(time.strptime(done.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
         return False
+    return not _resumed_after(done, reprompts)
+
+
+def _resumed_after(settle, reprompts):
+    """A non-failed reprompt started at or after the settlement record's
+    second-granular ts, or the ts or an entry cannot be read: the worker may
+    have resumed. Errs toward True, the fail-closed direction."""
+    try:
+        settled = calendar.timegm(time.strptime(settle.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        settled = None
     for entry in reprompts:
         if not isinstance(entry, dict) or entry.get("status") == "failed":
             continue
         started = entry.get("started_ns")
-        if type(started) is not int or started // 1_000_000_000 >= stopped:
-            return False
-    return True
+        if settled is None or type(started) is not int or started // 1_000_000_000 >= settled:
+            return True
+    return False
 
 
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
@@ -4748,7 +4762,16 @@ def outstanding_descendants(rd, binding_id):
             settle = None
         except (OSError, ValueError, RecursionError):
             return [UNREADABLE_SENTINEL]
+        raw = att.get("reprompts")
+        if raw is not None and not (isinstance(raw, list)
+                                    and all(isinstance(e, dict) for e in raw)):
+            return [UNREADABLE_SENTINEL]
         if not _attempt_settled(att, settle):
+            panes.add(att["pane_id"])
+        elif raw and (
+            any(e.get("status") in ("starting", "uncertain") for e in raw)
+            or _resumed_after(settle, raw)
+        ):
             panes.add(att["pane_id"])
     return sorted(panes)
 
@@ -4829,6 +4852,93 @@ def _close_listed_workspaces(ns, rd, listed):
         if result != "closed":
             return f" workspace={workspace_id} kept={result}"
     return ""
+
+
+def _bound_final_row(ns, base, rec_b):
+    """-> (task record, final row) for a bound reprompt verb, after the shared
+    checks: task pinned to the binding, record well formed, full identity equal
+    to workers[-1]."""
+    _require(valid_task_id(ns.task_id), "invalid task-id")
+    _require(ns.task_id == rec_b["task_id"], "reprompt task does not match the binding")
+    dest = base / "tasks" / f"{ns.task_id}.json"
+    prior = read_prior_task(dest)
+    _require(prior is not PRIOR_ABSENT, "no task record to reprompt against")
+    _require(prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+             f"bound task record is malformed; {ns.cmd} cannot repair it")
+    _require(prior.get("task_id") == ns.task_id,
+             "task record task_id does not match --task-id")
+    workers = prior["workers"]
+    _require(bool(workers), "task record has no dispatch row to reprompt")
+    _require(
+        _attempt_tuple(workers[-1]) == (
+            ns.launch_id, ns.phase, ns.runtime, ns.workspace_id,
+            ns.pane_id, ns.source_head_sha,
+        ),
+        "attempt identity is not the final bound attempt",
+    )
+    return prior, workers[-1], dest
+
+
+def _bound_reprompt_verb(ns):
+    """reserve-reprompt and enrich-reprompt: the only writers of a bound
+    row's `reprompts`. Neither holds the lock across a delivery."""
+    _require(ns.runtime is not None, f"{ns.cmd} requires --runtime")
+    _require(bool(HEX32_RE.fullmatch(ns.reservation_id or "")),
+             "reservation-id must be 32 lowercase hex characters")
+    if ns.cmd == "reserve-reprompt":
+        _require(bool(HEX64_RE.fullmatch(ns.prompt_sha256 or "")),
+                 "prompt-sha256 must be 64 lowercase hex characters")
+        _require(ns.expected_seq >= 0, "expected-seq must not be negative")
+    else:
+        _require(ns.status in REPROMPT_OUTCOMES,
+                 f"status must be one of {'|'.join(REPROMPT_OUTCOMES)}")
+        _require(ns.prompt_state is None or bool(SHELL_SAFE_RE.fullmatch(ns.prompt_state)),
+                 "prompt-state must be shell-safe")
+    with _fenced_scoped(ns) as (rd, base):
+        require_not_consumed(rd, ns.binding)
+        rec_b = bindings.read_binding(rd, ns.binding)
+        _require(rec_b is not None, "unknown dispatch binding")
+        prior, row, dest = _bound_final_row(ns, base, rec_b)
+        raw = row.get("reprompts", [])
+        _require(isinstance(raw, list) and all(isinstance(e, dict) for e in raw),
+                 "reprompts is present but is not a list of objects")
+        entries = list(raw)
+        if ns.cmd == "reserve-reprompt":
+            _require(row.get("status") == "launched" and not row.get("exit_requested"),
+                     "the final bound attempt is not a live launched attempt")
+            _require(not any(e.get("status") in ("starting", "uncertain") for e in entries),
+                     "a prior reprompt on this launch is unresolved")
+            _require(len(entries) == ns.expected_seq,
+                     "reprompt history changed since the readiness probe; probe again")
+            _require(not any(e.get("reservation_id") == ns.reservation_id for e in entries),
+                     "reservation-id is already in use")
+            entries.append({
+                "seq": len(entries), "started_ns": time.time_ns(),
+                "prompt_sha256": ns.prompt_sha256,
+                "reservation_id": ns.reservation_id, "status": "starting",
+            })
+        else:
+            index = next((i for i, e in enumerate(entries)
+                          if e.get("reservation_id") == ns.reservation_id), None)
+            _require(index is not None, "no reprompt entry carries that reservation-id")
+            entry = entries[index]
+            _require(ns.seq is None or entry.get("seq") == ns.seq,
+                     "reprompt entry seq does not match --seq")
+            if (entry.get("status") == ns.status
+                    and entry.get("prompt_state") == ns.prompt_state):
+                return 0
+            _require(entry.get("status") == "starting",
+                     "reprompt entry is not starting; its outcome is already recorded")
+            entry = {**entry, "status": ns.status}
+            if ns.prompt_state is not None:
+                entry["prompt_state"] = ns.prompt_state
+            entries[index] = entry
+        updated = {**row, "reprompts": entries}
+        workers = prior["workers"]
+        written = {**prior, "workers": [*workers[:-1], updated]}
+        _require_record_within_reader_limit(written)
+        write_json_atomic(dest, written)
+        return 0
 
 
 @contextlib.contextmanager
@@ -5622,6 +5732,17 @@ def _main(argv=None) -> int:
               "--workspace-id", "--pane-id", "--source-head-sha", "--json",
               fenced=True)
     enr.add_argument("--binding", required=True)
+    rrp = add("reserve-reprompt", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha",
+              "--prompt-sha256", "--reservation-id", fenced=True)
+    rrp.add_argument("--binding", required=True)
+    rrp.add_argument("--expected-seq", type=int, required=True)
+    erp = add("enrich-reprompt", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha",
+              "--reservation-id", "--status", fenced=True)
+    erp.add_argument("--binding", required=True)
+    erp.add_argument("--prompt-state", default=None)
+    erp.add_argument("--seq", type=int, default=None)
     wi = add("write-index", "--workspace", "--json", fenced=True)
     wi.add_argument("--binding", default=None)
     add("write-capabilities", "--json", fenced=True)
@@ -6056,11 +6177,14 @@ def _main(argv=None) -> int:
         # the update, so every gate reading ATTEMPT_FIELDS observes an
         # unchanged value without any comparison having to be right.
         #
-        # The cost: every OTHER field of a bound workers[-1] is mutable, so no
-        # gate may key on one. Nothing does today -- the readers that use
-        # `status` or `reprompts` read launcher-scope rd/tasks/ -- and a new
-        # bound-path fact belongs in the identity tuple or a settlement
-        # record, never here.
+        # The cost: every OTHER field of a bound workers[-1] is mutable, so a
+        # gate keying on one trusts the lead's own fence. The bound stop gate
+        # and audit read role, account_id, pane_id and status (a lead that
+        # mislabels its row loses only the nudge), and outstanding_descendants
+        # reads reprompts, which only reserve-reprompt and enrich-reprompt
+        # write. A new bound-path fact belongs in the identity tuple or a
+        # settlement record, never here.
+        _require("reprompts" not in updates, "an enrichment may not name reprompts")
         _require(not set(updates) & set(ATTEMPT_FIELDS),
                  "an enrichment may not name an attempt identity field")
         # Record-level keys belong to the task, not to one attempt. A row
@@ -6107,6 +6231,8 @@ def _main(argv=None) -> int:
             _require_record_within_reader_limit(enriched)
             write_json_atomic(dest, enriched)
             return 0
+    if ns.cmd in ("reserve-reprompt", "enrich-reprompt"):
+        return _bound_reprompt_verb(ns)
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):
             if ns.binding is not None:

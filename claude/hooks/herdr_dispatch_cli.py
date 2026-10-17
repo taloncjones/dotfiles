@@ -472,6 +472,7 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     reprompt.add_argument("--runtime", default="claude", choices=("claude", "codex"))
     reprompt.add_argument("--prompt-timeout-ms", type=int, default=120_000)
     reprompt.add_argument("--personal", action="store_true")
+    reprompt.add_argument("--binding", default=None)
     for verb in ("settle", "sweep"):
         sub = commands.add_parser(verb)
         flags = ["repo-slug", "task-id", "session", "workspace-id", "cwd"]
@@ -553,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime=args.runtime,
                 prompt_timeout_ms=args.prompt_timeout_ms,
                 personal=args.personal,
+                binding=args.binding,
             )
         elif args.command in ("settle", "sweep"):
             kwargs = dict(

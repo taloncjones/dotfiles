@@ -609,6 +609,29 @@ class _BoundRecords:
             raise DispatchError("persisted TODO binding changed before dispatch")
         return task
 
+    def seed(self, row: dict[str, Any]) -> None:
+        """Adopt an existing bound row's identity (the reprompt path)."""
+        self.identity = tuple(row[key] for key in core.ATTEMPT_FIELDS)
+
+    def reprompts(self) -> list[dict[str, Any]]:
+        """The final bound row's reprompt entries, read back from disk."""
+        _task, row = self._current()
+        entries = row.get("reprompts", [])
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            raise DispatchError("bound reprompt history is malformed")
+        return entries
+
+    def reserve_reprompt(self, prompt_sha: str, expected_seq: int, reservation_id: str) -> None:
+        self._core("reserve-reprompt", *self._identity_args(),
+                   "--prompt-sha256", prompt_sha, "--expected-seq", str(expected_seq),
+                   "--reservation-id", reservation_id)
+
+    def mark_reprompt(self, reservation_id: str, status: str, prompt_state=None) -> None:
+        args = ["--reservation-id", reservation_id, "--status", status]
+        if prompt_state is not None and core.SHELL_SAFE_RE.fullmatch(prompt_state):
+            args += ["--prompt-state", prompt_state]
+        self._core("enrich-reprompt", *self._identity_args(), *args)
+
     def update(self, launch_id: str, **fields: Any) -> dict[str, Any]:
         if self.identity is None or launch_id != self.identity[0]:
             raise DispatchError("readiness does not belong to the current attempt")
@@ -1372,10 +1395,121 @@ def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
     return ("delivered", _prompt_state(result))
 
 
+def _entry_by_reservation(records, reservation_id):
+    return next((e for e in records.reprompts()
+                 if e.get("reservation_id") == reservation_id), None)
+
+
+def _bound_reprompt_result(launch_id, phase, status, entry_seq, state):
+    return {"status": status, "launch_id": launch_id, "phase": phase,
+            "reprompt_seq": entry_seq, "prompt_state": state,
+            "observation": REPROMPT_OBSERVATION}
+
+
+def _reprompt_bound(*, rd, repository, repo_slug, binding, task_id, session, fence,
+                    workspace_id, launch_id, phase, cwd, prompt, runtime, herdr_cli,
+                    env, prompt_timeout_ms, personal):
+    """Bound reprompt: probe, reserve through the core, deliver with no lock
+    held, record the outcome through the core. See task-leads.md."""
+    _check_bound_launch(_read_binding_record(rd, binding), task_id, repository)
+    base = rd / "leads" / binding
+    task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
+    _validate_task_context(task, repository, repo_slug)
+    workers = task.get("workers", [])
+    if (not isinstance(workers, list) or not workers
+            or not isinstance(workers[-1], dict)
+            or workers[-1].get("launch_id") != launch_id):
+        raise DispatchError("named launch is not the final bound attempt; re-dispatch instead")
+    target = _find_current_target(task, launch_id, phase, workspace_id, runtime)
+    if target.get("exit_requested"):
+        raise DispatchError("exit was requested for this launch; relaunch for further work")
+    entries = target.get("reprompts", [])
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise DispatchError("bound reprompt history is malformed")
+    if any(e.get("status") in ("starting", "uncertain") for e in entries):
+        raise DispatchError("a prior reprompt on this launch is unresolved; re-dispatch")
+    expected_seq = len(entries)
+    reservation_id = uuid.uuid4().hex
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    agent = target["agent"]
+
+    records = _BoundRecords(
+        rd=rd, task_id=task_id, session=session, fence=fence, repository=repository,
+        repo_slug=repo_slug, binding=binding, runtime=runtime, personal=personal,
+        cwd=cwd, env=env, todo_binding=("todo_id" in task, task.get("todo_id")),
+    )
+    records.seed(target)
+
+    # Probe before reserving: started_ns is then stamped after the worker was
+    # seen idle, so a done record from the previous turn cannot settle this one.
+    try:
+        current = _run_herdr(herdr_cli, ["agent", "get", agent], env=env, json_result=True)
+        assert isinstance(current, dict)
+        _validate_agent(current, agent, runtime, target["pane_id"], states=AGENT_STATES)
+    except (DispatchError, OSError, ValueError) as exc:
+        if isinstance(exc, DispatchError):
+            raise
+        raise DispatchError(f"reprompt could not confirm the live agent: {exc}") from exc
+
+    reserve_error = None
+    try:
+        records.reserve_reprompt(prompt_sha, expected_seq, reservation_id)
+    except DispatchError as exc:
+        reserve_error = exc
+    try:
+        entry = _entry_by_reservation(records, reservation_id)
+    except DispatchError:
+        entry = None
+    if reserve_error is not None:
+        if entry is not None:
+            try:
+                records.mark_reprompt(reservation_id, "failed")
+            except DispatchError:
+                pass
+        raise reserve_error
+    if entry is None or entry.get("status") != "starting":
+        raise DispatchError("reprompt reservation could not be confirmed; nothing was sent")
+    seq = entry["seq"]
+
+    try:
+        outcome, state = _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env)
+    except _RejectedDelivery:
+        try:
+            records.mark_reprompt(reservation_id, "failed")
+        except DispatchError:
+            pass
+        raise DispatchError("reprompt delivery was rejected before acceptance")
+
+    recorded = "delivered" if outcome == "delivered" else "uncertain"
+    try:
+        records.mark_reprompt(reservation_id, recorded, state)
+    except DispatchError:
+        # The write may have committed with its acknowledgment lost, or been
+        # refused (lease lost, binding revoked). Read the entry back by id.
+        try:
+            entry = _entry_by_reservation(records, reservation_id)
+        except DispatchError:
+            entry = None
+        if entry is not None and entry.get("status") != "starting":
+            recorded = entry["status"]
+            state = entry.get("prompt_state", state)
+        else:
+            recorded = "delivered-unrecorded" if outcome == "delivered" else "uncertain"
+            try:
+                records.mark_reprompt(reservation_id, recorded, state)
+            except DispatchError:
+                pass
+    status = "reprompted" if recorded == "delivered" else recorded
+    return _bound_reprompt_result(launch_id, phase, status, seq, state)
+
+
 def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
              phase, cwd, prompt, runtime="claude", herdr_cli="herdr",
-             env=None, prompt_timeout_ms=120_000, personal=False):
-    """Append a follow-up turn to a named, still-live dispatched worker."""
+             env=None, prompt_timeout_ms=120_000, personal=False, binding=None):
+    """Append a follow-up turn to a named, still-live dispatched worker.
+
+    With `binding`, the target is the final row of that lead binding's task
+    record and every write goes through the core's bound reprompt verbs."""
     if phase not in PHASES:
         raise DispatchError(f"unsupported phase: {phase} (expected one of: {', '.join(PHASES)})")
     if phase == "ship":
@@ -1410,6 +1544,14 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     if repo_slug != _expected_slug(repository, cwd):
         raise DispatchError("repo slug does not match repository context")
     rd = _payload_repo_dir(scope, repo_slug)
+    if binding is not None:
+        return _reprompt_bound(
+            rd=rd, repository=repository, repo_slug=repo_slug, binding=binding,
+            task_id=task_id, session=session, fence=fence, workspace_id=workspace_id,
+            launch_id=launch_id, phase=phase, cwd=cwd, prompt=prompt, runtime=runtime,
+            herdr_cli=herdr_cli, env=child_env, prompt_timeout_ms=prompt_timeout_ms,
+            personal=personal,
+        )
     task_path = rd / "tasks" / f"{task_id}.json"
     prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
     started_ns = time.time_ns()

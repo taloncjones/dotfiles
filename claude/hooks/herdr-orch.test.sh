@@ -10358,6 +10358,215 @@ if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
 SH
 
 
+check "reserve-reprompt: appends a starting entry to the final bound row only" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rrp.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-rr \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+H64=$(printf 'b%.0s' $(seq 1 64))
+R1=$(printf '1%.0s' $(seq 1 32))
+R2=$(printf '2%.0s' $(seq 1 32))
+R3=$(printf '3%.0s' $(seq 1 32))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-rr.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+   --json '{"task_id":"td-rr","workers":[]}'
+rrp() { # launch pane expected-seq reservation [fence] [session]
+  _l=$1; _p=$2; _s=$3; _r=$4; _f=${5:-$lf}; _ses=${6:-S1}
+  CLAUDE_CONFIG_DIR="$root" $CLI reserve-reprompt \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session "$_ses" --fence "$_f" --binding "$bid" --task-id td-rr \
+    --launch-id "$_l" --phase implement --runtime claude --workspace-id w1 \
+    --pane-id "$_p" --source-head-sha "$SHA40" --prompt-sha256 "$H64" \
+    --expected-seq "$_s" --reservation-id "$_r"
+}
+reserve() {
+  CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+    --launch-id "$1" --phase implement --runtime claude --workspace-id w1 \
+    --pane-id "$2" --source-head-sha "$SHA40"
+}
+mark() { # reservation status
+  CLAUDE_CONFIG_DIR="$root" $CLI enrich-reprompt \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+    --launch-id "$3" --phase implement --runtime claude --workspace-id w1 \
+    --pane-id "$4" --source-head-sha "$SHA40" --reservation-id "$1" --status "$2"
+}
+reserve L1 pane1
+CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"status":"launched"}'
+rrp L1 pane1 0 "$R1"
+python3 -c '
+import json, sys
+e = json.load(open(sys.argv[1]))["workers"][0]["reprompts"]
+assert len(e) == 1, e
+assert e[0]["status"] == "starting" and e[0]["seq"] == 0, e
+assert e[0]["reservation_id"] == sys.argv[2] and type(e[0]["started_ns"]) is int, e
+' "$TASK" "$R1"
+# Unresolved entry, stale expected-seq, reused reservation id, launcher fence.
+if rrp L1 pane1 1 "$R2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "unresolved" "$ERRFILE"
+mark "$R1" delivered L1 pane1
+if rrp L1 pane1 0 "$R2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "probe again" "$ERRFILE"
+if rrp L1 pane1 1 "$R1" 2>"$ERRFILE"; then exit 1; fi
+grep -q "already in use" "$ERRFILE"
+if rrp L1 pane1 1 "$R3" "$f" L1 2>"$ERRFILE"; then exit 1; fi
+grep -q "lead fence" "$ERRFILE"
+# Malformed reprompts and a non-launched status are refused.
+python3 - "$TASK" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["workers"][0]["reprompts"] = "oops"
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+if rrp L1 pane1 1 "$R3" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not a list of objects" "$ERRFILE"
+python3 - "$TASK" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["workers"][0]["reprompts"] = []
+rec["workers"][0]["status"] = "launch_failed"
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+if rrp L1 pane1 0 "$R3" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not a live launched" "$ERRFILE"
+python3 - "$TASK" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["workers"][0]["status"] = "launched"
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+# A non-final identity is refused once a successor row exists.
+reserve L2 pane2
+if rrp L1 pane1 0 "$R3" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the final bound attempt" "$ERRFILE"
+SH
+
+check "enrich-reprompt: moves a starting entry once and replays idempotently" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-erp.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-er \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+H64=$(printf 'b%.0s' $(seq 1 64))
+R1=$(printf '1%.0s' $(seq 1 32))
+R9=$(printf '9%.0s' $(seq 1 32))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-er.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --json '{"task_id":"td-er","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"status":"launched"}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-reprompt \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --prompt-sha256 "$H64" \
+   --expected-seq 0 --reservation-id "$R1"
+erp() { # reservation status
+  CLAUDE_CONFIG_DIR="$root" $CLI enrich-reprompt \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+    --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+    --pane-id pane1 --source-head-sha "$SHA40" --reservation-id "$1" --status "$2" ${3:+--prompt-state "$3"}
+}
+# A reservation id naming no entry is refused and nothing changes.
+cp "$TASK" "$TASK.before"
+if erp "$R9" delivered 2>"$ERRFILE"; then exit 1; fi
+grep -q "no reprompt entry" "$ERRFILE"
+cmp "$TASK" "$TASK.before"
+erp "$R1" delivered working
+python3 -c '
+import json, sys
+e = json.load(open(sys.argv[1]))["workers"][0]["reprompts"][0]
+assert e["status"] == "delivered" and e["prompt_state"] == "working", e
+' "$TASK"
+# Replaying the same outcome is a no-op; a different one is refused.
+cp "$TASK" "$TASK.before"
+erp "$R1" delivered working
+cmp "$TASK" "$TASK.before"
+if erp "$R1" uncertain 2>"$ERRFILE"; then exit 1; fi
+grep -q "not starting" "$ERRFILE"
+cmp "$TASK" "$TASK.before"
+if erp "$R1" bogus 2>"$ERRFILE"; then exit 1; fi
+SH
+
+check "enrich-dispatch: refuses the reprompts key" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-edr.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-dr \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-dr \
+   --json '{"task_id":"td-dr","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dr \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+for v in null '[]'; do
+  if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dr \
+     --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+     --pane-id pane1 --source-head-sha "$SHA40" --json "{\"reprompts\":$v}" 2>"$ERRFILE"; then exit 1; fi
+  grep -q "may not name reprompts" "$ERRFILE"
+done
+SH
+
+check "outstanding_descendants: a reprompt after the settlement keeps the pane outstanding" <<PY
+$LOAD
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = c.repo_dir("slug-rp"); base = rd / "leads" / "ldb-rp" / "tasks"
+base.mkdir(parents=True)
+ident = {"launch_id": "L1", "phase": "implement", "runtime": "claude",
+         "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40}
+def put(reprompts, ts="2026-01-01T00:00:10Z"):
+    row = dict(ident)
+    if reprompts is not None:
+        row["reprompts"] = reprompts
+    (base / "td-p.json").write_text(json.dumps({"task_id": "td-p", "workers": [row]}))
+    (base / "td-p.done.json").write_text(json.dumps({**ident, "ts": ts, "outcome": "completed"}))
+    return c.outstanding_descendants(rd, "ldb-rp")
+before = 1767225600 * 10**9   # 2026-01-01T00:00:00Z
+after = 1767225620 * 10**9    # 2026-01-01T00:00:20Z
+assert put(None) == [], "no reprompts key: unchanged"
+assert put([{"seq": 0, "started_ns": before, "status": "delivered"}]) == []
+assert put([{"seq": 0, "started_ns": after, "status": "delivered"}]) == ["p1"]
+assert put([{"seq": 0, "started_ns": before, "status": "starting"}]) == ["p1"]
+assert put([{"seq": 0, "started_ns": before, "status": "uncertain"}]) == ["p1"]
+assert put([{"seq": 0, "started_ns": after, "status": "failed"}]) == []
+assert put([{"seq": 0, "started_ns": before, "status": "delivered"}], ts="bad") == ["p1"]
+assert put([{"seq": 0, "started_ns": before, "status": "failed"}], ts="bad") == []
+assert put("oops") == [c.UNREADABLE_SENTINEL]
+assert put([1]) == [c.UNREADABLE_SENTINEL]
+sys.exit(0)
+PY
+
 check "teardown fail-open: settled I1, running I2, refused publication" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-failopen.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"

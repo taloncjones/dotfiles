@@ -45,6 +45,13 @@ confirmed prior refusal, an unreadable/ambiguous transcript, and a
 marker-less transcript each get their own reason string, but all three
 release. A release is exit 0 with a systemMessage JSON on stdout.
 
+Bound workers: a worker a task lead launched under its binding runs in the
+lead's workspace, so its pane differs from the director row's pane. When the
+pane differs, bound_attempt looks for exactly one claimed binding whose
+final dispatch row names this workspace and pane, and the same gate runs
+against that lead subtree (leads/<binding>/tasks), with an emitter line that
+carries --binding. No match, or several, allows silently as before.
+
 State reads use nonblocking, no-follow regular-file descriptors. Native
 active-stop release happens before any state or Git reads. Reads only;
 never writes under the config dir or anywhere else. Fails
@@ -289,9 +296,62 @@ def _head(worktree):
     return head if isinstance(head, str) and core.SHA40_RE.fullmatch(head) else None
 
 
-def emit_command(rd, index, ws, task, entry, selection, role):
-    """Return a shell-safe completion command, or None when identity is unsafe."""
-    slug = Path(rd).name
+def bound_attempt(rd, task_id, ws, pane_id, worktree_root, root=None):
+    """-> (binding_id, lead base, task, row) for the one claimed binding of
+    `task_id` whose final dispatch row is the native attempt on workspace `ws`
+    and pane `pane_id`, else None. Reads only."""
+    rd = Path(rd)
+    root = Path(root) if root is not None else core.state_root()
+    try:
+        names = core.payload_names(rd / "bindings")
+        worktree = Path(worktree_root).resolve()
+    except (OSError, ValueError, TypeError):
+        return None
+    found = []
+    for name in sorted(names):
+        if not name.endswith(".json"):
+            continue
+        rec = read_json_object(rd / "bindings" / name, root)
+        if (
+            not core.bindings.valid_binding(rec)
+            or rec["binding_id"] != name[: -len(".json")]
+            or rec.get("status") != "claimed"
+            or rec.get("task_id") != task_id
+            or rec.get("repo_slug") != rd.name
+        ):
+            continue
+        try:
+            if Path(rec["workspace_root"]).resolve() != worktree:
+                continue
+        except (OSError, ValueError):
+            continue
+        base = rd / "leads" / rec["binding_id"]
+        task = read_json_object(base / "tasks" / f"{task_id}.json", root)
+        if (
+            not task
+            or task.get("task_id") != task_id
+            or task.get("repo_slug") != rd.name
+            or not isinstance(task.get("workers"), list)
+            or not task["workers"]
+        ):
+            continue
+        row = task["workers"][-1]
+        if (
+            isinstance(row, dict)
+            and "runtime" in row
+            and row.get("workspace_id") == ws
+            and row.get("pane_id") == pane_id
+            and row.get("phase") in ("plan", "implement", "review")
+        ):
+            found.append((rec["binding_id"], base, task, row))
+    return found[0] if len(found) == 1 else None
+
+
+def emit_command(rd, index, ws, task, entry, selection, role, binding=None):
+    """Return a shell-safe completion command, or None when identity is unsafe.
+
+    For a bound row `rd` is the lead base and the slug comes from its task."""
+    slug = task.get("repo_slug") if binding is not None and isinstance(task, dict) else Path(rd).name
     task_id = index.get("task_id")
     if not core.valid_repo_slug(slug) or not core.valid_task_id(task_id):
         return None
@@ -338,6 +398,10 @@ def emit_command(rd, index, ws, task, entry, selection, role):
             slug,
             "--task-id",
             task_id,
+        ]
+        if binding is not None:
+            command += ["--binding", binding]
+        command += [
             "--workspace",
             ws,
             "--agent",
@@ -353,6 +417,18 @@ def emit_command(rd, index, ws, task, entry, selection, role):
             command += [
                 "--reviewed-head-sha",
                 head,
+            ]
+            if binding is not None:
+                base = task.get("base_sha") if isinstance(task, dict) else None
+                if not isinstance(base, str) or not core.SHA40_RE.fullmatch(base):
+                    return None
+                command += [
+                    "--reviewed-base-sha",
+                    base,
+                    "--reviewer-session",
+                    "<session>",
+                ]
+            command += [
                 "--outcome",
                 "<approved|changes-requested>",
                 "--blocking-count",
@@ -523,18 +599,34 @@ def evaluate(payload, native=False):
     # A legacy entry never consults the pane. With no current entry, a newer
     # native row of another role still names the only pane that is an agent.
     pane_row = entry if entry is not None else latest_native_row(task, ws)
+    base = rd
+    binding = None
     if isinstance(pane_row, dict) and "runtime" in pane_row:
         if os.environ.get("HERDR_PANE_ID") != pane_row.get("pane_id"):
             # Inside herdr (HERDR_ENV is 1 here) a native task is gated only
             # in that pane. Another pane, or a process with no pane identity,
-            # is not the dispatched agent: no nudge and no identity tuple.
-            return {"action": "allow"}
+            # is not the dispatched agent: no nudge and no identity tuple --
+            # unless it is the final row of a lead binding in this workspace.
+            bound = (
+                bound_attempt(
+                    rd, task_id, ws, os.environ.get("HERDR_PANE_ID"),
+                    context["root"] if context else task.get("worktree"), root,
+                )
+                if os.environ.get("HERDR_PANE_ID") and isinstance(task, dict)
+                else None
+            )
+            if bound is None:
+                return {"action": "allow"}
+            binding, base, task, pane_row = bound
         if pane_row.get("phase") == "ship":
             # A ship attempt reports through ship.json and never emits.
             return {"action": "allow"}
         kind = PHASE_RECORD.get(pane_row.get("phase"))
         if kind is not None and pane_row.get("role") in ROLE_NAMES[kind]:
             entry, role = pane_row, kind
+        elif binding is not None:
+            # A mislabelled bound row loses only the nudge.
+            return {"action": "allow"}
         else:
             entry = None
     selection = (
@@ -556,7 +648,7 @@ def evaluate(payload, native=False):
     ):
         selection = None
     if (not strict or selection is not None) and record_accepted(
-        rd, task_id, ws, role, entry, root, task
+        base, task_id, ws, role, entry, root, task
     ):
         return {"action": "allow"}
     if payload.get("stop_hook_active") is True:
@@ -587,7 +679,7 @@ def evaluate(payload, native=False):
     command = (
         None
         if strict and selection is None
-        else emit_command(rd, index, ws, task, entry, selection, role)
+        else emit_command(base, index, ws, task, entry, selection, role, binding)
     )
     reason = "completion record is missing or does not match the current attempt"
     if strict and selection is None:
