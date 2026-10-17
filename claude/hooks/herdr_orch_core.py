@@ -5575,9 +5575,11 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
                         f"verdict={out['handoff_verdict']}")
         return out
     report_path, expected_path = handoff.get("report_path"), handoff.get("expected_path")
-    for path in (report_path, expected_path):
+    for label, path, name in (("report_path", report_path, "report.json"),
+                              ("expected_path", expected_path, "expected.json")):
         if not path or not contained(path, launch_dir):
-            fail("handoff", f"{path} is outside {launch_dir}")
+            fail("handoff", f"{label} {path} is outside {launch_dir}; "
+                            f"expected {Path(launch_dir) / 'run' / name}")
             return out
     out["report_path"], out["expected_path"] = report_path, expected_path
     try:

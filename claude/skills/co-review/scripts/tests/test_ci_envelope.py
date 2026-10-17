@@ -25,7 +25,7 @@ GREEN_RUN = {"__typename": "CheckRun", "name": "tests", "status": "COMPLETED",
 GREEN_CONTEXT = {"__typename": "StatusContext", "context": "ci/x", "state": "SUCCESS"}
 STUB_GH = ('#!/bin/sh\npwd -P >"$STUB_DIR/cwd"\nprintf "%s\\n" "$@" >"$STUB_DIR/argv"\n'
            'cat "$STUB_DIR/out.json"\nexit "$(cat "$STUB_DIR/rc")"\n')
-GH_ARGV = ["pr", "view", "7", "--json", "headRefOid,statusCheckRollup"]
+GH_ARGV = ["pr", "view", "7", "--repo", "o/r", "--json", "headRefOid,statusCheckRollup"]
 
 
 class CiEnvelopeTests(unittest.TestCase):
@@ -186,6 +186,56 @@ class CiCaptureCliTests(unittest.TestCase):
             self.assertIn("error", json.loads(result.stdout))
             self.assertFalse((root / "argv").exists())
             self.assertFalse((root / "ci.json").exists())
+
+    def _capture(self, root, expected, manifest_head=None, extra_out=None):
+        (root / "bin").mkdir()
+        (root / "bin" / "gh").write_text(STUB_GH, encoding="utf-8")
+        (root / "bin" / "gh").chmod(0o755)
+        (root / "co").mkdir()
+        (root / "rc").write_text("0", encoding="utf-8")
+        (root / "out.json").write_text(json.dumps(
+            {"headRefOid": SHA_A, "statusCheckRollup": [GREEN_RUN]}), encoding="utf-8")
+        (root / "expected.json").write_text(json.dumps(expected), encoding="utf-8")
+        command = [sys.executable, str(SPEC), "ci-capture", "--repo", str(root / "co"),
+                   "--expected", str(root / "expected.json"), "--out", str(root / "ci.json")]
+        if manifest_head is not None:
+            (root / "manifest.json").write_text(json.dumps(
+                {"source": {"head": manifest_head}}), encoding="utf-8")
+            command += ["--manifest", str(root / "manifest.json")]
+        env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "STUB_DIR": str(root)}
+        return subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+
+    def test_cli_capture_refuses_a_frozen_head_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            expected = {"repository": "o/r", "pr_number": 7, "head": SHA_A}
+            (root / "ci.json").write_text("old\n", encoding="utf-8")
+            result = self._capture(root, expected, manifest_head=SHA_B)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout),
+                             {"error": f"frozen head {SHA_B} is not the expected head {SHA_A}"})
+            self.assertFalse((root / "argv").exists())
+            self.assertEqual((root / "ci.json").read_text(encoding="utf-8"), "old\n")
+
+    def test_cli_capture_accepts_a_matching_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            expected = {"repository": "o/r", "pr_number": 7, "head": SHA_A}
+            result = self._capture(root, expected, manifest_head=SHA_A)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "argv").read_text(encoding="utf-8").splitlines(), GH_ARGV)
+            self.assertTrue((root / "ci.json").exists())
+
+    def test_cli_capture_rejects_a_bad_repository(self):
+        for repository in ("not-a-repo", "a/b/c", "", 7, None):
+            with self.subTest(repository=repository), tempfile.TemporaryDirectory() as tmp:
+                root = Path(os.path.realpath(tmp))
+                expected = {"repository": repository, "pr_number": 7, "head": SHA_A}
+                result = self._capture(root, expected)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("error", json.loads(result.stdout))
+                self.assertFalse((root / "argv").exists())
+                self.assertFalse((root / "ci.json").exists())
 
     def test_ci_envelope_subcommand_is_retired(self):
         result = subprocess.run(
