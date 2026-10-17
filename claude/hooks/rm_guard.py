@@ -21,6 +21,11 @@ inside `sh -c`/`bash -c`/`zsh -c` wrappers). Other deleters (`find -delete`,
 `xargs rm`, `gio trash`, etc.) and `rm` reached only via a pipe or command
 substitution are not inspected; that residual is left to the classifier.
 
+The hook also runs warn-only checks for recurring zsh pitfalls (a stored
+multi-word command prefix, a `$var:X` modifier, a loop variable named `path`).
+A warning is printed as PreToolUse `additionalContext` JSON on stdout with exit
+0; it never blocks, and a denial never prints to stdout.
+
 Runs before Claude and Codex shell tool calls. Fails open on any exception,
 and on any segment that contains no `rm`/`rmdir` token.
 """
@@ -64,6 +69,28 @@ SCRATCH_EXCEPTIONS = ("/tmp", "/var/folders")
 RECURSIVE_OR_FORCE_LONG = ("--recursive", "--force")
 
 BRACE_GROUP = re.compile(r"^(.*)\{([^{}]+)\}(.*)$")
+
+LEADING_KEYWORDS = ("do", "then", "else", "elif", "if", "while", "until", "!", "{")
+
+ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+VAR_REF = re.compile(r"^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$")
+# zsh history-style modifier letters; `$sha:path` stays literal (`p` is not one).
+MODIFIER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*):([acehlqrstuAPQ&])")
+
+WARN_PREFIX = (
+    "[WARNING] rm_guard: $%s holds several words, but zsh does not word-split "
+    "an unquoted variable, so it runs as one command name; write the command "
+    "and its flags literally."
+)
+WARN_MODIFIER = (
+    "[WARNING] rm_guard: zsh reads $%s:%s as the :%s modifier on $%s, not as a "
+    "literal colon; write ${%s}:%s to keep the colon."
+)
+WARN_PATH = (
+    "[WARNING] rm_guard: zsh ties the variable path to PATH, so a loop variable "
+    "named path replaces PATH and later commands are not found; rename it "
+    "(for example p or file)."
+)
 
 
 def basename(tok: str) -> str:
@@ -381,6 +408,72 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
     return None
 
 
+def strip_keywords(tokens: list[str]) -> list[str]:
+    i = 0
+    while i < len(tokens) and tokens[i] in LEADING_KEYWORDS:
+        i += 1
+    return tokens[i:]
+
+
+def unquoted_text(command: str) -> str:
+    """The command with single-quoted spans and backslash-escaped characters
+    removed, so a `$name:x` scan sees only text zsh would expand."""
+    out = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\" and i + 1 < n:
+            i += 1
+        elif ch == "'" and quote is None:
+            quote = "'"
+        else:
+            if ch == '"':
+                quote = None if quote == '"' else '"'
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def zsh_warnings(command: str) -> list[str]:
+    """Warning lines for zsh pitfalls visible in the command text. Advisory
+    only: the caller never blocks on them."""
+    segments = [strip_keywords(seg) for seg in split_segments(tokenize(command))]
+    multiword = set()
+    for tokens in segments:
+        for tok in tokens:
+            m = ASSIGNMENT.match(tok)
+            if m and (" " in m.group(2) or "\t" in m.group(2)):
+                multiword.add(m.group(1))
+
+    prefix_lines, path_lines = [], []
+    for tokens in segments:
+        stripped = strip_prefixes(tokens)
+        if stripped:
+            m = VAR_REF.match(stripped[0])
+            name = m and (m.group(1) or m.group(2))
+            if name in multiword:
+                prefix_lines.append(WARN_PREFIX % name)
+        loop_path = len(tokens) > 1 and tokens[0] == "for" and tokens[1] == "path"
+        read_path = len(stripped) > 1 and stripped[0] == "read" and "path" in stripped[1:]
+        if loop_path or read_path:
+            path_lines.append(WARN_PATH)
+
+    modifier_lines = [
+        WARN_MODIFIER % (name, letter, letter, name, name, letter)
+        for name, letter in MODIFIER.findall(unquoted_text(command))
+    ]
+
+    lines = []
+    for line in prefix_lines + modifier_lines + path_lines:
+        if line not in lines:
+            lines.append(line)
+    return lines
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -402,7 +495,7 @@ def main():
             ),
             "",
         )
-        if not isinstance(command, str) or "rm" not in command:
+        if not isinstance(command, str):
             sys.exit(0)
 
         payload_cwd = data.get("cwd")
@@ -424,12 +517,18 @@ def main():
             real_cwd = resolve(tool_workdir, real_cwd)
         home = os.environ.get("HOME", os.path.expanduser("~"))
 
-        reason = check_command(command, real_cwd, home)
-        if not reason:
-            sys.exit(0)
+        reason = check_command(command, real_cwd, home) if "rm" in command else None
+        if reason:
+            print(reason, file=sys.stderr)
+            sys.exit(2)
 
-        print(reason, file=sys.stderr)
-        sys.exit(2)
+        warnings = zsh_warnings(command)
+        if warnings:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": "\n".join(warnings),
+            }}))
+        sys.exit(0)
     except Exception:
         # Fail open: a crashed guard must never block work.
         sys.exit(0)

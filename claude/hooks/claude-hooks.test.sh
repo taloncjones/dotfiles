@@ -746,6 +746,75 @@ rm -rf "$RMG_D7DIR"
 rmg_denies_with "deny text D1 via Codex payload shape" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"rm -f \"$RUN_DIR/seat.pid\"","workdir":"/Users/rmg-test-user/proj"}}' "$RMG_D1"
 
+# Warn-only zsh pitfall checks: one additionalContext JSON on stdout, exit 0.
+rmg_json_payload() {
+    python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}, "cwd": sys.argv[2]}))' "$1" "$RMG_CWD"
+}
+rmg_warns() {
+    label="$1"
+    payload="$2"
+    expected="$3"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": sys.argv[2]}} else 1)' "$out" "$expected"; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_silent() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_w1() { printf '[WARNING] rm_guard: $%s holds several words, but zsh does not word-split an unquoted variable, so it runs as one command name; write the command and its flags literally.' "$1"; }
+rmg_w2() { printf '[WARNING] rm_guard: zsh reads $%s:%s as the :%s modifier on $%s, not as a literal colon; write ${%s}:%s to keep the colon.' "$1" "$2" "$2" "$1" "$1" "$2"; }
+RMG_W3='[WARNING] rm_guard: zsh ties the variable path to PATH, so a loop variable named path replaces PATH and later commands are not found; rename it (for example p or file).'
+
+rmg_warns "warn W1 stored prefix" "$(rmg_json_payload 'E="env -u A -u B"; $E python3 x.py')" "$(rmg_w1 E)"
+rmg_warns "warn W1 stored prefix as env argument" "$(rmg_json_payload 'ENVU="-u A -u B"; env $ENVU python3 x.py')" "$(rmg_w1 ENVU)"
+rmg_warns "warn W1 stored prefix in loop body" "$(rmg_json_payload 'E="env -u A"; for f in a b; do $E echo $f; done')" "$(rmg_w1 E)"
+rmg_warns "warn W2 modifier unquoted" "$(rmg_json_payload 'git show $sha:tests/x.py')" "$(rmg_w2 sha t)"
+rmg_warns "warn W2 modifier double-quoted" "$(rmg_json_payload 'cd "$dir:h"')" "$(rmg_w2 dir h)"
+rmg_warns "warn W3 for path" "$(rmg_json_payload 'for path in a b; do echo $path; done')" "$RMG_W3"
+rmg_warns "warn W3 read path" "$(rmg_json_payload 'ls | while read -r path; do echo $path; done')" "$RMG_W3"
+rmg_warns "warn combined order W1 W2 W3" "$(rmg_json_payload 'E="env -u A"; $E true; $E false; for path in a; do $E echo $path:t $path:t; done')" \
+    "$(rmg_w1 E)
+$(rmg_w2 path t)
+$RMG_W3"
+rmg_warns "warn W3 via Codex payload shape" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"for path in a; do echo $path; done","workdir":"/Users/rmg-test-user/proj"}}' "$RMG_W3"
+
+rmg_silent "silent rm of mktemp-style literal" "$(rmg_json_payload 'rm -rf /tmp/tmp.abc123')"
+rmg_silent "silent rm of private tmp literal" "$(rmg_json_payload 'rm -f /private/tmp/claude-502/scratch/out.txt')"
+rmg_silent "silent git show HEAD:path" "$(rmg_json_payload 'git show HEAD:claude/hooks/rm_guard.py')"
+rmg_silent 'silent git show $sha:path' "$(rmg_json_payload 'git show $sha:path/to/file')"
+rmg_silent 'silent braced ${dir}:h' "$(rmg_json_payload 'echo ${dir}:h')"
+rmg_silent "silent single-quoted modifier" "$(rmg_json_payload "echo '\$dir:h'")"
+rmg_silent "silent backslash-escaped modifier" "$(rmg_json_payload 'echo \$dir:h')"
+rmg_silent "silent literal env prefix" "$(rmg_json_payload 'env -u A -u B python3 x.py')"
+rmg_silent 'silent $EDITOR notes.md' "$(rmg_json_payload '$EDITOR notes.md')"
+rmg_silent "silent single-word stored prefix" "$(rmg_json_payload 'E=env; $E true')"
+rmg_silent "silent PATH assignment prefix" "$(rmg_json_payload 'PATH="$HOME/bin:$PATH" make')"
+rmg_silent "silent scp host:path" "$(rmg_json_payload 'scp notes.md host:/tmp/notes.md')"
+rmg_silent "silent loop variable p over path literals" "$(rmg_json_payload 'for p in path/a path/b; do cat $p; done')"
+rmg_silent "silent path as plain word" "$(rmg_json_payload 'cat path; ls ./path/to')"
+rmg_silent "silent for path inside quoted text" "$(rmg_json_payload 'git commit -m "for path in x"')"
+rmg_silent "silent stored prefix inside bash -c" "$(rmg_json_payload "bash -c 'E=\"env -u A\"; \$E true'")"
+rmg_silent 'silent $HOME:/x' "$(rmg_json_payload 'echo $HOME:/x')"
+
+rmg_denies_with "deny wins over warnings, stdout empty" "$(rmg_json_payload 'E="env -u A"; $E true; rm -rf $X')" "$RMG_D1"
+
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
 GUARD_FIX=$(mktemp -d)
