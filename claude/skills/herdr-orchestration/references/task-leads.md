@@ -172,9 +172,8 @@ blind retry would undo it.
 
 Constraints and recovery:
 
-- `set-binding-status --status completed` is refused. A binding reaches
-  `completed` only through `integrate-envelope`, so `completed is reached only
-  through integrate-envelope`.
+- `set-binding-status --status completed` is refused, because
+  completed is reached only through integrate-envelope.
 - `integrate-envelope` writes the consumption record, then the `completed`
   status. If it stops between them, re-run it with the same SHAs and the branch
   unmoved. `teardown-binding --abandon` is refused while a consumption record
