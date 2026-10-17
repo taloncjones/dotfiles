@@ -10091,7 +10091,7 @@ H2=$(printf 'b%.0s' $(seq 1 40))
 TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-dup.json"
 CLAUDE_CONFIG_DIR="$root" $CLI write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
-   --json '{"task_id":"td-dup","workers":[]}'
+   --json '{"task_id":"td-dup","base_sha":"'"$H"'","workers":[]}'
 # A review detour: dispatch at H, advance to H2, then return to H. The
 # returning row repeats H's identity but nothing has settled it, so it is a
 # legitimate re-dispatch and must be appended (the :4405 shape).
@@ -10211,6 +10211,134 @@ rec = json.load(open(sys.argv[1]))
 panes = [w["pane_id"] for w in rec["workers"]]
 assert panes == ["pane1", "pane2", "pane2", "pane1"], rec
 ' "$TASK"
+SH
+
+check "reserve-dispatch: a review row pins the dispatched base and enrich-dispatch cannot rewrite it" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-pin.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-pin \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+B1=$(printf 'a%.0s' $(seq 1 40))
+B2=$(printf 'b%.0s' $(seq 1 40))
+H=$(printf 'c%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-pin.json"
+reserve() {
+  CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+     --launch-id "$1" --phase "$2" --runtime claude --workspace-id "$3" \
+     --pane-id "$4" --source-head-sha "$H"
+}
+# A review reservation without a valid base writes nothing.
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json '{"task_id":"td-pin","workers":[]}'
+if reserve L2 review w2 pane2 2>"$ERRFILE"; then exit 1; fi
+grep -q "a review reservation requires a 40-hex base_sha on the task record" "$ERRFILE"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json '{"task_id":"td-pin","base_sha":"'"${B1%?}"'","workers":[]}'
+if reserve L2 review w2 pane2 2>"$ERRFILE"; then exit 1; fi
+grep -q "a review reservation requires a 40-hex base_sha on the task record" "$ERRFILE"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["workers"] == []
+' "$TASK"
+# An implement row carries no pin; a review row pins the record base.
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json '{"task_id":"td-pin","base_sha":"'"$B1"'","workers":[]}'
+reserve L1 implement w1 pane1
+reserve L2 review w2 pane2
+python3 -c '
+import json, sys
+w = json.load(open(sys.argv[1]))["workers"]
+assert "review_base_sha" not in w[0], w
+assert w[1]["review_base_sha"] == sys.argv[2], w
+' "$TASK" "$B1"
+# A later base rewrite leaves the pin alone.
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["base_sha"] = sys.argv[2]
+print(json.dumps(rec))
+' "$TASK" "$B2" > "$root/rewrite.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json "$(cat "$root/rewrite.json")"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["base_sha"] == sys.argv[2], rec
+assert rec["workers"][1]["review_base_sha"] == sys.argv[3], rec
+' "$TASK" "$B2" "$B1"
+# enrich-dispatch refuses the key and leaves the record byte-equal.
+before=$(shasum "$TASK")
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H" \
+   --json '{"review_base_sha":"'"$B2"'"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "an enrichment may not name review_base_sha" "$ERRFILE"
+test "$before" = "$(shasum "$TASK")"
+SH
+
+check "emit-review: a bound verdict must name the review row's pinned base" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-pin-emit.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-pe \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+B1=$(printf 'a%.0s' $(seq 1 40))
+B2=$(printf 'b%.0s' $(seq 1 40))
+H=$(printf 'c%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-pe.json"
+REVIEW="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-pe.review.json"
+set_base() {
+  python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["base_sha"] = sys.argv[2]
+print(json.dumps(rec))
+' "$TASK" "$1" > "$root/rewrite.json"
+  CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pe \
+     --json "$(cat "$root/rewrite.json")"
+}
+emit() {
+  CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-pe --workspace w2 \
+     --agent rev-td-pe --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$1" --blocking-count 0 \
+     --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
+     --reviewer-session R1
+}
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pe \
+   --json '{"task_id":"td-pe","base_sha":"'"$B1"'","review_head_sha":"'"$H"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-pe \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H"
+set_base "$B2"
+if emit "$B2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "reviewed base does not match the review row's pinned base" "$ERRFILE"
+test ! -e "$REVIEW"
+if emit "$B1" 2>"$ERRFILE"; then exit 1; fi
+grep -q "reviewed base does not match the dispatched base" "$ERRFILE"
+test ! -e "$REVIEW"
+set_base "$B1"
+emit "$B1"
+test -e "$REVIEW"
 SH
 
 check "reserve-dispatch: input and scope guards" <<'SH'

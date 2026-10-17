@@ -419,12 +419,12 @@ def emit_command(rd, index, ws, task, entry, selection, role, binding=None):
                 head,
             ]
             if binding is not None:
-                base = task.get("base_sha") if isinstance(task, dict) else None
-                if not isinstance(base, str) or not core.SHA40_RE.fullmatch(base):
+                pin = entry.get("review_base_sha")
+                if not isinstance(pin, str) or not core.SHA40_RE.fullmatch(pin):
                     return None
                 command += [
                     "--reviewed-base-sha",
-                    base,
+                    pin,
                     "--reviewer-session",
                     "<session>",
                 ]

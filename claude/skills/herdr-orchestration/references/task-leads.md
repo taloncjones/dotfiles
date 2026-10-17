@@ -134,6 +134,60 @@ you did not see, read `task-lead-status` first. If it reads
 only with a fresh go, because a deactivation may have landed in between and a
 blind retry would undo it.
 
+## Dispatching a task lead (director side)
+
+1. Preconditions: `task-lead-status` reads `gate_enabled: true`, `procedure: 1`
+   and `admit: true` (see "Enabling task leads"). Plan and confirm the task as
+   usual, then settle the plan row. Do not run `advance`; the lead replaces the
+   launch.
+2. Launch the lead as the task's implement row with `herdr_dispatch.py launch
+   --phase implement`. The prompt is the rendered implement brief plus a lead
+   section: the claim, `write-task --binding`, worker, review, PR and envelope
+   steps below, and the rule to start agents only through `launch --binding`.
+3. Handshake: the lead's first turn prints `lead-session $CLAUDE_CODE_SESSION_ID`
+   and stops. The stop gate refuses that first stop; the lead does not emit.
+   Read the line with `herdr pane read <lead pane> --source detection --lines 50`.
+4. Run `issue-binding --task-id <task> --workspace-root <worktree>
+   --expected-session <lead session>` with the launcher fence. Record the
+   binding id.
+5. Deliver the binding with the launcher form of `herdr_dispatch.py reprompt`
+   on the lead's row, naming the binding id.
+6. The lead runs `claim-owner --control-tier lead --binding <bid>`, writes the
+   task record with `write-task --binding`, launches workers and reviewer with
+   `launch --binding`, reprompts a worker for a later slice with `reprompt
+   --binding`, pushes the branch and opens a draft PR, then calls
+   `emit-artifacts` once with every file the director will quote (a later call
+   replaces the manifest and drops the others), and `emit-envelope`. It closes
+   its worker panes and emits its own launcher `emit-done` for the implement
+   phase.
+7. After that `emit-done`, read `leads/<bid>/envelope.json` and
+   `artifacts.json`, and check each blob against its digest and size. Nobody
+   moves the branch from here until step 8 succeeds.
+8. Run `integrate-envelope --binding <bid> --base-sha <base> --head-sha <PR
+   head>`, then `teardown-binding --binding <bid>`. The lead's manifest exists,
+   so `--no-artifacts` is not needed; never `--prune` before the evidence is
+   quoted.
+9. Ship through the normal launcher review and ship gates. Nothing bridges an
+   integrated envelope to them.
+
+Constraints and recovery:
+
+- `set-binding-status --status completed` is refused. A binding reaches
+  `completed` only through `integrate-envelope`, so `completed is reached only
+  through integrate-envelope`.
+- `integrate-envelope` writes the consumption record, then the `completed`
+  status. If it stops between them, re-run it with the same SHAs and the branch
+  unmoved. `teardown-binding --abandon` is refused while a consumption record
+  exists.
+- A bound review row carries `review_base_sha`, copied from the task record by
+  `reserve-dispatch`. A review reservation fails with "a review reservation
+  requires a 40-hex base_sha on the task record" when the record has no
+  40-hex `base_sha`, so the lead writes the base before launching a reviewer.
+- A launcher reprompt entry left `starting` or `uncertain` is never resent and
+  blocks later launcher reprompts of the lead. If the binding reads `claimed`,
+  the lead holds it and the run continues; otherwise stop for the owner, who
+  ends the lead and runs `teardown-binding --abandon` and `reconcile-leads`.
+
 ## Rolling back task leads
 
 Step 0, before everything else -- restore handling: if rollback follows a
