@@ -74,9 +74,15 @@ Do not read historical comments or markers for authority. Record a dirty source
 checkout, but still freeze it for findings; equality of the committed expected
 tree and reviewed tree is required later for approval. `SNAPSHOT_DIR` is empty
 and reserved only for `review.py`; `RUN_DIR` holds prompts, runtime results,
-diff, CI, expected identity, and report. Prepare and verify one snapshot:
+diff, CI, expected identity, and report. `PR_REPO` is the stored origin's
+`owner/repo`; write it as the expected identity's `repository` and pass it to
+every `gh` call with `--repo "$PR_REPO"`, since shell state does not persist
+between calls and the scratch `RUN_DIR` is not a checkout. Prepare and verify
+one snapshot:
 
 ```bash
+uv run --no-project python "$REVIEW_HELPER" github-repo --repo "$REPO" >"$RUN_DIR/github-repo.json" || exit 2
+PR_REPO=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["repository"])' "$RUN_DIR/github-repo.json") || exit 2
 POLICY=$(uv run --no-project python "$GATE_REPORT" policy --section POLICY) || exit 2
 uv run --no-project python "$GATE_REPORT" schema >"$RUN_DIR/gate-schema.json" || exit 2
 git -C "$REPO" status --porcelain >"$RUN_DIR/source-status.txt"
@@ -220,14 +226,16 @@ A PR gate waits for the head's CI to finish and freezes it as `ci.json`
 before any probe or seat runs, so no seat reports a CI gap the coordinator
 already holds. CI can outlast a foreground call: a Claude coordinator runs
 this block with `run_in_background` and waits for its completion.
-`ci-capture` reads the PR number and head from the expected identity
-and runs `gh` from `$REPO` itself; never write `ci.json` from your own `gh`
-output. A local no-PR review skips
+`ci-capture` is the only step that writes `ci.json`; never write it from
+your own `gh` output. It reads the PR number, head and repository from the
+expected identity, runs `gh pr view` with `--repo` from that identity, and
+refuses a frozen head (`--manifest`) that is not the expected head, before
+any `gh` call or seat. A local no-PR review skips
 this block; a `lessons` class there falls back to `CLASS=light`.
 
 ```bash
-gh pr checks "$PR" --watch --interval 30 >"$RUN_DIR/ci-watch.txt" 2>&1 || true
-uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
+gh pr checks "$PR" --repo "$PR_REPO" --watch --interval 30 >"$RUN_DIR/ci-watch.txt" 2>&1 || true
+uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" --manifest "$MANIFEST" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
 ```
 
 The watch's exit status is ignored; `ci-capture` decides. Exit 0
@@ -620,6 +628,27 @@ describes.
 Verify once more before evaluating. The expected file remains the independent
 current-workflow authority; it is never copied from the report.
 
+Before the finalize block, which removes the snapshot, run one dry evaluate:
+
+```bash
+cp "$RUN_DIR/report.json" "$RUN_DIR/report.pre-dry.json" || exit 2
+uv run --no-project python "$GATE_REPORT" evaluate --report "$RUN_DIR/report.json" --expected "$EXPECTED_IDENTITY" >"$RUN_DIR/evaluation-dry.json" || true
+```
+
+The dry result grants nothing. The dry evaluate runs once per gate, and the
+coordinator makes at most one correction after it, then runs the finalize
+block with no second dry run. A correction is allowed only for a
+transcription error: a `report.json` field that differs from the on-disk file
+it was copied from (the manifest, the expected identity, an artifact's path
+or SHA-256, or the `schema` example). Never edit a seat artifact, and
+never add, drop, or re-disposition a finding: `findings` and `prior_blockers` stay
+byte-equal to `report.pre-dry.json`. A mismatch between authoritative inputs
+(the manifest, the expected identity, `ci.json`, or a seat artifact
+disagreeing with another), or any `APPROVE` or `CHANGES` dry verdict, goes
+straight to the finalize block uncorrected. An interruption after the `cp`
+line and before the finalize block prints its output ends the gate; recovery
+is a fresh gate with a new `RUN_DIR` and `run_id`.
+
 ```bash
 # co-review-finalize:start
 uv run --no-project python "$REVIEW_HELPER" verify --manifest "$MANIFEST" || exit 2
@@ -724,13 +753,13 @@ Before posting, read the PR's comments once (the `gh api --paginate --slurp`
 call below, run before `gh pr comment`) and compute `round` from it.
 
 ```bash
-gh pr comment "$PR" --body-file "$RUN_DIR/marker.md" || exit 2
-gh api --paginate --slurp "repos/$OWNER/$REPO_NAME/issues/$PR/comments" >"$RUN_DIR/comments.json"
+gh pr comment "$PR" --repo "$PR_REPO" --body-file "$RUN_DIR/marker.md" || exit 2
+gh api --paginate --slurp "repos/$PR_REPO/issues/$PR/comments" >"$RUN_DIR/comments.json"
 ME=$(gh api user --jq .login)
 uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/pr_ready_gate.py" supersede \
   --comments "$RUN_DIR/comments.json" --author "$ME" --expect-marker "$MARKER_LINE"
 # Delete each printed id with its own call; no loop, no $(...):
-# gh api -X DELETE "repos/$OWNER/$REPO_NAME/issues/comments/<id>"
+# gh api -X DELETE "repos/$PR_REPO/issues/comments/<id>"
 ```
 
 Only on the comment's exit 0 does the supersede step run. If supersede did
@@ -743,7 +772,7 @@ A draft is the owner's view of one gated post. When the shim refuses a post
 not author), register it with the exact argv it names:
 
 ```bash
-python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-file "$RUN_DIR/marker.md"
+python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --repo "$PR_REPO" --body-file "$RUN_DIR/marker.md"
 ```
 
 Show the printed `draft <hash>` line and the body. Then ask with

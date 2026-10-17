@@ -3165,7 +3165,8 @@ expect("task-state", state="none", task_edit=lambda t: t.update(ship_launch_id=N
 expect("handoff", state="stale", task_edit=lambda t: t.update(ship_launch_id="old"))
 expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="never-launched"))
 expect("handoff", state="current", hand_edit=lambda h: h.update(verdict="CHANGES"))
-expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json")))
+out = expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json")))
+assert f"expected {ld / 'run' / 'report.json'}" in " ".join(r["detail"] for r in out["reasons"]), out
 expect("hash", file_edit=lambda: (ld / "report.json").write_text("{}"))
 expect("handoff", state="stale", task_edit=lambda t: t.update(review_head_sha="c" * 40))
 expect("head-moved", pr_edit=lambda p: p.update(headRefOid="c" * 40))
@@ -12637,8 +12638,10 @@ flat = " ".join(brief.split())
 launch_dir = os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") + "/"
 ship_report = os.path.join(rd, "tasks", "td-render-x.ship.md")
 assert f"set co-review's `RUN_DIR` to `{launch_dir}run`" in flat, flat
-assert ("`report_path` is the gate's `run/report.json` inside the launch directory and "
-        f"`expected_path` its `run/expected.json`, never `{ship_report}`.") in flat, flat
+assert (f"`report_path` is `{launch_dir}run/report.json` and `expected_path` is "
+        f"`{launch_dir}run/expected.json`, both absolute; never `{ship_report}`.") in flat, flat
+assert f"set co-review's `RUN_DIR` to `{launch_dir}run` and `EXPECTED_IDENTITY` to `{launch_dir}run/expected.json`" in flat, flat
+assert "gate_report.py ci-capture" in flat and "--json headRefOid,statusCheckRollup" not in flat, flat
 PY
 
 check "render-brief: ship refuses without a PR, on a moved head, or delta without a handoff" <<'PY'

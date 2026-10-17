@@ -922,6 +922,16 @@ class ReviewHelperTests(unittest.TestCase):
         )
         self.assertIn("plain origin branch name", result.stderr)
 
+    def test_github_repo_reads_the_stored_origin(self):
+        self.run_git("remote", "add", "origin", "https://github.com/Acme/Widget.git")
+        result = self.command("github-repo", "--repo", str(self.repo))
+        self.assertEqual(json.loads(result.stdout), {"repository": "Acme/Widget"})
+
+    def test_github_repo_refuses_a_non_github_origin(self):
+        self.run_git("remote", "add", "origin", "https://gitlab.com/a/b.git")
+        result = self.command("github-repo", "--repo", str(self.repo), expect=2)
+        self.assertIn("does not resolve to github.com", result.stderr)
+
     def test_base_ref_accepts_slashed_branch(self):
         origin = self.root / "origin.git"
         subprocess.run(

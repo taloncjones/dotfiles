@@ -541,9 +541,9 @@ class CoReviewSkillText(unittest.TestCase):
 
     def test_co_review_captures_ci_before_probes(self):
         block = _extract_block(CO_REVIEW, '"$GATE_REPORT" ci-capture')
-        for needle in ('gh pr checks "$PR" --watch --interval 30', "|| true",
+        for needle in ('gh pr checks "$PR" --repo "$PR_REPO" --watch --interval 30', "|| true",
                        'ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" '
-                       '--out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"'):
+                       '--manifest "$MANIFEST" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"'):
             self.assertIn(needle, block)
         self.assertNotIn("pr-ci.json", CO_REVIEW)
         self.assertLess(CO_REVIEW.index('"$GATE_REPORT" ci-capture'),
@@ -609,9 +609,59 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertLess(CO_REVIEW.index('"$GATE_REPORT" lessons-check'),
                         CO_REVIEW.index('"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'))
 
+    def test_co_review_gh_calls_name_the_repo(self):
+        for name, text in (("claude", CO_REVIEW), ("codex", MIRROR)):
+            with self.subTest(entrypoint=name):
+                self.assertNotIn("$OWNER", text)
+                self.assertNotIn("$REPO_NAME", text)
+                self.assertLess(text.index('PR_REPO=$('), text.index("gh pr "))
+                for line in text.splitlines():
+                    if re.match(r"\s*(nohup sh -c ')?gh pr \w+ ", line) or "-- gh pr comment" in line:
+                        self.assertRegex(line, r'--repo "\$(PR_REPO|3)"')
+                    if re.match(r"\s*(#\s*)?(ME=\$\()?gh api ", line) and "gh api user" not in line:
+                        self.assertIn("repos/$PR_REPO/", line)
+
+    def _dry_before_finalize(self, text):
+        cp = 'cp "$RUN_DIR/report.json" "$RUN_DIR/report.pre-dry.json" || exit 2'
+        dry = ('uv run --no-project python "$GATE_REPORT" evaluate --report "$RUN_DIR/report.json" '
+               '--expected "$EXPECTED_IDENTITY" >"$RUN_DIR/evaluation-dry.json" || true')
+        self.assertEqual(text.count(cp), 1)
+        self.assertEqual(text.count(dry), 1)
+        self.assertLess(text.index(cp), text.index(dry))
+        self.assertLess(text.index(dry), text.index("# co-review-finalize:start"))
+        flat = " ".join(text.split())
+        for phrase in ("never add, drop, or re-disposition a finding", "at most one correction",
+                       "The dry result grants nothing"):
+            self.assertIn(phrase.lower(), flat.lower())
+
+    def test_co_review_dry_evaluate_precedes_finalize(self):
+        self._dry_before_finalize(CO_REVIEW)
+
+    def test_mirror_dry_evaluate_precedes_finalize(self):
+        self._dry_before_finalize(MIRROR)
+
+    def test_ship_brief_names_ci_capture_and_report_paths(self):
+        block = BRIEF[BRIEF.index("```brief:ship\n"):]
+        block = block[:block.index("\n```\n", 10)]
+        flat = " ".join(block.split())
+        for needle in ("gate_report.py ci-capture", "`<ship_launch_dir>run/report.json`",
+                       "`<ship_launch_dir>run/expected.json`",
+                       "`EXPECTED_IDENTITY` to `<ship_launch_dir>run/expected.json`"):
+            self.assertIn(needle, flat)
+        self.assertNotIn("--json headRefOid,statusCheckRollup", flat)
+
+    def test_herdr_ship_briefs_come_from_dispatch_gate(self):
+        flat = " ".join(HERDR.split())
+        sentence = ("Every ship brief is the text `dispatch-gate` renders from the `brief:ship` "
+                    "block of `references/brief-template.md`; never hand-write a ship brief or "
+                    "copy one from another task.")
+        self.assertIn(sentence, flat)
+        self.assertLess(flat.index("--phase ship --focus-file"), flat.index(sentence))
+        self.assertLess(flat.index(sentence), flat.index("## 6a."))
+
     def test_mirror_captures_ci_and_runs_the_lessons_tier(self):
         for needle in ('ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" '
-                       '--out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"',
+                       '--manifest "$MANIFEST" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"',
                        "ci-watch.done", "## CI evidence", "ci.json: $RUN_DIR/ci.json sha256=",
                        '"$GATE_REPORT" lessons-check',
                        "Lessons tier: only the Claude-runner verifier",

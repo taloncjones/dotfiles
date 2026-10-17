@@ -1071,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser = sub.add_parser("ci-capture")
     for flag in ("--repo", "--expected", "--out"):
         capture_parser.add_argument(flag, required=True)
+    capture_parser.add_argument("--manifest")
     audit_parser = sub.add_parser("audit-comment")
     audit_parser.add_argument("--report", required=True)
     audit_parser.add_argument("--expected", required=True)
@@ -1145,19 +1146,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"pass": not reasons, "reasons": reasons}, sort_keys=True))
         return 0 if not reasons else 1
     if args.command == "ci-capture":
-        # gh runs from the checkout so a non-github.com host resolves from its remote.
+        # cwd is the checkout so gh finds its host config; --repo names the target.
         try:
             expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
             number, head = expected.get("pr_number"), expected.get("head")
             if isinstance(number, bool) or not isinstance(number, int) or number <= 0 or not _sha(head):
                 raise ValueError("expected identity needs a positive int pr_number and a SHA head")
+            repository = expected.get("repository")
+            if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+                raise ValueError("expected identity needs a repository of the form owner/repo")
+            if args.manifest:
+                frozen = json.loads(Path(args.manifest).read_text(encoding="utf-8"))["source"]["head"]
+                if not _sha(frozen) or frozen != head:
+                    raise ValueError(f"frozen head {frozen} is not the expected head {head}")
             proc = subprocess.run(
-                ["gh", "pr", "view", str(number), "--json", "headRefOid,statusCheckRollup"],
+                ["gh", "pr", "view", str(number), "--repo", repository, "--json", "headRefOid,statusCheckRollup"],
                 cwd=args.repo, capture_output=True, text=True, timeout=120, check=False)
             if proc.returncode != 0:
                 raise ValueError(f"gh pr view exited {proc.returncode}: {proc.stderr.strip()[-300:]}")
             pr = json.loads(proc.stdout)
-        except (OSError, UnicodeError, ValueError, AttributeError, subprocess.TimeoutExpired) as error:
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError,
+                subprocess.TimeoutExpired) as error:
             print(json.dumps({"error": str(error)}))
             return 1
         envelope, reasons = ci_envelope(pr, head)

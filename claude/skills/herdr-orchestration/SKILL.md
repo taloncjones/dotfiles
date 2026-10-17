@@ -711,6 +711,9 @@ its verdict is not `APPROVE`;
 every such relaunch brief carries `herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
 (section 6a step 0 owns it), except rule (c). Dispatch with
 `python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
+Every ship brief is the text `dispatch-gate` renders from the `brief:ship`
+block of `references/brief-template.md`; never hand-write a ship brief or
+copy one from another task.
 It refuses a live or unknown pinned agent. For a pinned run with no
 `ship.json` (it stopped before the gate wrote it), it relaunches at most
 once per reviewed head: it refuses when `ship_relaunch_head` equals
