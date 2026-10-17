@@ -755,6 +755,23 @@ def _todo_body(repo_root, todo_id):
 
 GITHUB_REMOTE_RE = re.compile(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
                               r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+GITHUB_ALIAS_REMOTE_RE = re.compile(r"(?:git@([A-Za-z0-9_][A-Za-z0-9_.-]*):|ssh://git@([A-Za-z0-9_][A-Za-z0-9_.-]*)/)"
+                                    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+
+
+def github_owner_repo(url):
+    """(owner, repo) for a GitHub origin URL, or None. SSH aliases must resolve to github.com."""
+    match = GITHUB_REMOTE_RE.match(url)
+    if match:
+        return match.group(1), match.group(2)
+    alias = GITHUB_ALIAS_REMOTE_RE.match(url)
+    if not alias:
+        return None
+    host = alias.group(1) or alias.group(2)
+    resolved = _co_review_module("repo_binding").ssh_host(host, user="git", timeout=5)
+    if resolved and resolved.lower() == "github.com":
+        return alias.group(3), alias.group(4)
+    return None
 
 
 def _brief_ship_values(rd, record, ns, head, blocks, config):
@@ -763,8 +780,8 @@ def _brief_ship_values(rd, record, ns, head, blocks, config):
     _require(str(pr).isdigit() and int(pr) > 0, "ship needs pr_number on the task record")
     _require(record.get("review_head_sha") == head, "ship needs review_head_sha equal to the worktree HEAD")
     remote = _brief_git(record["worktree"], "config", "--get", "remote.origin.url")
-    match = GITHUB_REMOTE_RE.match(remote)
-    _require(match is not None, "ship needs a GitHub origin remote")
+    owner_repo = github_owner_repo(remote)
+    _require(owner_repo is not None, "ship needs a GitHub origin remote")
     base_ref = record["base_ref"]
     _require(base_ref.startswith("origin/"), "ship needs base_ref of the form origin/<branch>")
     out = _brief_git(record["worktree"], "ls-remote", "origin", f"refs/heads/{base_ref[len('origin/'):]}")
@@ -784,7 +801,7 @@ def _brief_ship_values(rd, record, ns, head, blocks, config):
         _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
         tier = blocks["ship-tier-full"]
     task_id = record["task_id"]
-    return {"pr_number": str(int(pr)), "pr_repo": f"{match.group(1)}/{match.group(2)}",
+    return {"pr_number": str(int(pr)), "pr_repo": f"{owner_repo[0]}/{owner_repo[1]}",
             "live_base_sha": live, "tier-lines": tier,
             "ship_launch_dir": str(rd / "artifacts" / task_id / "ship-<launch_id>") + "/",
             "ship_report": str(rd / "tasks" / f"{task_id}.ship.md")}
@@ -5363,9 +5380,9 @@ def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
 SHIP_CI_OK = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 
 
-def _gate_report_module():
-    path = Path(__file__).resolve().parents[1] / "skills" / "co-review" / "scripts" / "gate_report.py"
-    spec = importlib.util.spec_from_file_location("dotfiles_gate_report", path)
+def _co_review_module(name):
+    path = Path(__file__).resolve().parents[1] / "skills" / "co-review" / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"dotfiles_{name}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -5487,7 +5504,7 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
         # The reviewed tree is the head merged with the gated base; a base that
         # moved since only has to merge cleanly (co-review Freeze).
         try:
-            check = _gate_report_module()._load_sibling("branch_delta").base_check(
+            check = _co_review_module("gate_report")._load_sibling("branch_delta").base_check(
                 Path(worktree), live_head, gated_base, base_tip,
                 str(pr.get("baseRefName")), tree)
         except Exception as exc:  # the gate fails closed
@@ -5515,7 +5532,7 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
             and refused.get("base_main_sha") == base_tip):
         fail("merge-refused", str(refused.get("reason")))
     try:
-        verdict = _gate_report_module().evaluate(report, expected, Path(report_path).resolve().parent)
+        verdict = _co_review_module("gate_report").evaluate(report, expected, Path(report_path).resolve().parent)
     except Exception as exc:  # the gate fails closed
         verdict = {"verdict": "INCOMPLETE", "approve_allowed": False, "reasons": [str(exc)]}
     if verdict.get("verdict") != "APPROVE" or verdict.get("approve_allowed") is not True:

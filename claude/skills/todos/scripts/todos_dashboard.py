@@ -1683,10 +1683,10 @@ def board_context(args):
     state_root = default_state_root(scope)
     # get-url applies insteadOf, so an SSH alias hides the GitHub URL; read it as stored.
     rc, stored = git(["config", "--get", "remote.origin.url"], cwd=root)
-    gh = core.GITHUB_REMOTE_RE.match(stored if rc == 0 else remote) or core.GITHUB_REMOTE_RE.match(remote)
+    gh = (core.github_owner_repo(stored) if rc == 0 else None) or core.github_owner_repo(remote)
     return {
         "root": root,
-        "pr_base": f"https://github.com/{gh.group(1)}/{gh.group(2)}/pull/" if gh else "",
+        "pr_base": f"https://github.com/{gh[0]}/{gh[1]}/pull/" if gh else "",
         "scope": scope,
         "slug": slug,
         "todos_dir": root / TODOS_DIRNAME,

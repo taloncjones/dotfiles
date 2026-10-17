@@ -124,7 +124,7 @@ def matches(a, b) -> bool:
     return bool(a) and bool(b) and a == b
 
 
-def ssh_host(alias, user=None, port=None, runner=subprocess.run) -> str | None:
+def ssh_host(alias, user=None, port=None, runner=subprocess.run, timeout=10) -> str | None:
     """Real hostname via `ssh -G`, or None. Resolve with the URL's own user
     (-l) and port (-p) so a user/port-dependent HostName rewrite resolves the
     way git actually connects. Signature matches host_resolver(host, user, port).
@@ -136,7 +136,7 @@ def ssh_host(alias, user=None, port=None, runner=subprocess.run) -> str | None:
         cmd += ["-p", str(port)]
     cmd.append(alias)
     try:
-        result = runner(cmd, capture_output=True, text=True, timeout=10)
+        result = runner(cmd, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
