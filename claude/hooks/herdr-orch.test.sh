@@ -2298,6 +2298,36 @@ assert c.run_contract_commands(cmds,root)==0 and os.path.exists(marker)  # cwd=w
 sys.exit(0)
 PY
 
+check "run_contract_commands: system grep survives a wrapped grep" <<PY
+$LOAD
+import subprocess
+root=tempfile.mkdtemp()
+open(os.path.join(root,"f"),"w").write('git tag --target "\$RESOLVED_COMMIT" v1\n')
+cmd="grep -q -- '--target \"\$RESOLVED_COMMIT\"' f"
+open(os.path.join(root,"check.sh"),"w").write(cmd+"\n")
+fakebin=tempfile.mkdtemp()
+fake=os.path.join(fakebin,"grep")
+open(fake,"w").write("#!/bin/sh\nexit 1\n");os.chmod(fake,0o755)
+benv=os.path.join(root,"fn.sh");open(benv,"w").write("grep() { return 1; }\n")
+ok=[{"name":"dollar","run":cmd}]
+miss=[{"name":"miss","run":"grep -q -- absent-token f"}]
+nested=[{"name":"nested","run":"bash check.sh"}]
+path=os.environ["PATH"]
+os.environ["PATH"]=fakebin+os.pathsep+path
+assert subprocess.call(["sh","-c",cmd],cwd=root)!=0           # fake is live
+assert c.run_contract_commands(ok,root)==0
+assert c.run_contract_commands(miss,root)==1
+os.environ["PATH"]=path
+os.environ["BASH_FUNC_grep%%"]="() {  return 1\n}"
+assert subprocess.call(["bash","check.sh"],cwd=root)!=0       # fake is live
+assert c.run_contract_commands(nested,root)==0
+del os.environ["BASH_FUNC_grep%%"]
+os.environ["BASH_ENV"]=benv
+assert subprocess.call(["bash","check.sh"],cwd=root)!=0       # fake is live
+assert c.run_contract_commands(nested,root)==0
+sys.exit(0)
+PY
+
 check "verify-contract: unpinned validate/run/missing/schema exits" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"

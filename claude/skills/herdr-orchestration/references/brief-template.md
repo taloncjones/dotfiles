@@ -196,7 +196,7 @@ untracked and git-ignored on disk, and the planning-artifact guard refuses
 `git add` of it. 1-32 commands, each `{"name", "run"[, "timeout_secs"
 1-3600]}`, that are falsifiable (a broken implementation must fail at least
 one), repo-local, deterministic, and worktree-safe (no STATE_ROOT writes,
-no machine-state mutation, no network, no secret echo). The PRD's
+no machine-state mutation, no network, no secret echo). `verify-contract` runs each command under `/bin/sh -c` with the system grep; check commands through `verify-contract`, not in your own shell. The PRD's
 acceptance mapping pairs each acceptance criterion with its contract
 command (or an explicit "human-verify" entry). Validate it --
 `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path> --contract claude/contracts/<task_id>-contract.json --allow-unpinned --validate-only`
@@ -337,7 +337,7 @@ Run the native `review-change` skill over this revision's relevant diff,
 intended behavior, and affected callers. You are a fresh agent in the task's
 own worktree. Report blocking findings, useful advisories, coverage gaps, and
 safe reproduction evidence. Do not edit the branch, invoke co-review or another
-reviewer, post externally (drafts go in the findings report), push, merge, or open a PR.
+reviewer, post externally (drafts go in the findings report), push, merge, or open a PR. To execute the contract, run `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`; never paste a contract `run` string into your own shell.
 <fast-path-line>
 ```
 ```brief:close-review
