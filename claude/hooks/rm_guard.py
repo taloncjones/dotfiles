@@ -234,7 +234,11 @@ def system_path_reason(path: str) -> str | None:
     for sys_path in SYSTEM_PATHS:
         canon_sys = canonicalize(sys_path)
         if canon_path == canon_sys or canon_path.startswith(canon_sys + "/"):
-            return "target is a system path (%s)" % sys_path
+            return (
+                "Blocked: rm target is a system path (%s). Fix: remove only "
+                "scratch paths under /tmp or $TMPDIR, or ask the user to run "
+                "this removal." % sys_path
+            )
     return None
 
 
@@ -248,28 +252,52 @@ def is_git_root(cwd: str) -> bool:
 def denial_reason(path: str, has_unexpanded_var: bool, recursive_or_force: bool,
                    home: str, real_cwd: str, cwd: str) -> str | None:
     if has_unexpanded_var and recursive_or_force:
-        return "target contains an unexpanded variable/command substitution"
+        return (
+            "Blocked: rm -r/-f target holds a shell variable or command "
+            "substitution, which this guard cannot check. Fix: write the "
+            "literal path (for example paste the mktemp output) or skip the rm."
+        )
 
     parent, name = os.path.split(path) if path != "/" else ("/", "")
 
     if path == "/" or (parent == "/" and has_glob_chars(name)):
-        return "target is the filesystem root or a glob directly under it"
+        return (
+            "Blocked: rm target is the filesystem root or a glob directly "
+            "under it. Fix: name the specific file or subdirectory to "
+            "remove, or skip the rm."
+        )
 
     if path == home or (parent == home and has_glob_chars(name)):
-        return "target is the home directory or a glob directly under it"
+        return (
+            "Blocked: rm target is the home directory or a glob directly "
+            "under it. Fix: name the specific file or subdirectory to "
+            "remove, or skip the rm."
+        )
 
     if name == ".git" or (basename(parent) == ".git" and has_glob_chars(name)):
-        return "target is a .git directory or a glob directly under it"
+        return (
+            "Blocked: rm target is a .git directory or a glob directly under "
+            "it. Fix: name the one file inside .git to remove (for example "
+            ".git/index.lock), or skip the rm."
+        )
 
     sys_reason = system_path_reason(path)
     if sys_reason:
         return sys_reason
 
     if real_cwd.startswith(path + "/") and path != real_cwd:
-        return "target is a parent of the current working directory"
+        return (
+            "Blocked: rm target is a parent of the current working directory. "
+            "Fix: name the specific file or subdirectory inside it, or skip "
+            "the rm."
+        )
 
     if path == cwd and (cwd == home or is_git_root(cwd)):
-        return "target is the current directory, which is a git worktree root or the home directory"
+        return (
+            "Blocked: rm target is the current directory, which is a git "
+            "worktree root or the home directory. Fix: name the specific "
+            "files or subdirectories to remove, or skip the rm."
+        )
 
     return None
 
@@ -400,12 +428,7 @@ def main():
         if not reason:
             sys.exit(0)
 
-        print("Blocked: rm target is catastrophic -- " + reason + ".", file=sys.stderr)
-        print(
-            "Narrow the target to a specific file or subdirectory, or ask the "
-            "user for explicit confirmation before removing it.",
-            file=sys.stderr,
-        )
+        print(reason, file=sys.stderr)
         sys.exit(2)
     except Exception:
         # Fail open: a crashed guard must never block work.

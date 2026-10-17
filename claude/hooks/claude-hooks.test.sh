@@ -709,6 +709,43 @@ rmg_allows_at "allows rm -rf . in a plain (non-git, non-home) scratch dir" 'rm -
 rm -rf "$RMG_GITROOT" "$RMG_PLAIN"
 trap - EXIT
 
+# Deny text names the fix: exact one-line stderr, exit 2, empty stdout.
+rmg_denies_with() {
+    label="$1"
+    payload="$2"
+    expected="$3"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/tmp/claude-hook-test.err) || rc=$?
+    err=$(cat /tmp/claude-hook-test.err)
+    if [ "$rc" -eq 2 ] && [ -z "$out" ] && [ "$err" = "$expected" ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s stderr=%s)\n' "$label" "$rc" "$out" "$err" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+RMG_D1='Blocked: rm -r/-f target holds a shell variable or command substitution, which this guard cannot check. Fix: write the literal path (for example paste the mktemp output) or skip the rm.'
+rmg_denies_with "deny text D1 variable" "$(rmg_payload 'rm -rf $X')" "$RMG_D1"
+rmg_denies_with "deny text D1 command substitution" "$(rmg_payload 'rm -rf $(mktemp -d)')" "$RMG_D1"
+rmg_denies_with "deny text D2 root glob" "$(rmg_payload 'rm -rf /*')" \
+    'Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
+rmg_denies_with "deny text D3 home glob" "$(rmg_payload 'rm -rf ~/*')" \
+    'Blocked: rm target is the home directory or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
+rmg_denies_with "deny text D4 .git" "$(rmg_payload 'rm -rf .git')" \
+    'Blocked: rm target is a .git directory or a glob directly under it. Fix: name the one file inside .git to remove (for example .git/index.lock), or skip the rm.'
+rmg_denies_with "deny text D5 system path" "$(rmg_payload 'rm -rf /etc')" \
+    'Blocked: rm target is a system path (/etc). Fix: remove only scratch paths under /tmp or $TMPDIR, or ask the user to run this removal.'
+rmg_denies_with "deny text D6 parent of cwd" "$(rmg_payload_at "rm -rf $RMG_HOME/proj" "$RMG_HOME/proj/sub/deep")" \
+    'Blocked: rm target is a parent of the current working directory. Fix: name the specific file or subdirectory inside it, or skip the rm.'
+RMG_D7DIR=$(mktemp -d)
+: > "$RMG_D7DIR/.git"
+rmg_denies_with "deny text D7 cwd at git root" "$(rmg_payload_at 'rm -rf .' "$RMG_D7DIR")" \
+    'Blocked: rm target is the current directory, which is a git worktree root or the home directory. Fix: name the specific files or subdirectories to remove, or skip the rm.'
+rm -rf "$RMG_D7DIR"
+rmg_denies_with "deny text D1 via Codex payload shape" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"rm -f \"$RUN_DIR/seat.pid\"","workdir":"/Users/rmg-test-user/proj"}}' "$RMG_D1"
+
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
 GUARD_FIX=$(mktemp -d)
