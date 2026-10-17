@@ -640,8 +640,8 @@ coordinator makes at most one correction after it, then runs the finalize
 block with no second dry run. A correction is allowed only for a
 transcription error: a `report.json` field that differs from the on-disk file
 it was copied from (the manifest, the expected identity, an artifact's path
-or SHA-256, or the `schema` example). Never edit a seat artifact. Never add,
-drop, or re-disposition a finding: `findings` and `prior_blockers` stay
+or SHA-256, or the `schema` example). Never edit a seat artifact, and
+never add, drop, or re-disposition a finding: `findings` and `prior_blockers` stay
 byte-equal to `report.pre-dry.json`. A mismatch between authoritative inputs
 (the manifest, the expected identity, `ci.json`, or a seat artifact
 disagreeing with another), or any `APPROVE` or `CHANGES` dry verdict, goes
