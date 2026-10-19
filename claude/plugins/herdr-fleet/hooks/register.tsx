@@ -14,10 +14,17 @@ import {
   clip,
   plain,
   doneRows,
+  eventsWorkspace,
+  fitTitle,
   ghReason,
+  hasEvidence,
+  headerLine,
   isRecordName,
+  liveCell,
+  parseEvents,
   parseJson,
   prRows,
+  repoName,
   summaryLine,
   taskRow,
 } from './fleet'
@@ -92,6 +99,7 @@ function createFleet($: Dollar, generation: number) {
   async function resolveLease(root: string): Promise<FleetLease> {
     const sessionId = await $.session.id()
     const slugs: string[] = []
+    const fences: Record<string, number | null> = {}
     let entries: Awaited<ReturnType<typeof $.fs.list>> = []
     try {
       entries = await $.fs.list(root)
@@ -102,9 +110,12 @@ function createFleet($: Dollar, generation: number) {
       if (entry.kind !== 'dir') continue
       const text = await readText(`${root}/${entry.name}/owner.json`)
       const owner = text === null ? null : parseJson(text)
-      if (owner && owner.session_id === sessionId) slugs.push(entry.name)
+      if (owner && owner.session_id === sessionId) {
+        slugs.push(entry.name)
+        fences[entry.name] = Number.isInteger(owner.fence) ? (owner.fence as number) : null
+      }
     }
-    if (slugs.length === 1) return { kind: 'held', slug: slugs[0] }
+    if (slugs.length === 1) return { kind: 'held', slug: slugs[0], fence: fences[slugs[0]] }
     return slugs.length === 0
       ? { kind: 'none' }
       : { kind: 'ambiguous', slugs: slugs.sort() }
@@ -153,12 +164,18 @@ function createFleet($: Dollar, generation: number) {
           typeof launch === 'string' && launch
             ? await readText(`${dir}/artifacts/${id}/ship-${launch}/ship.json`)
             : null
+        const workspace = eventsWorkspace(record)
+        const eventText =
+          workspace === null
+            ? null
+            : await readText(`${dir}/workspaces/${workspace}.events.jsonl`)
         rows.push(
           taskRow(
             entry.name,
             record,
             doneText === null ? null : parseJson(doneText),
             shipText === null ? null : parseJson(shipText),
+            eventText === null ? null : parseEvents(eventText),
           ),
         )
       }
@@ -295,17 +312,27 @@ function row(cols: Array<[string, number]>): string {
   return cols.map(([text, width]) => clip(text, width)).join(' ')
 }
 
-function taskLine(r: FleetTaskRow, width: number): string {
-  const fixed: Array<[string, number]> = [
-    [r.status, 18],
-    [r.agent, 16],
-    [r.phase, 10],
-    [r.head, 7],
-    [r.pr, 5],
-    [r.verdict + (r.isDirty ? ' dirty' : ''), 24],
+function taskLine(r: FleetTaskRow, width: number, readAt: number | null, evidence: boolean): string {
+  const cells: Array<[string, number]> = [
+    [r.status, 14],
+    [liveCell(r, readAt, 26), 26],
   ]
-  const rest = fixed.reduce((n, [, w]) => n + w + 1, 0)
-  return row([[r.id, Math.max(12, width - rest)], ...fixed])
+  if (evidence) {
+    const shown = hasEvidence(r)
+    cells.push(
+      [shown ? r.head : '', 7],
+      [shown ? r.pr : '', 5],
+      [shown ? r.verdict + (r.isDirty ? ' dirty' : '') : '', 24],
+    )
+  }
+  const rest = cells.reduce((n, [, w]) => n + w + 1, 0)
+  const titleWidth = Math.max(16, width - rest)
+  return row([[fitTitle(plain(r.title), titleWidth), titleWidth], ...cells])
+}
+
+// Head, PR and verdict show only when some row has one and the title keeps 24 columns.
+function showEvidence(rows: FleetTaskRow[], width: number): boolean {
+  return width >= 105 && rows.some(hasEvidence)
 }
 
 function prLine(r: FleetPrRow, width: number): string {
@@ -347,17 +374,19 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: 'Fleet' })
     if (fleet) await fleet.refreshAll()
     const snap = await read($, snapAtom)
-    const { live, archived, prs, ghError } = view(snap)
+    const { slug, live, archived, prs, ghError } = view(snap)
     const done = doneRows(live, archived)
+    const active = activeRows(live)
+    const summary = summaryLine(active.length, done.length, prs?.rows ?? [], ghError !== null)
+    const detail =
+      slug === null
+        ? []
+        : [
+            `lease ${slug} | gh ${snap.repoRoot ?? '-'}`,
+            ...active.map(r => `${r.id}  ${r.title}`),
+          ]
 
-    return {
-      text: summaryLine(
-        activeRows(live).length,
-        done.length,
-        prs?.rows ?? [],
-        ghError !== null,
-      ),
-    }
+    return { text: [summary, ...detail].join('\n') }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -396,9 +425,13 @@ export const register: Register = on => {
     if (snap.lease.kind === 'ambiguous') {
       header = `ambiguous: this session holds leases for ${snap.lease.slugs.join(', ')}`
     } else if (slug !== null) {
-      header = `lease ${slug} | gh ${snap.repoRoot ?? '-'} | read ${
-        snap.readAt === null ? '-' : clock(snap.readAt)
-      }`
+      const held = snap.lease.kind === 'held' ? snap.lease.fence : null
+      header = headerLine(
+        repoName(snap.repoRoot, slug),
+        held,
+        snap.readAt === null ? '-' : clock(snap.readAt),
+        width,
+      )
     }
     const lines: string[] = []
     if (snap.readError) lines.push(`read failed: ${snap.readError}`)
@@ -406,10 +439,22 @@ export const register: Register = on => {
       if (!snap.readError) lines.push('reading...')
     } else if (slug !== null) {
       if (tab === 'tasks') {
-        lines.push(...(active.length ? active.map(r => taskLine(r, width)) : ['no tasks']))
+        const evidence = showEvidence(active, width)
+        lines.push(
+          ...(active.length
+            ? active.map(r => taskLine(r, width, snap.readAt, evidence))
+            : ['no tasks']),
+        )
       } else if (tab === 'done') {
         if (snap.archived.slug !== slug) lines.push('reading...')
-        else lines.push(...(done.length ? done.map(r => taskLine(r, width)) : ['no finished tasks']))
+        else {
+          const evidence = showEvidence(done, width)
+          lines.push(
+            ...(done.length
+              ? done.map(r => taskLine(r, width, snap.readAt, evidence))
+              : ['no finished tasks']),
+          )
+        }
       } else {
         if (ghError) {
           lines.push(

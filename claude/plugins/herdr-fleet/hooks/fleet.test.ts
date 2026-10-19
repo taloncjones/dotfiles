@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ciCell } from './fleet'
+import { age, ciCell, fitTitle, labelTitle, repoName } from './fleet'
+import { LABEL_CASES } from './label-cases'
 
 const ROOT = '/h/.claude/herdr-orch'
 const GH = ['gh', 'pr', 'list', '--state', 'open', '--json',
@@ -22,6 +23,8 @@ type World = {
   opened: string[]
   logs: string[]
   repoFails: boolean
+  root: string
+  reads: string[]
   openFails: boolean
 }
 
@@ -29,11 +32,12 @@ function newWorld(files: Record<string, string> = {}): World {
   return {
     files, ghosts: [], gh: OK, ghGate: null, readGate: null,
     runs: [], running: 0, maxRunning: 0, opened: [], logs: [], repoFails: false, openFails: false,
+    root: '/repo', reads: [],
   }
 }
 
-function owner(slug: string): Record<string, string> {
-  return { [`${ROOT}/${slug}/owner.json`]: JSON.stringify({ session_id: 'sess' }) }
+function owner(slug: string, fence?: number): Record<string, string> {
+  return { [`${ROOT}/${slug}/owner.json`]: JSON.stringify({ session_id: 'sess', fence }) }
 }
 
 function task(slug: string, id: string, over: object = {}, sidecars: Record<string, object> = {}) {
@@ -58,7 +62,7 @@ function stub(on: any, w: World) {
   on('session.id', () => ({ value: 'sess' }))
   on('session.repo', (_$: any, e: any, next: any) => {
     if (w.repoFails) return next(e)
-    return { value: { root: '/repo', remote: null } }
+    return { value: { root: w.root, remote: null } }
   })
   on('ui.open', (_$: any, e: any) => {
     w.opened.push(e.id)
@@ -84,6 +88,7 @@ function stub(on: any, w: World) {
     }
   })
   on('fs.read', async (_$: any, e: any, next: any) => {
+    w.reads.push(e.path)
     if (!(e.path in w.files)) return next(e)
     const text = w.files[e.path]
     const g = w.readGate
@@ -135,7 +140,7 @@ test('task row shows every field with matching evidence', async ($, on) => {
   const w = newWorld({
     ...owner('a'),
     ...task('a', 't1', {
-      workers: [{ agent: 'impl-x', phase: 'implement' }],
+      workers: [{ agent: 'impl-x', phase: 'implement', status: 'launched', started_ns: 1e15 }],
       pr_number: 12, ship_launch_id: 'L1',
     }, {
       'tasks/t1.done.json': { head_sha: 'abcdef0123', dirty: true },
@@ -145,7 +150,7 @@ test('task row shows every field with matching evidence', async ($, on) => {
   const clock = stub(on, w)
   await boot($, clock)
   const text = (await lines(await pane($))).join('\n')
-  for (const part of ['t1', 'in-progress', 'impl-x', 'implement', 'abcdef0', '#12', 'ship:APPROVE', 'dirty']) {
+  for (const part of ['t1', 'in-progress', 'impl-x', 'working', 'abcdef0', '#12', 'ship:APPROVE', 'dirty']) {
     expect(text).toContain(part)
   }
 })
@@ -155,7 +160,7 @@ test('bare record shows dash defaults', async ($, on) => {
   const clock = stub(on, w)
   await boot($, clock)
   const text = (await lines(await pane($))).join('\n')
-  expect(text).toMatch(/t1\s+in-progress\s+-\s+-\s+-\s+-\s+-/)
+  expect(text).toMatch(/t1\s+in-progress\s+-\s*$/)
 })
 
 test('older-head evidence is marked and dirty is hidden', async ($, on) => {
@@ -332,7 +337,10 @@ test('/fleet opens the pane and summarises', async ($, on) => {
   const clock = stub(on, w)
   await boot($, clock)
   const result = await command($)
-  expect(result.text).toBe('fleet: 1 active, 1 done, 1 PRs (1 draft)')
+  const [first, ...detail] = result.text.split('\n')
+  expect(first).toBe('fleet: 1 active, 1 done, 1 PRs (1 draft)')
+  expect(detail.join('\n')).toContain('lease a | gh /repo')
+  expect(detail.join('\n')).toContain('t1')
   expect(w.opened).toContain('herdr-fleet')
 })
 
@@ -392,14 +400,14 @@ test('a lease change never draws the old lease archive under the new one', async
   await clock.advance(300000)
   delete w.files[`${ROOT}/a/owner.json`]
   await clock.advance(15000)
-  Object.assign(w.files, owner('b'))
+  Object.assign(w.files, owner('b', 2))
   await clock.advance(15000)
   release()
   await clock.settle()
   const ui = await pane($)
   await ui.press({ key: 'tab-done' })
   const text = (await lines(ui)).join('\n')
-  expect(text).toContain('lease b')
+  expect(text).toContain('fence 2')
   expect(text).not.toContain('from-a')
 })
 
@@ -420,7 +428,7 @@ test('reload fence: an older read finishing later does not publish', async ($, o
   const ui = await pane($)
   await ui.press({ key: 'tab-done' })
   const rows = await lines(ui)
-  expect(rows.some(line => line.startsWith('new-item'))).toBe(true)
+  expect(rows.some(line => line.startsWith('new item'))).toBe(true)
   expect(rows.some(line => line.startsWith('item '))).toBe(false)
 })
 
@@ -491,4 +499,360 @@ test('a rejected auto-open is logged once', async ($, on) => {
   await clock.settle()
   expect(w.opened).toEqual(['herdr-fleet'])
   expect(w.logs).toEqual(['herdr-fleet: could not open the pane; run /fleet'])
+})
+
+// The mock clock starts at 0; tests advance it so records can sit in the past.
+const NOW = 3600000
+const ns = (secAgo: number) => (NOW - secAgo * 1000) * 1e6
+const iso = (secAgo: number) => new Date(NOW - secAgo * 1000).toISOString().replace('.000Z', 'Z')
+const worker = (over: object = {}) => ({
+  agent: 'impl-x',
+  phase: 'plan',
+  status: 'launched',
+  launch_id: 'L1',
+  workspace_id: 'w1',
+  started_ns: ns(100),
+  ...over,
+})
+const evt = (secAgo: number, event: string, taskId = 't1') => ({
+  v: 1,
+  ts: iso(secAgo),
+  workspace_id: 'w1',
+  event,
+  task_id: taskId,
+  role: 'plan',
+})
+const events = (...list: object[]) => ({
+  [`${ROOT}/a/workspaces/w1.events.jsonl`]: list.map((item) => JSON.stringify(item)).join('\n'),
+})
+const doneFile = (body: object) => ({
+  [`${ROOT}/a/tasks/t1.done.json`]: JSON.stringify(body),
+})
+
+async function bootAt($: any, clock: any) {
+  await clock.advance(NOW)
+  await boot($, clock)
+}
+
+test('a date-prefixed task id shows its title', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', '2026-10-19-herdr-fleet-rows', {
+      title: 'herdr fleet: Make rows readable',
+    }),
+    ...task('a', '2026-10-18-old-merged', {
+      status: 'merged',
+      title: 'Retire the old thing',
+    }),
+  })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  let rows = await lines(ui)
+  expect(rows.some((line) => line.startsWith('herdr fleet: Make rows readable'))).toBe(true)
+  expect(rows.join('\n')).not.toContain('2026-10-19-herdr')
+  await ui.press({ key: 'tab-done' })
+  rows = await lines(ui)
+  expect(rows.some((line) => line.startsWith('Retire the old thing'))).toBe(true)
+  expect(rows.join('\n')).not.toContain('2026-10-18')
+})
+
+test('a record without a title shows its id without the date', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', '2026-10-19-zsh-fix'),
+    ...task('a', '2026-10-19-only-ids', { title: 'PROJ-1 #4' }),
+    [`${ROOT}/a/tasks/bad.json`]: '{',
+  })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const rows = await lines(await pane($))
+  expect(rows.some((line) => line.startsWith('zsh fix'))).toBe(true)
+  expect(rows.some((line) => line.startsWith('only-ids'))).toBe(true)
+  expect(rows.some((line) => /^bad\.json\s+unreadable/.test(line))).toBe(true)
+})
+
+test('titles match the shared core label cases', () => {
+  expect(LABEL_CASES.length).toBeGreaterThan(0)
+  for (const { task: record, title } of LABEL_CASES) {
+    expect(labelTitle(record)).toBe(title)
+  }
+})
+
+test('a long title is cut at a word boundary', () => {
+  expect(fitTitle('alpha beta gamma delta', 12)).toBe('alpha beta')
+  expect(fitTitle('abcdefghijklmnop', 10)).toBe('abcdefghij')
+  expect(fitTitle('aaaaaaaa: bbbbbbbbbb', 10)).toBe('aaaaaaaa')
+  expect(fitTitle('short', 10)).toBe('short')
+})
+
+test('the header keeps the read clock at 60 columns', async ($, on) => {
+  const slug = 'github-com-x-dotfiles-63a65e11'
+  const w = newWorld({ ...owner(slug, 7), ...task(slug, 't1') })
+  w.root = `/a/b/${'r'.repeat(80)}`
+  const clock = stub(on, w)
+  await boot($, clock)
+  const header = (await lines(await pane($, 60)))[0]
+  expect(header.length).toBeLessThanOrEqual(60)
+  expect(header).toContain('rrrr')
+  expect(header).toContain(' | fence 7 | read ')
+  expect(header).toMatch(/read \d\d:\d\d:\d\d$/)
+  expect(header).not.toContain(slug)
+  expect(header).not.toContain('gh ')
+  expect(repoName('/x/dotfiles', slug)).toBe('dotfiles')
+  expect(repoName(null, slug)).toBe('github-com-x-dotfiles')
+})
+
+test('a plan row shows a live worker cell and no evidence cells', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', {
+      head_sha: null,
+      workers: [worker({ started_ns: ns(30) })],
+    }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const row = (await lines(await pane($))).find((line) => line.startsWith('t1'))!
+  expect(row).toMatch(/^t1\s+in-progress\s+impl-x working 30s\s*$/)
+  expect(w.runs).toEqual([GH])
+})
+
+test('a stop after launch shows idle and a later reprompt shows working', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { workers: [worker()] }),
+    ...events(evt(80, 'stopped')),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
+  expect(await cell()).toMatch(/impl-x idle 1m/)
+
+  Object.assign(
+    w.files,
+    task('a', 't1', {
+      workers: [worker({ reprompts: [{ started_ns: ns(60), status: 'delivered' }] })],
+    }),
+  )
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x working/)
+
+  Object.assign(w.files, events(evt(80, 'stopped'), evt(60, 'stopped')))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x working/)
+
+  Object.assign(
+    w.files,
+    task('a', 't1', {
+      workers: [
+        worker({
+          reprompts: [
+            { started_ns: ns(60), status: 'delivered' },
+            { started_ns: ns(40), status: 'uncertain' },
+          ],
+        }),
+      ],
+    }),
+  )
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x unknown/)
+
+  Object.assign(w.files, events(evt(60, 'stopped'), evt(30, 'stopped')))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x idle/)
+
+  Object.assign(
+    w.files,
+    task('a', 't1', {
+      workers: [worker({ reprompts: [{ started_ns: ns(20), status: 'starting' }] })],
+    }),
+  )
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x unknown/)
+
+  Object.assign(w.files, events(evt(30, 'stopped'), evt(10, 'review-stopped')))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x idle/)
+})
+
+test('a blocked event shows blocked', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { workers: [worker()] }),
+    ...events(evt(50, 'blocked')),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
+  expect(await cell()).toMatch(/impl-x blocked 50s/)
+
+  Object.assign(w.files, events(evt(50, 'blocked'), evt(40, 'stopped', 'other')))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x blocked/)
+
+  Object.assign(w.files, events(evt(50, 'blocked'), evt(50, 'stopped')))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x idle/)
+})
+
+test('a done record shows done only for the current launch', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { workers: [worker()] }),
+    ...doneFile({ launch_id: 'L1', outcome: 'completed', ts: iso(30) }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
+  expect(await cell()).toMatch(/impl-x done 30s/)
+
+  Object.assign(w.files, doneFile({ launch_id: 'L1', outcome: 'paused', ts: iso(30) }))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x paused/)
+
+  Object.assign(w.files, doneFile({ launch_id: 'L0', outcome: 'completed', ts: iso(30) }))
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x working/)
+
+  Object.assign(
+    w.files,
+    doneFile({ launch_id: 'L1', outcome: 'completed', ts: iso(30) }),
+    task('a', 't1', {
+      workers: [worker({ reprompts: [{ started_ns: ns(20), status: 'delivered' }] })],
+    }),
+  )
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x working/)
+
+  Object.assign(
+    w.files,
+    doneFile({ launch_id: 'L1', outcome: 'completed', ts: iso(80) }),
+    task('a', 't1', {
+      workers: [worker({ reprompts: [{ started_ns: ns(70), status: 'uncertain' }] })],
+    }),
+    events(evt(69, 'stopped')),
+  )
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x idle/)
+})
+
+test('rows at 60 columns keep the title, status and live cell', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task(
+      'a',
+      't1',
+      {
+        pr_number: 12,
+        ship_launch_id: 'L1',
+        workers: [worker({ phase: 'implement', started_ns: ns(60) })],
+      },
+      {
+        'artifacts/t1/ship-L1/ship.json': {
+          head_sha: 'abcdef0123',
+          verdict: 'APPROVE',
+        },
+      },
+    ),
+    ...task('a', 't2', {
+      head_sha: null,
+      workers: [worker({ started_ns: ns(60) })],
+    }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const rows = (await lines(await pane($, 60))).filter((line) => /^t[12]\s/.test(line))
+  expect(rows.length).toBe(2)
+  for (const row of rows) {
+    expect(row).toMatch(/^t[12]\s+in-progress\s+impl-x working 1m/)
+    expect(row).not.toContain('#12')
+    expect(row).not.toContain('abcdef0')
+    expect(row).not.toContain('ship:')
+  }
+})
+
+test('ages format at unit boundaries', () => {
+  expect(age(59000)).toBe('59s')
+  expect(age(60000)).toBe('1m')
+  expect(age(3599000)).toBe('59m')
+  expect(age(3600000)).toBe('1h')
+  expect(age((47 * 60 + 59) * 60000)).toBe('47h')
+  expect(age(48 * 3600000)).toBe('2d')
+  expect(age(-1000)).toBe('')
+})
+
+test('an unsafe workspace id or a malformed log line reads no state', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { workers: [worker({ workspace_id: '../x' })] }),
+    [`${ROOT}/a/archive/2026-09/tasks/old.json`]: JSON.stringify({
+      task_id: 'old',
+      status: 'merged',
+      workers: [worker({ workspace_id: 'w9' })],
+    }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
+  expect(w.reads.some((path) => path.includes('events.jsonl'))).toBe(false)
+  expect(await cell()).toMatch(/impl-x working/)
+
+  Object.assign(w.files, task('a', 't1', { workers: [worker()] }))
+  w.files[`${ROOT}/a/workspaces/w1.events.jsonl`] = [
+    '{"v":1,"ts":',
+    'not json',
+    JSON.stringify(evt(50, 'stopped')),
+    '{"v":1,"ts"',
+  ].join('\n')
+  await clock.advance(15000)
+  expect(await cell()).toMatch(/impl-x idle/)
+  expect(w.reads.some((path) => path.endsWith('/workspaces/w1.events.jsonl'))).toBe(true)
+  expect(w.reads.some((path) => path.includes('w9'))).toBe(false)
+})
+
+test('terminal and non-launched rows show the agent alone or the row status', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 'merged1', { status: 'merged', head_sha: null, workers: [worker()] }),
+    ...task('a', 'failed1', {
+      workers: [worker({ status: 'launch_failed', started_ns: ns(120) })],
+    }),
+    ...task('a', 'bare1', { head_sha: null }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const rows = await lines(ui)
+  expect(rows.find((line) => line.startsWith('failed1'))).toMatch(/impl-x launch_failed 2m/)
+  expect(rows.find((line) => line.startsWith('bare1'))).toMatch(/in-progress\s+-\s*$/)
+  await ui.press({ key: 'tab-done' })
+  const merged = (await lines(ui)).find((line) => line.startsWith('merged1'))!
+  expect(merged).toMatch(/merged\s+impl-x\s*$/)
+})
+
+test('a mixed list blanks the evidence cells of a plan row', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', {
+      pr_number: 12,
+      workers: [worker({ phase: 'implement', started_ns: ns(60) })],
+    }),
+    ...task('a', 't2', {
+      head_sha: null,
+      workers: [worker({ started_ns: ns(60) })],
+    }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const rows = await lines(await pane($, 160))
+  const t1 = rows.find((line) => line.startsWith('t1'))!
+  const t2 = rows.find((line) => line.startsWith('t2'))!
+  expect(t1).toContain('abcdef0')
+  expect(t1).toContain('#12')
+  expect(t2.trimEnd().endsWith('working 1m')).toBe(true)
 })
