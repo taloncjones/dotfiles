@@ -355,10 +355,11 @@ echo $! >"$RUN_DIR/verifier.pid"
 
 Launch the Claude runner seat first (full tier: before spawning the native
 seats), then check `$RUN_DIR/<seat>.runtime.json` in short shell calls
-until it is non-empty or the 1200-second deadline passes; never hold one
+until it is non-empty or the `$SEAT_SECS` deadline (1200 seconds, 270 under the
+small tier) passes; never hold one
 shell call open in a blocking `wait`. `nohup` keeps the seat alive after the
 launching call ends, and the runner leaves an inherited ignored SIGHUP alone.
-After the 1200-second deadline plus a 60-second grace, only when the JSON is
+After the `$SEAT_SECS` deadline plus a 60-second grace, only when the JSON is
 still empty, `kill -0 "$(cat "$RUN_DIR/<seat>.pid")"` succeeds and
 `ps -o command= -p` for that pid still shows this seat's prompt file, send it SIGTERM; the
 runner reaps the seat and writes a `runner-interrupted` result. Remove the

@@ -95,12 +95,17 @@ def delta_stats(text: str) -> dict | None:
         return None
     added = removed = 0
     binary = submodule = new_file = deleted_file = False
-    in_hunk = False
-    for line in text.split("\n"):
+    in_hunk = malformed = False
+    section_hunks = section_changes = 0
+    for line in text.split("\n") + [_HEADER]:
         if line.startswith(_HEADER):
+            # A hunk section with no +/- line is not a plain unified diff.
+            malformed = malformed or (section_hunks > 0 and section_changes == 0)
             in_hunk = False
+            section_hunks = section_changes = 0
         elif line.startswith("@@"):
             in_hunk = True
+            section_hunks += 1
         elif not in_hunk:
             if line.startswith(("Binary files ", "GIT binary patch")):
                 binary = True
@@ -108,19 +113,26 @@ def delta_stats(text: str) -> dict | None:
                 new_file = True
             elif line.startswith("deleted file mode "):
                 deleted_file = True
+            elif line.startswith(("+", "-")) and not line.startswith(("--- ", "+++ ")):
+                malformed = True
             if line.startswith(_MODE_LINES) and line.endswith(" 160000"):
                 submodule = True
         elif line.startswith("+"):
             added += 1
+            section_changes += 1
             submodule = submodule or line.startswith("+Subproject commit ")
         elif line.startswith("-"):
             removed += 1
+            section_changes += 1
+        elif line and line[0] not in " \\":
+            malformed = True
     classes = {path_class(path) for path in paths}
     if submodule:
         classes.add("submodule")
     return {"files": len(paths), "added": added, "removed": removed,
             "paths": paths, "classes": sorted(classes), "binary": binary,
-            "new_files": new_file, "deleted_files": deleted_file}
+            "new_files": new_file, "deleted_files": deleted_file,
+            "malformed": malformed}
 
 
 def delta_class(stats: dict | None, max_files: int, max_lines: int) -> dict:
@@ -135,6 +147,8 @@ def delta_class(stats: dict | None, max_files: int, max_lines: int) -> dict:
         reasons.append(f"{lines} changed lines exceed max_lines {max_lines}")
     if stats["binary"]:
         reasons.append("delta has a binary change")
+    if stats["malformed"]:
+        reasons.append("delta diff is not a plain unified diff")
     reasons.extend(f"delta touches a {name} path" for name in BLOCKING_CLASSES
                    if name in stats["classes"])
     return {"eligible": not reasons, "reasons": reasons}
@@ -175,6 +189,8 @@ def small_class(stats: dict | None, small: dict) -> dict:
         reasons.append("diff adds or deletes a file")
     if stats["binary"]:
         reasons.append("diff has a binary change")
+    if stats["malformed"]:
+        reasons.append("diff is not a plain unified diff")
     reasons.extend(f"diff touches a {name} path" for name in BLOCKING_CLASSES
                    if name in stats["classes"])
     for path in stats["paths"]:

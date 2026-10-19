@@ -2381,6 +2381,15 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
             "brief_path": brief["brief_path"], "head_sha": head, "follow_up": follow_up}
 
 
+def _last_ship_verdict(rd, task_id, task):
+    """Verdict of the task's newest recorded ship handoff on any head, or None."""
+    handoffs = []
+    for launch in core.ship_handoff_launches(rd, task_id, task):
+        handoffs.append(core.read_ship_handoff(core.ship_launch_dir(rd, task_id, launch), launch))
+    handoffs = [h for h in handoffs if h]
+    return max(handoffs, key=lambda h: str(h.get("written_at"))).get("verdict") if handoffs else None
+
+
 def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
                         focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
     if runtime != "claude":
@@ -2413,6 +2422,8 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
             raise DispatchError("relaunch budget spent for this head; park the task")
         if tier == "delta":
             raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
+        tier = "full"
+    elif _last_ship_verdict(rd, task_id, task) not in (None, "APPROVE"):
         tier = "full"
     ws = impl.get("workspace_id") or ""
     fenced = ("--session", session, "--fence", str(fence))

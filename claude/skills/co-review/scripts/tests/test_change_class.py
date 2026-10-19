@@ -205,3 +205,30 @@ class SmallTierTests(unittest.TestCase):
                   "+y\rdiff --git a/tests/x b/tests/x\n")
         self.assertEqual(cc.paths_from_diff(forged), ["src/a.py"])
         self.assertEqual(tier(forged), "full")
+
+
+class MalformedDiffTests(unittest.TestCase):
+    def test_diff_without_hunk_headers_is_full(self):
+        diff = tier_text("src/a.py") + tier_text("tests/test_a.py")
+        no_hunks = "".join(line + "\n" for line in diff.split("\n") if not line.startswith("@@"))
+        self.assertEqual(cc.tier_of(diff), "small")
+        self.assertEqual(cc.tier_of(no_hunks), "full")
+        self.assertTrue(cc.delta_stats(no_hunks)["malformed"])
+        self.assertIn("delta diff is not a plain unified diff",
+                      cc.delta_class(cc.delta_stats(no_hunks), 5, 150)["reasons"])
+
+    def test_word_diff_form_is_full(self):
+        word = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n"
+                "[-old-]{+new+}\n"
+                "diff --git a/tests/test_a.py b/tests/test_a.py\n--- a/tests/test_a.py\n"
+                "+++ b/tests/test_a.py\n@@ -1 +1 @@\n[-old-]{+new+}\n")
+        self.assertEqual(cc.tier_of(word), "full")
+        self.assertEqual(cc.delta_stats(word)["added"], 0)
+
+    def test_hunk_section_without_changes_is_malformed(self):
+        empty = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n context\n")
+        self.assertTrue(cc.delta_stats(empty)["malformed"])
+
+
+def tier_text(path: str) -> str:
+    return hunk(path)

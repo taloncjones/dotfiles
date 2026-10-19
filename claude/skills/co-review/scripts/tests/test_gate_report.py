@@ -254,6 +254,21 @@ class GateReportTests(unittest.TestCase):
                 self._small(caps=caps)
                 self.assertIn(reason, self.verdict()["reasons"])
 
+    def test_small_claim_over_a_malformed_diff_is_refused(self):
+        no_hunks = "".join(line + "\n" for line in SMALL_DIFF.split("\n") if not line.startswith("@@"))
+        word_diff = SMALL_DIFF.replace("\n-", "\n[-").replace("\n+", "\n{+")
+        for label, diff in (("no hunk headers", no_hunks), ("word diff", word_diff)):
+            with self.subTest(label):
+                self._small(diff)
+                result = self.verdict()
+                self.assertIn("class small does not match the frozen diff", result["reasons"])
+                self.assertEqual((result["verdict"], result["escalate"]), ("INCOMPLETE", "full"))
+
+    def test_small_report_with_a_small_block_is_refused(self):
+        self._small()
+        self.report["small"] = dict(SMALL_CAPS)
+        self.assertIn("small report carries a small block", self.verdict()["reasons"])
+
     def test_small_block_on_another_class_is_refused(self):
         self.expected["small"] = dict(SMALL_CAPS)
         self.assertIn("small block on a non-small class", self.verdict()["reasons"])

@@ -624,8 +624,9 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     small_valid = tier == "small" and _load_change_class().small_caps_error(small) is None
     if tier == "small" and not small_valid:
         reasons.append("small caps are invalid")
-    elif tier != "small" and ("small" in expected or "small" in report):
-        reasons.append("small block on a non-small class")
+    elif "small" in report or (tier != "small" and "small" in expected):
+        reasons.append("small block on a non-small class" if tier != "small"
+                       else "small report carries a small block")
     if (isinstance(tier, str) and tier in _DIFF_CLASSES and (tier != "small" or small_valid)
             and not _diff_class_ok(report.get("preconditions"), artifact_root, tier, small)):
         reasons.append(f"class {tier} does not match the frozen diff")
