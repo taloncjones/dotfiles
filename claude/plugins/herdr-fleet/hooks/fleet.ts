@@ -21,7 +21,8 @@ const CI_IGNORED = new Set(['SKIPPED', 'NEUTRAL'])
 type Json = Record<string, unknown>
 
 export type ShipHandoff = { head_sha?: unknown; verdict?: unknown } | null
-export type DoneRecord = { head_sha?: unknown; dirty?: unknown } | null
+export type DoneRecord = Json | null
+export type EventLines = Json[] | null
 
 /** Task records are `*.json` with no dot in the stem; dotted stems are sidecars. */
 export function isRecordName(name: string): boolean {
@@ -63,20 +64,128 @@ export function shipVerdict(
   return review ? `review:${review}` : '-'
 }
 
-/** Builds one row from a parsed record; `ship` and `done` are sidecars or null. */
+const LABEL_IDS = /\b[A-Z][A-Z0-9]+-\d+\b|#\d+/g
+const LABEL_TRIM = /^[ \-:|,;.]+|[ \-:|,;.]+$/g
+
+/** TypeScript port of herdr_orch_core._label_title; label-cases.ts keeps the two in step. */
+export function labelTitle(record: Json): string {
+  const raw = record.title
+  const fallback = typeof raw !== 'string' || !raw.trim()
+  let title = fallback
+    ? String(record.task_id ?? '').replace(/^\d{4}-\d{2}-\d{2}-/, '')
+    : (raw as string)
+  title = title.replace(LABEL_IDS, ' ')
+  if (fallback) title = title.replace(/[-_]+/g, ' ')
+  title = title.replace(/[\u0000-\u001f\u007f]/g, ' ')
+  return title.split(/\s+/).filter(Boolean).join(' ').replace(LABEL_TRIM, '')
+}
+
+/** The cut core.task_label applies: last space if it keeps half the width, else hard. */
+export function fitTitle(title: string, width: number): string {
+  if (title.length <= width) return title
+  const cut = title.lastIndexOf(' ', width)
+  const head = 2 * cut >= width ? title.slice(0, cut) : title.slice(0, width)
+  return head.replace(/[ \-:|,;.]+$/, '')
+}
+
+export function repoName(root: string | null, slug: string): string {
+  const base = root ? root.replace(/\/+$/, '').split('/').pop() : ''
+  return base || slug.replace(/-[0-9a-f]{8}$/, '')
+}
+
+export function age(ms: number | null): string {
+  if (ms === null || ms < 0) return ''
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`
+  if (sec < 48 * 3600) return `${Math.floor(sec / 3600)}h`
+  return `${Math.floor(sec / 86400)}d`
+}
+
+/** The workspace whose event log tells whether the last worker is moving; null when unsafe. */
+export function eventsWorkspace(record: Json): string | null {
+  const workers = Array.isArray(record.workers) ? record.workers : []
+  const id = str(((workers[workers.length - 1] ?? {}) as Json).workspace_id)
+  return id !== null && /^[A-Za-z0-9]+$/.test(id) ? id : null
+}
+
+export function parseEvents(text: string): Json[] {
+  return text.split('\n').flatMap(line => {
+    const event = parseJson(line)
+    return event ? [event] : []
+  })
+}
+
+const noWorker = { agent: '-', state: '', since: null }
+
+function nsToMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value / 1e6 : null
+}
+
+function isoMs(value: unknown): number | null {
+  const ms = typeof value === 'string' ? Date.parse(value) : NaN
+  return Number.isNaN(ms) ? null : ms
+}
+
+const sec = (ms: number) => Math.floor(ms / 1000)
+
+/** Worker state from the record, its done record and its event log (R6). */
+function liveState(
+  id: string,
+  last: Json,
+  done: DoneRecord,
+  events: EventLines,
+): FleetTaskRow['live'] {
+  const agent = str(last.agent) ?? '-'
+  const rowStart = nsToMs(last.started_ns)
+  if (str(last.status) !== 'launched' && str(last.status) !== null) {
+    return { agent, state: String(last.status), since: rowStart }
+  }
+  let start = rowStart
+  let unresolved = false
+  const reprompts = Array.isArray(last.reprompts) ? (last.reprompts as Json[]) : []
+  for (const entry of reprompts) {
+    const at = nsToMs(entry?.started_ns)
+    if (at === null || entry.status === 'failed') continue
+    if (start === null || at >= start) {
+      start = at
+      unresolved = entry.status === 'starting' || entry.status === 'uncertain'
+    }
+  }
+  if (start === null) return { agent, state: 'working', since: null }
+  const startSec = sec(start)
+  const doneAt = done ? isoMs(done.ts) : null
+  if (done && doneAt !== null && done.launch_id === last.launch_id && sec(doneAt) > startSec) {
+    const outcome = str(done.outcome)
+    return { agent, state: !outcome || outcome === 'completed' ? 'done' : outcome, since: doneAt }
+  }
+  for (let i = (events?.length ?? 0) - 1; i >= 0; i--) {
+    const event = (events as Json[])[i]
+    const at = isoMs(event.ts)
+    if (event.task_id !== id || at === null || sec(at) <= startSec) continue
+    if (event.event === 'blocked') return { agent, state: 'blocked', since: at }
+    if (event.event === 'stopped' || event.event === 'review-stopped') {
+      return { agent, state: 'idle', since: at }
+    }
+  }
+  return { agent, state: unresolved ? 'unknown' : 'working', since: start }
+}
+
+/** Builds one row from a parsed record; `ship`, `done` and `events` are sidecars or null. */
 export function taskRow(
   name: string,
   record: Json | null,
   done: DoneRecord,
   ship: ShipHandoff,
+  events: EventLines = null,
 ): FleetTaskRow {
   const id = name.slice(0, -5)
   if (!record) {
     return {
       id: name,
+      title: name,
       status: 'unreadable',
-      agent: '-',
-      phase: '-',
+      live: noWorker,
       head: '-',
       pr: '-',
       prNumber: null,
@@ -87,25 +196,56 @@ export function taskRow(
     }
   }
   const status = str(record.status) ?? '-'
+  const taskId = str(record.task_id) ?? id
   const workers = Array.isArray(record.workers) ? record.workers : []
-  const last = (workers[workers.length - 1] ?? {}) as Json
+  const last = workers[workers.length - 1] as Json | undefined
+  const isTerminal = TERMINAL.has(status)
+  let live = noWorker
+  if (last && typeof last === 'object') {
+    live = isTerminal
+      ? { agent: str(last.agent) ?? '-', state: '', since: null }
+      : liveState(taskId, last, done, events)
+  }
   const prNumber = typeof record.pr_number === 'number' ? record.pr_number : null
   const head = str(record.head_sha)
   const isDirty =
     done !== null && done.dirty === true && str(done.head_sha) === head
   return {
-    id: str(record.task_id) ?? id,
+    id: taskId,
+    title:
+      labelTitle({ ...record, task_id: taskId }) ||
+      taskId.replace(/^\d{4}-\d{2}-\d{2}-/, '') ||
+      taskId,
     status,
-    agent: str(last.agent) ?? '-',
-    phase: str(last.phase) ?? '-',
+    live,
     head: sha7(head),
     pr: prNumber === null ? '-' : `#${prNumber}`,
     prNumber,
     branch: str(record.branch),
     verdict: shipVerdict(record, ship),
     isDirty,
-    isTerminal: TERMINAL.has(status),
+    isTerminal,
   }
+}
+
+export function hasEvidence(row: FleetTaskRow): boolean {
+  return row.head !== '-' || row.pr !== '-' || row.verdict !== '-'
+}
+
+/** `<agent> <state> <age>`, with the agent clipped so the state and age survive. */
+export function liveCell(row: FleetTaskRow, readAt: number | null, width: number): string {
+  const { agent, state, since } = row.live
+  const ago = readAt === null || since === null ? '' : age(readAt - since)
+  const tail = [state, ago].filter(Boolean).join(' ')
+  if (!tail) return agent
+  const room = Math.max(1, width - tail.length - 1)
+  return `${plain(agent).slice(0, room)} ${tail}`
+}
+
+/** `<repo> | fence <n> | read <clock>`, clipping the repo name so the clock fits. */
+export function headerLine(name: string, fence: number | null, read: string, width: number): string {
+  const tail = ` | fence ${fence ?? '-'} | read ${read}`
+  return `${plain(name).slice(0, Math.max(1, width - tail.length))}${tail}`
 }
 
 /** Live rows win over archived rows with the same id. */

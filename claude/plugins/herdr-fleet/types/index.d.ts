@@ -2,8 +2,8 @@ export type FleetTab = 'tasks' | 'prs' | 'done'
 export type FleetTaskRow = {
   id: string
   status: string
-  agent: string
-  phase: string
+  title: string
+  live: { agent: string; state: string; since: number | null }
   head: string
   pr: string
   prNumber: number | null
@@ -24,7 +24,7 @@ export type FleetPrRow = {
 export type FleetLease =
   | { kind: 'none' }
   | { kind: 'ambiguous'; slugs: string[] }
-  | { kind: 'held'; slug: string }
+  | { kind: 'held'; slug: string; fence: number | null }
 export type FleetPart<T> = { slug: string | null; rows: T[] }
 export type FleetSnapshot = {
   lease: FleetLease
