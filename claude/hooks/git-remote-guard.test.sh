@@ -254,6 +254,8 @@ case_ "denies remote -v remove (option before subcommand)" deny "git remote -v r
 case_ "denies remote --verbose remove" deny "git remote --verbose remove origin"
 case_ "denies path-qualified git" deny "/usr/bin/git remote remove origin"
 case_ "denies env-prefixed git" deny "env FOO=1 git remote remove origin"
+case_ "denies remote remove after a do keyword" deny "for r in x; do git remote remove origin; done"
+case_ "denies remote remove after a ! keyword" deny "! git remote remove origin"
 case_ "denies sh -c wrapped" deny "sh -c 'git remote remove origin'"
 case_ "denies after a compound" deny "ls && git remote remove origin"
 case_ "allows remote add" allow "git remote add origin x"

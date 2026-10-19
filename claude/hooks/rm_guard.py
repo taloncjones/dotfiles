@@ -10,7 +10,8 @@ therefore misses `rm -rf /*`, `rm -rf ~/*`, `rm -rf $HOME/*`, `rm -rf .git/*`,
 (`sh -c 'rm -rf /*'`), brace-expanded targets (`rm -rf /{,bin}`), and variable
 targets (`rm -rf "$X"`) -- see push_guard.py's docstring for the same class of
 problem with git push. This hook resolves what a literal rule cannot: it
-splits compound commands, unwraps shell/env/nice-style wrappers, shlex-parses
+splits compound commands, skips leading shell keywords (`do`, `then`, `{`, `!`),
+unwraps shell/env/nice-style wrappers, shlex-parses
 each `rm`/`rmdir` invocation, brace-expands and normalizes every target, and
 denies the shapes that are actually catastrophic. A permissionDecision "ask"
 could be auto-approved in auto permission mode, so the hook denies (exit 2)
@@ -102,12 +103,15 @@ def is_env_assignment(tok: str) -> bool:
 
 
 def strip_prefixes(tokens: list[str]) -> list[str]:
+    """Drop leading shell keywords, env assignments and wrapper names."""
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if is_env_assignment(tok):
             i += 1
         elif basename(tok) in PREFIX_WRAPPERS:
+            i += 1
+        elif tok in LEADING_KEYWORDS:
             i += 1
         else:
             break

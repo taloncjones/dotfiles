@@ -95,6 +95,8 @@ mkrepo mixed "$OPSIGN" true https://github.com/o/r.git
 g -C "$FIX/mixed" remote set-url --add --push origin git@github.com:o/r.git
 S="$FIX/signed"
 
+run locked "$S" 'if true; then git commit -m "x"; fi'
+check "locked commit after a then keyword denies" 2
 run locked "$S" 'git commit -m "x"'
 check "locked commit denies" 2
 low=$(printf '%s' "$ERR" | tr 'A-Z' 'a-z')

@@ -401,6 +401,8 @@ hook_case "AC4 mv onto tracked denied" deny Bash "mv $S/note.txt $TR" "$R" "$SID
 hook_case "AC4 mv tracked out of the repo denied (source)" deny Bash "mv $TR $S/saved.txt" "$R" "$SID_A"
 hook_case "AC4 rm of tracked denied (B4)" deny Bash "rm $TR" "$R" "$SID_A"
 hook_case "AC4 rm -rf of a tracked dir denied (B4)" deny Bash "rm -rf $R/dir" "$R" "$SID_A"
+hook_case "AC4 rm of tracked after a do keyword denied" deny Bash "for f in x; do rm $TR; done" "$R" "$SID_A"
+hook_case "AC4 sed -i tracked after a then keyword denied" deny Bash "if true; then sed -i s/a/b/ $TR; fi" "$R" "$SID_A"
 hook_case "AC4 rmdir of a tracked dir denied (B4)" deny Bash "rmdir $R/dir" "$R" "$SID_A"
 hook_case "AC4 sh -c redirect denied" deny Bash "sh -c 'echo x > $TR'" "$R" "$SID_A"
 hook_case "AC4 bash -ec redirect denied (combined flag cluster, B1)" deny Bash "bash -ec 'echo x > $TR'" "$R" "$SID_A"
