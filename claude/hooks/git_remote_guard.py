@@ -857,7 +857,11 @@ def check_command(
         stripped = rm_guard.strip_prefixes(raw)
         overridden = OVERRIDE in raw[: len(raw) - len(stripped)]
         head = rm_guard.basename(stripped[0]) if stripped else ""
-        if head == "cd" and term not in ("|", "&"):
+        if (
+            head == "cd"
+            and term not in ("|", "&")
+            and not rm_guard.skipped_keyword(raw, stripped)
+        ):
             targets = {
                 cd_target(stripped, cwd, home) if literal(cwd) else UNTRUSTED
                 for cwd in ctx["P"]

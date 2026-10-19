@@ -144,6 +144,7 @@ case_deny  "add -A via git -C from the fixture" "$(payload "$X" "git -C $R add -
 case_deny  "subshell cd into the guarded repo" "$(payload "$X" "(cd $R && git add -A)")"
 case_deny  "or-chain: a skipped cd keeps the start cwd possible" "$(payload "$R" "false && cd $X || git add -A")"
 case_deny  "or-chain literal pathspec" "$(payload "$R" 'false || git add docs/specs/x.md')"
+case_deny  "keyword-prefixed cd that may not run keeps the start cwd" "$(payload "$R" "if false; then cd $X; fi; git add -A")"
 case_deny  "non-literal cd falls back to the payload cwd" "$(payload "$R" 'cd \"$wt\" && git add -A')"
 case_allow "non-literal cd with a fixture payload cwd" "$(payload "$X" 'cd \"$wt\" && git add -A')"
 case_allow "add -u with no modified protected file" "$(payload "$R" 'git add -u')"

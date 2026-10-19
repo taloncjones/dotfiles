@@ -118,6 +118,12 @@ def strip_prefixes(tokens: list[str]) -> list[str]:
     return tokens[i:]
 
 
+def skipped_keyword(tokens: list[str], stripped: list[str]) -> bool:
+    """True when strip_prefixes dropped a conditional keyword; a cd there may never run."""
+    dropped = tokens[: len(tokens) - len(stripped)]
+    return any(t in LEADING_KEYWORDS and t not in ("{", "!") for t in dropped)
+
+
 def strip_line_comments(command: str) -> str:
     """Remove an unquoted `# ...` through end of line, keeping the newline.
     Quote-aware so a stray apostrophe or quote inside a comment can never
@@ -393,7 +399,8 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
     if cwd is None:
         cwd = real_cwd
     for tokens in split_segments(tokenize(command)):
-        tokens = strip_prefixes(tokens)
+        raw = tokens
+        tokens = strip_prefixes(raw)
         if not tokens:
             continue
         head = basename(tokens[0])
@@ -402,7 +409,8 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
             if reason:
                 return reason
         elif head == "cd":
-            cwd = resolve_cd_target(tokens, cwd, home)
+            if not skipped_keyword(raw, tokens):
+                cwd = resolve_cd_target(tokens, cwd, home)
         elif head in SHELL_WRAPPERS:
             inner = extract_shell_c_arg(tokens)
             if inner is not None:

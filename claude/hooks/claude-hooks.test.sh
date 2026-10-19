@@ -654,6 +654,8 @@ rmg_allows "allows literal rm -rf build after a do keyword" 'for f in a; do rm -
 rmg_allows "allows literal rm -rf build after a then keyword" 'if [ -d build ]; then rm -rf build; fi'
 rmg_allows "allows literal rm -rf ./dist after a { keyword" '{ rm -rf ./dist; }'
 rmg_allows "allows a keyword word as a later argument" 'echo do rm -rf /*'
+rmg_blocks_at "blocks rm -rf * after a conditional cd that may not run" 'if [ -d build ]; then cd build; fi; rm -rf *' "$RMG_HOME"
+rmg_allows_at "allows rm -rf build after a conditional cd that may not run" 'if false; then cd /etc; fi; rm -rf build' "$RMG_HOME"
 if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}' \
         | HOME="$RMG_HOME" "$RMG"; then
     printf 'PASS  rmg: allows non-Bash tool\n'
