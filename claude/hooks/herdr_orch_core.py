@@ -3340,6 +3340,18 @@ def resolve_task_workers(rec, prior, bound):
         "new task workers must be native dispatch rows" if bound
         else "new task workers rows must be objects carrying a phase",
     )
+    if bound:
+        base = rec.get("base_sha")
+        if base is None and isinstance(prior, dict):
+            base = prior.get("base_sha")
+        for row in workers[inherited:]:
+            if row.get("phase") != "review":
+                continue
+            pin = row.get("review_base_sha")
+            _require(isinstance(pin, str) and bool(SHA40_RE.fullmatch(pin))
+                     and pin == base,
+                     "a bound review row must pin the task base_sha as "
+                     "review_base_sha")
     return workers
 
 
@@ -6653,11 +6665,14 @@ def _main(argv=None) -> int:
                             w for w in task.get("workers", [])
                             if isinstance(w, dict) and w.get("phase") == "review"
                         ]
-                        if review_rows and "review_base_sha" in review_rows[-1]:
-                            _require(ns.reviewed_base_sha
-                                     == review_rows[-1]["review_base_sha"],
-                                     "reviewed base does not match the review "
-                                     "row's pinned base")
+                        row_pin = (review_rows[-1].get("review_base_sha")
+                                   if review_rows else None)
+                        _require(isinstance(row_pin, str)
+                                 and bool(SHA40_RE.fullmatch(row_pin)),
+                                 "the review row carries no pinned base")
+                        _require(ns.reviewed_base_sha == row_pin,
+                                 "reviewed base does not match the review "
+                                 "row's pinned base")
                         _require(ns.reviewed_base_sha == task.get("base_sha"),
                                  "reviewed base does not match the dispatched base")
                         done["review_base_sha"] = ns.reviewed_base_sha
