@@ -16,7 +16,7 @@ _HEADER = "diff --git "
 def paths_from_diff(text: str) -> list[str] | None:
     """Changed paths from symmetric `diff --git a/P b/P` headers, or None."""
     paths: list[str] = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line.startswith(_HEADER):
             continue
         rest = line[len(_HEADER):]

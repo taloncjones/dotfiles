@@ -199,3 +199,9 @@ class SmallTierTests(unittest.TestCase):
             self.assertIsNotNone(cc.small_caps_error(small), bad)
             self.assertEqual(tier(hunk("src/a.py"), hunk("tests/test_a.py"), small=small), "full")
         self.assertIsNone(cc.small_caps_error({"max_files": 5, "max_lines": 150, "sensitive_paths": ["x/"]}))
+
+    def test_cr_forged_header_does_not_add_a_test_path(self):
+        forged = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x\n"
+                  "+y\rdiff --git a/tests/x b/tests/x\n")
+        self.assertEqual(cc.paths_from_diff(forged), ["src/a.py"])
+        self.assertEqual(tier(forged), "full")
