@@ -786,6 +786,8 @@ class StopGateTests(unittest.TestCase):
             "launch_id": f"bound-{bid[-4:]}",
             "pane_id": pane,
         }
+        if phase == "review":
+            row["review_base_sha"] = self.base_sha
         (self.rd / "bindings").mkdir(exist_ok=True)
         record = {
             "schema_version": 1,
@@ -859,6 +861,87 @@ class StopGateTests(unittest.TestCase):
         self.assertIn(f"--binding {bid}", command)
         self.assertIn(f"--reviewed-base-sha {self.base_sha}", command)
         self.assertIn("--reviewer-session '<session>'", command)
+
+    def _rewrite_bound_row(self, base, mutate):
+        path = base / "tasks" / f"{self.task_id}.json"
+        task = json.loads(path.read_text())
+        mutate(task)
+        path.write_text(json.dumps(task))
+
+    def test_bound_review_emitter_names_the_pinned_review_base(self):
+        old, new = "a" * 40, "b" * 40
+        _bid, base, _row = self._bound_fixture(phase="review")
+        def mutate(task):
+            task["workers"][-1]["review_base_sha"] = old
+            task["base_sha"] = new
+        self._rewrite_bound_row(base, mutate)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "refuse")
+        self.assertIn(f"--reviewed-base-sha {old}", result["command"])
+        self.assertNotIn(new, result["command"])
+
+    def test_bound_review_without_pinned_base_offers_no_command(self):
+        _bid, base, _row = self._bound_fixture(phase="review")
+        self._rewrite_bound_row(
+            base, lambda task: task["workers"][-1].pop("review_base_sha")
+        )
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "refuse")
+        self.assertIsNone(result["command"])
+
+    def test_bound_review_with_malformed_pin_offers_no_command(self):
+        for name, value in (("39 hex", "a" * 39), ("non-string", 12345)):
+            with self.subTest(name):
+                _bid, base, _row = self._bound_fixture(phase="review")
+                self._rewrite_bound_row(
+                    base,
+                    lambda task, v=value: task["workers"][-1].update(review_base_sha=v),
+                )
+                with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+                    result = gate.evaluate(self._payload(), native=True)
+
+                self.assertEqual(result["action"], "refuse")
+                self.assertIsNone(result["command"])
+
+    def _bound_review_stop(self, record_pin, row_mutate=None):
+        _bid, base, row = self._bound_fixture(phase="review")
+        if row_mutate:
+            self._rewrite_bound_row(base, row_mutate)
+        overrides = {"outcome": "approved", "reviewed_head_sha": self.head_sha}
+        if record_pin is not None:
+            overrides["review_base_sha"] = record_pin
+        self._bound_done(base, row, **overrides)
+        (base / "tasks" / f"{self.task_id}.review.json").write_text(
+            (base / "tasks" / f"{self.task_id}.done.json").read_text()
+        )
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-5"}):
+            return gate.evaluate(self._payload(), native=True)
+
+    def test_bound_review_stop_refused_when_record_pin_is_absent(self):
+        result = self._bound_review_stop(None)
+        self.assertEqual(result["action"], "refuse")
+
+    def test_bound_review_stop_refused_when_record_pin_is_malformed(self):
+        result = self._bound_review_stop("bad")
+        self.assertEqual(result["action"], "refuse")
+
+    def test_bound_review_stop_refused_when_record_pin_differs_from_row(self):
+        result = self._bound_review_stop("c" * 40)
+        self.assertEqual(result["action"], "refuse")
+
+    def test_bound_review_stop_refused_when_row_has_no_pin(self):
+        result = self._bound_review_stop(
+            self.base_sha, lambda task: task["workers"][-1].pop("review_base_sha")
+        )
+        self.assertEqual(result["action"], "refuse")
+
+    def test_bound_review_stop_allowed_when_record_pin_matches_row(self):
+        result = self._bound_review_stop(self.base_sha)
+        self.assertEqual(result, {"action": "allow"})
 
     def test_unclaimed_foreign_or_superseded_binding_pane_is_released(self):
         cases = {

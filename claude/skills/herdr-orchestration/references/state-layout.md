@@ -26,9 +26,10 @@ sha256(workspace_root). Lead leases coexist with the launcher lease and with
 each other; the launcher lease alone remains one-per-repository. A lead lease
 is claimable only through a launcher-issued dispatch binding whose expected
 session, account, runtime, repository, and workspace all match; a binding
-whose parent is not a launcher is unclaimable (two tiers only). Lead dispatch
-remains inactive until the procedure slice lands; nothing in the current skill
-issues bindings.
+whose parent is not a launcher is unclaimable (two tiers only). The
+director-side procedure is in `task-leads.md`. A bound review row carries
+`review_base_sha`, the task's `base_sha` at reservation; only `reserve-dispatch`
+writes it and `enrich-dispatch` refuses it.
 
 The orch-edit guard reads these records read-only (no lock) to classify a
 session's role: a launcher-tier `owner.json` blanket-fences the session from

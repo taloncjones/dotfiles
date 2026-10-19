@@ -202,15 +202,15 @@ for bad in (None, 12345, [], object()):
 sys.exit(0)
 PY
 
-check "shipped SKILL.md declares exactly one marker at capability 0" <<PY
+check "shipped SKILL.md declares exactly one marker at the required capability" <<PY
 $LOAD
 text = open("claude/skills/herdr-orchestration/SKILL.md", encoding="utf-8").read()
 cap = k.parse_marker(text)
-assert cap == 0, cap
+assert cap == k.REQUIRED_CAPABILITY, cap
 sys.exit(0)
 PY
 
-check "shipped procedure is below the required level, so leads cannot be admitted" <<PY
+check "shipped procedure meets the required level" <<PY
 $LOAD
 text = open("claude/skills/herdr-orchestration/SKILL.md", encoding="utf-8").read()
 cap = k.parse_marker(text)
@@ -218,7 +218,7 @@ cap = k.parse_marker(text)
 # TypeError on py3, so a one-line comparison fails with an error pointing at
 # the test rather than at the file whose marker became unusable.
 assert cap is not None, "shipped SKILL.md has no usable marker"
-assert cap < k.REQUIRED_CAPABILITY, cap
+assert cap >= k.REQUIRED_CAPABILITY, cap
 sys.exit(0)
 PY
 

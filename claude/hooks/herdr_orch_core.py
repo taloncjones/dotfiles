@@ -3351,6 +3351,18 @@ def resolve_task_workers(rec, prior, bound):
         "new task workers must be native dispatch rows" if bound
         else "new task workers rows must be objects carrying a phase",
     )
+    if bound:
+        base = rec.get("base_sha")
+        if base is None and isinstance(prior, dict):
+            base = prior.get("base_sha")
+        for row in workers[inherited:]:
+            if row.get("phase") != "review":
+                continue
+            pin = row.get("review_base_sha")
+            _require(isinstance(pin, str) and bool(SHA40_RE.fullmatch(pin))
+                     and pin == base,
+                     "a bound review row must pin the task base_sha as "
+                     "review_base_sha")
     return workers
 
 
@@ -6138,6 +6150,15 @@ def _main(argv=None) -> int:
                     row[name] = value
             _require(_native_worker_row(row),
                      "reservation is not a native dispatch row")
+            if ns.phase == "review":
+                # Pin the base the reviewer is dispatched against; bound
+                # write-task keeps rows append-only, so the pin outlives a
+                # later base_sha rewrite.
+                pin = prior.get("base_sha")
+                _require(isinstance(pin, str) and bool(SHA40_RE.fullmatch(pin)),
+                         "a review reservation requires a 40-hex base_sha "
+                         "on the task record")
+                row["review_base_sha"] = pin
             workers = prior["workers"]
             identity = _attempt_tuple(row)
             if any(_attempt_tuple(worker) == identity for worker in workers):
@@ -6198,6 +6219,8 @@ def _main(argv=None) -> int:
         # write. A new bound-path fact belongs in the identity tuple or a
         # settlement record, never here.
         _require("reprompts" not in updates, "an enrichment may not name reprompts")
+        _require("review_base_sha" not in updates,
+                 "an enrichment may not name review_base_sha")
         _require(not set(updates) & set(ATTEMPT_FIELDS),
                  "an enrichment may not name an attempt identity field")
         # Record-level keys belong to the task, not to one attempt. A row
@@ -6651,6 +6674,18 @@ def _main(argv=None) -> int:
                                  "a binding-scoped review emit requires "
                                  "--reviewed-base-sha (the base the reviewer "
                                  "reviewed)")
+                        review_rows = [
+                            w for w in task.get("workers", [])
+                            if isinstance(w, dict) and w.get("phase") == "review"
+                        ]
+                        row_pin = (review_rows[-1].get("review_base_sha")
+                                   if review_rows else None)
+                        _require(isinstance(row_pin, str)
+                                 and bool(SHA40_RE.fullmatch(row_pin)),
+                                 "the review row carries no pinned base")
+                        _require(ns.reviewed_base_sha == row_pin,
+                                 "reviewed base does not match the review "
+                                 "row's pinned base")
                         _require(ns.reviewed_base_sha == task.get("base_sha"),
                                  "reviewed base does not match the dispatched base")
                         done["review_base_sha"] = ns.reviewed_base_sha

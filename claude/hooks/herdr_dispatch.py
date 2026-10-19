@@ -730,7 +730,11 @@ def _lifecycle_prompt(
     if suffix == "done":
         command += ["--phase", attempt["phase"], "--base-sha", task["base_sha"]]
     elif binding is not None:
-        command += ["--reviewed-base-sha", task["base_sha"]]
+        final_row = task["workers"][-1] if task.get("workers") else {}
+        pin = final_row.get("review_base_sha") if isinstance(final_row, dict) else None
+        if not isinstance(pin, str) or not core.SHA40_RE.fullmatch(pin):
+            raise DispatchError("bound review row has no pinned review_base_sha")
+        command += ["--reviewed-base-sha", pin]
     context = (
         f"{_attempt_context(prompt, attempt)}"
         f"Publish the final result only with this emitter identity: {shlex.join(command)}. "

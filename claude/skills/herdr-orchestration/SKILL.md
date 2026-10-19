@@ -3,7 +3,7 @@ name: herdr-orchestration
 description: Use to run the director - a Claude-led standing per-repo orchestrator over Herdr that turns a designated Jira ticket or repo todo into a briefed worker session in a worktree workspace, tracks it through a hook-fed event log, and dispatches an independent reviewer before handing back for merge. Preferred launch is `claude --agent director` in a herdr pane; also trigger when the user says "kick off <TASK>", "what's queued", "status", or asks the director or orchestrator to supervise delegated work. Codex participates through bounded UI/prose/review work; requires HERDR_ENV=1.
 ---
 
-<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->
+<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->
 <!-- Exactly ONE capability marker may appear in this file. parse_marker fails
      closed on a duplicate, so pasting a second copy of the line above -- as an
      example, or while documenting the format -- makes procedure_capability

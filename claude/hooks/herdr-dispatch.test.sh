@@ -2966,6 +2966,32 @@ def test_bound_prompt_carries_binding_emitter_and_review_fields():
         fixture.close()
 
 
+def test_bound_review_prompt_names_the_row_pinned_base():
+    old, new = "a" * 40, "b" * 40
+    fixture = LeadFixture()
+    try:
+        head = fixture.lead_context["head"]
+        fixture.write_bound_task(
+            bound_task_record(fixture, fixture.lead_context, review_head_sha=head)
+        )
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = "rev-td-a"
+        fixture.launch(route=claude_route(), phase="review", agent="rev-td-a")
+        task = json.loads(fixture.bound_task_file.read_text())
+        row = task["workers"][-1]
+        assert row["review_base_sha"] == head, row
+        task["base_sha"] = new
+        task["workers"][-1] = {**row, "review_base_sha": old}
+        prompt = herdr_dispatch._lifecycle_prompt(
+            "brief", {**row, "task_id": "td-a", "worktree": task["worktree"], "repo_slug": task["repo_slug"]}, task, fixture.rd / "leads" / fixture.binding, False,
+            approval_mediated=False, binding=fixture.binding,
+        )
+        assert f"--reviewed-base-sha {old}" in prompt, prompt
+        assert new not in prompt, prompt
+    finally:
+        fixture.close()
+
+
 def test_wrong_worktree_rejects_before_attempt_or_start():
     fixture = Fixture()
     try:
@@ -6234,6 +6260,7 @@ for name, test in (
     ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
     ("reprompt refuses a ship launch", test_reprompt_refuses_a_ship_launch),
     ("bound prompt carries the binding emitter and review fields", test_bound_prompt_carries_binding_emitter_and_review_fields),
+    ("test_bound_review_prompt_names_the_row_pinned_base", test_bound_review_prompt_names_the_row_pinned_base),
     ("wrong pane worktree rejects before mutation", test_wrong_worktree_rejects_before_attempt_or_start),
     ("invalid task base SHA rejects before mutation", test_invalid_task_base_sha_rejects_before_attempt_or_start),
     ("task designated linked worktree rejects other checkout", test_task_designated_linked_worktree_rejects_other_checkout),

@@ -189,7 +189,8 @@ def launch_time(entry):
     return parse_ts(value)
 
 
-def record_accepted(rd, task_id, ws, role, entry=None, root=None, task=None):
+def record_accepted(rd, task_id, ws, role, entry=None, root=None, task=None,
+                    binding=None):
     """True iff the role's record exists for this task and workspace, its
     `ts` parses, and matches the latest native attempt exactly. Legacy
     entries keep their timestamp-only compatibility behavior."""
@@ -214,6 +215,14 @@ def record_accepted(rd, task_id, ws, role, entry=None, root=None, task=None):
             task = read_json_object(Path(rd) / "tasks" / f"{task_id}.json", root)
         if not isinstance(task, dict):
             return False
+        if role == "review" and binding is not None:
+            pin = entry.get("review_base_sha")
+            if (
+                not isinstance(pin, str)
+                or not core.SHA40_RE.fullmatch(pin)
+                or rec.get("review_base_sha") != pin
+            ):
+                return False
         return phase in ("plan", "implement", "review") and core.attempt_matches(
             task, rec, phase, ws
         )
@@ -419,12 +428,12 @@ def emit_command(rd, index, ws, task, entry, selection, role, binding=None):
                 head,
             ]
             if binding is not None:
-                base = task.get("base_sha") if isinstance(task, dict) else None
-                if not isinstance(base, str) or not core.SHA40_RE.fullmatch(base):
+                pin = entry.get("review_base_sha")
+                if not isinstance(pin, str) or not core.SHA40_RE.fullmatch(pin):
                     return None
                 command += [
                     "--reviewed-base-sha",
-                    base,
+                    pin,
                     "--reviewer-session",
                     "<session>",
                 ]
@@ -648,7 +657,7 @@ def evaluate(payload, native=False):
     ):
         selection = None
     if (not strict or selection is not None) and record_accepted(
-        base, task_id, ws, role, entry, root, task
+        base, task_id, ws, role, entry, root, task, binding
     ):
         return {"action": "allow"}
     if payload.get("stop_hook_active") is True:
