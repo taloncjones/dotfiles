@@ -610,7 +610,7 @@ EOF
 # the pinned config; strip them (this zsh suite's convention is a HOME
 # sandbox, not env -i, so the strip is explicit).
 ugit() {
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u ZSH \
         -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
         HOME="$TMP/home" GIT_CONFIG_NOSYSTEM=1 \
         GIT_CONFIG_GLOBAL="$TMP/upd-gitconfig" git "$@"
@@ -733,6 +733,79 @@ if [ "$urc" -eq 143 ] && [ ! -f "$TMP/install-ran" ]; then
     pass "unclassified sync exit aborts update before install"
 else
     fail "unclassified sync exit aborts update before install (rc=$urc)"
+fi
+
+# u7-u10. oh-my-zsh upgrade: stub upgrade.sh records ZSH and arguments.
+FAKE_OMZ_DIR="$UPD/omz-fixture"
+mkdir -p "$FAKE_OMZ_DIR/install/common"
+cat >"$FAKE_OMZ_DIR/install/common/repo-sync.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$FAKE_OMZ_DIR/install/install.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$UPDATE_TEST_MARKER"
+EOF
+cat >"$FAKE_OMZ_DIR/install/common/ai-update.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$UPDATE_TEST_MARKER"
+EOF
+OMZ_STUB="$TMP/omz-stub"
+mkdir -p "$OMZ_STUB/tools"
+cat >"$OMZ_STUB/tools/upgrade.sh" <<'EOF'
+#!/usr/bin/env zsh
+print -r -- "ZSH=$ZSH ARGS=$*" >"$OMZ_TEST_MARKER"
+exit ${OMZ_TEST_RC:-0}
+EOF
+
+# u7. runs upgrade.sh with ZSH set and -v minimal, then the installer.
+rm -f "$TMP/install-ran" "$TMP/omz-ran"
+run_update "$FAKE_OMZ_DIR" env ZSH="$OMZ_STUB" OMZ_TEST_MARKER="$TMP/omz-ran"
+if [ "$(cat "$TMP/omz-ran" 2>/dev/null)" = "ZSH=$OMZ_STUB ARGS=-v minimal" ] \
+    && [ -f "$TMP/install-ran" ]; then
+    pass "update() runs the oh-my-zsh upgrade script"
+else
+    fail "update() runs the oh-my-zsh upgrade script"
+fi
+
+# u8. a failing upgrade warns and keeps update green.
+rm -f "$TMP/install-ran" "$TMP/omz-ran"
+run_update "$FAKE_OMZ_DIR" env ZSH="$OMZ_STUB" OMZ_TEST_MARKER="$TMP/omz-ran" OMZ_TEST_RC=1; urc=$?
+if [ "$urc" -eq 0 ] && [ -f "$TMP/install-ran" ] && grep -q '^\[WARNING\].*oh-my-zsh' "$TMP/out"; then
+    pass "update() stays green when the oh-my-zsh upgrade fails"
+else
+    fail "update() stays green when the oh-my-zsh upgrade fails (rc=$urc)"
+fi
+
+# u9. a missing oh-my-zsh is skipped silently.
+rm -f "$TMP/install-ran"
+run_update "$FAKE_OMZ_DIR" env ZSH="$TMP/no-omz"; urc=$?
+if [ "$urc" -eq 0 ] && [ -f "$TMP/install-ran" ] && ! grep -qi 'oh-my-zsh' "$TMP/out"; then
+    pass "update() skips a missing oh-my-zsh without a warning"
+else
+    fail "update() skips a missing oh-my-zsh without a warning (rc=$urc)"
+fi
+
+# u10. --ai scope never touches oh-my-zsh (run_update passes no update args).
+rm -f "$TMP/install-ran" "$TMP/omz-ran"
+env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u ZSH \
+    -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+    HOME="$TMP/home" XDG_CACHE_HOME="$TMP/home/.cache" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/upd-gitconfig" \
+    UPDATE_TEST_MARKER="$TMP/install-ran" ZSH="$OMZ_STUB" OMZ_TEST_MARKER="$TMP/omz-ran" \
+    zsh -f -c "
+        DOTFILEDIR='$FAKE_OMZ_DIR'
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        dotfiles() { cd \"\$DOTFILEDIR\"; }
+        tldr() { :; }
+        cd '$TMP'
+        update --ai
+    " >"$TMP/out" 2>&1
+if [ -f "$TMP/install-ran" ] && [ ! -f "$TMP/omz-ran" ]; then
+    pass "update --ai does not run the oh-my-zsh upgrade script"
+else
+    fail "update --ai does not run the oh-my-zsh upgrade script"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
