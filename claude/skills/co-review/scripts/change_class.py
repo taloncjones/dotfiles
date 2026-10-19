@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 GATE_PREFIXES = (
     "claude/skills/co-review/",
     "codex/skills/co-review/",
@@ -11,6 +13,7 @@ GATE_PREFIXES = (
 )
 LESSONS_PATH = "claude/rules/personal/agent-lessons.md"
 _HEADER = "diff --git "
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
 
 def paths_from_diff(text: str) -> list[str] | None:
@@ -96,15 +99,25 @@ def delta_stats(text: str) -> dict | None:
     added = removed = 0
     binary = submodule = new_file = deleted_file = False
     in_hunk = malformed = False
-    section_hunks = section_changes = 0
-    for line in text.split("\n") + [_HEADER]:
+    section_hunks = section_changes = file_headers = 0
+    old_left = new_left = 0
+    for line in text.removesuffix("\n").split("\n") + [_HEADER]:
+        if line.startswith(_HEADER) or line.startswith("@@"):
+            # Each hunk body must match the counts in its own @@ header.
+            if in_hunk and (old_left, new_left) != (0, 0):
+                malformed = True
         if line.startswith(_HEADER):
             # A hunk section with no +/- line is not a plain unified diff.
             malformed = malformed or (section_hunks > 0 and section_changes == 0)
+            malformed = malformed or (file_headers > 0 and section_hunks == 0)
             in_hunk = False
-            section_hunks = section_changes = 0
+            section_hunks = section_changes = file_headers = 0
         elif line.startswith("@@"):
-            in_hunk = True
+            counts = _HUNK_HEADER.match(line)
+            in_hunk = counts is not None
+            malformed = malformed or counts is None
+            old_left = int(counts.group(1) or 1) if counts else 0
+            new_left = int(counts.group(2) or 1) if counts else 0
             section_hunks += 1
         elif not in_hunk:
             if line.startswith(("Binary files ", "GIT binary patch")):
@@ -113,18 +126,28 @@ def delta_stats(text: str) -> dict | None:
                 new_file = True
             elif line.startswith("deleted file mode "):
                 deleted_file = True
-            elif line.startswith(("+", "-")) and not line.startswith(("--- ", "+++ ")):
+            elif line.startswith(("--- ", "+++ ")) and section_hunks == 0:
+                file_headers += 1
+                malformed = malformed or file_headers > 2
+            elif line.startswith(("+", "-")):
                 malformed = True
             if line.startswith(_MODE_LINES) and line.endswith(" 160000"):
                 submodule = True
         elif line.startswith("+"):
             added += 1
+            new_left -= 1
             section_changes += 1
             submodule = submodule or line.startswith("+Subproject commit ")
         elif line.startswith("-"):
             removed += 1
+            old_left -= 1
             section_changes += 1
-        elif line and line[0] not in " \\":
+        elif line.startswith(" ") or (line == "" and (old_left, new_left) != (0, 0)):
+            old_left -= 1
+            new_left -= 1
+        elif line and line[0] != "\\":
+            malformed = True
+        if old_left < 0 or new_left < 0:
             malformed = True
     classes = {path_class(path) for path in paths}
     if submodule:

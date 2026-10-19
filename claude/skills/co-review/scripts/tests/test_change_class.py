@@ -64,12 +64,18 @@ class ClassifyCliTests(unittest.TestCase):
                          "lessons\n")
 
     def run_cli(self, text: str) -> subprocess.CompletedProcess:
-        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as handle:
-            handle.write(text)
+        with tempfile.NamedTemporaryFile("wb", suffix=".diff", delete=False) as handle:
+            handle.write(text.encode())
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "gate_report.py"), "classify", "--diff", handle.name],
             capture_output=True, text=True, check=False,
         )
+
+    def test_cli_reads_bytes_so_a_cr_forged_header_matches_the_evaluator(self):
+        lessons = header("claude/rules/personal/agent-lessons.md")
+        forged = lessons[:-1] + "\rdiff --git a/src/a.py b/src/a.py\n"
+        self.assertEqual(cc.tier_of(forged), "lessons")
+        self.assertEqual(self.run_cli(forged).stdout, "lessons\n")
 
     def test_cli_prints_light_and_full(self):
         self.assertEqual(self.run_cli(header("README.md")).stdout, "light\n")
@@ -78,7 +84,7 @@ class ClassifyCliTests(unittest.TestCase):
 
 
 def hunk(path: str, added: int = 1, removed: int = 1) -> str:
-    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n"
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{removed} +1,{added} @@\n"
             + "".join(f"-old {n}\n" for n in range(removed))
             + "".join(f"+new {n}\n" for n in range(added)))
 
@@ -224,6 +230,30 @@ class MalformedDiffTests(unittest.TestCase):
                 "+++ b/tests/test_a.py\n@@ -1 +1 @@\n[-old-]{+new+}\n")
         self.assertEqual(cc.tier_of(word), "full")
         self.assertEqual(cc.delta_stats(word)["added"], 0)
+
+    def test_dropped_headers_with_triple_marker_lines_is_full(self):
+        diff = "".join(
+            f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n" + "--- old\n+++ new\n" * 3
+            for p in ("src/a.py", "tests/test_a.py"))
+        self.assertTrue(cc.delta_stats(diff)["malformed"])
+        self.assertEqual(cc.tier_of(diff), "full")
+
+    def test_word_diff_with_one_column_zero_plus_per_file_is_full(self):
+        diff = "".join(
+            f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1,2 +1,2 @@\n"
+            " a [-old-]{+new+} b\n x [-y-]{+z+}\n+extra\n"
+            for p in ("src/a.py", "tests/test_a.py"))
+        self.assertTrue(cc.delta_stats(diff)["malformed"])
+        self.assertEqual(cc.tier_of(diff), "full")
+
+    def test_hunk_counts_must_match_the_body(self):
+        good = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1,2 +1,2 @@\n c\n-x\n+y\n"
+        self.assertFalse(cc.delta_stats(good)["malformed"])
+        for label, bad in (("short", good.replace("-1,2 +1,2", "-1,3 +1,3")),
+                           ("long", good.replace("-1,2 +1,2", "-1 +1")),
+                           ("triple-dash body line", good + "--- z\n")):
+            with self.subTest(label):
+                self.assertTrue(cc.delta_stats(bad)["malformed"])
 
     def test_hunk_section_without_changes_is_malformed(self):
         empty = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n context\n")

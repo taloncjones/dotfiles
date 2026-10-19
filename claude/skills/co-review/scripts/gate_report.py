@@ -1205,7 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if not reasons else 1
     if args.command == "classify":
         try:
-            text = Path(args.diff).read_text(encoding="utf-8", errors="replace")
+            text = Path(args.diff).read_bytes().decode("utf-8", "replace")
         except OSError as error:
             print(json.dumps({"error": str(error)}))
             return 1

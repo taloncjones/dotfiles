@@ -2381,13 +2381,11 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
             "brief_path": brief["brief_path"], "head_sha": head, "follow_up": follow_up}
 
 
-def _last_ship_verdict(rd, task_id, task):
-    """Verdict of the task's newest recorded ship handoff on any head, or None."""
-    handoffs = []
-    for launch in core.ship_handoff_launches(rd, task_id, task):
-        handoffs.append(core.read_ship_handoff(core.ship_launch_dir(rd, task_id, launch), launch))
-    handoffs = [h for h in handoffs if h]
-    return max(handoffs, key=lambda h: str(h.get("written_at"))).get("verdict") if handoffs else None
+def _pinned_ship_handoff(rd, task_id, task):
+    """The ship.json handoff of the row ship_launch_id pins, or None; no other row counts."""
+    pinned_id = task.get("ship_launch_id")
+    launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
+    return core.read_ship_handoff(launch_dir, pinned_id) if launch_dir is not None else None
 
 
 def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
@@ -2423,8 +2421,10 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
         if tier == "delta":
             raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
         tier = "full"
-    elif _last_ship_verdict(rd, task_id, task) not in (None, "APPROVE"):
-        tier = "full"
+    else:
+        handoff = _pinned_ship_handoff(rd, task_id, task)
+        if handoff is not None and handoff.get("verdict") != "APPROVE":
+            tier = "full"
     ws = impl.get("workspace_id") or ""
     fenced = ("--session", session, "--fence", str(fence))
     args = ["--task-id", task_id, "--phase", "ship", "--focus-file", str(focus_file)]
