@@ -141,3 +141,61 @@ class DeltaClassTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def tier(*parts: str, small: dict | None = None) -> str:
+    return cc.tier_of("".join(parts), small)
+
+
+def new_file(path: str) -> str:
+    return (f"diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..2222222\n"
+            f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n")
+
+
+class SmallTierTests(unittest.TestCase):
+    def test_small_inside_caps_at_the_boundary(self):
+        self.assertEqual(tier(hunk("src/a.py"), hunk("tests/test_a.py")), "small")
+        self.assertEqual(tier(hunk("src/a.py"), hunk("src/b.py"), hunk("tests/test_a.py")), "small")
+        self.assertEqual(tier(hunk("src/a.py", added=20, removed=10), hunk("tests/test_a.py", added=10, removed=0)),
+                         "small")
+        self.assertEqual(tier(hunk("docs/x.md"), hunk("src/a.py"), hunk("tests/test_a.py")), "small")
+
+    def test_each_cap_over_by_one_is_full(self):
+        four = (hunk("src/a.py"), hunk("src/b.py"), hunk("src/c.py"), hunk("tests/test_a.py"))
+        self.assertEqual(tier(*four), "full")
+        self.assertEqual(tier(hunk("src/a.py", added=20, removed=10), hunk("tests/test_a.py", added=11, removed=0)),
+                         "full")
+        self.assertEqual(tier(hunk("src/a.py"), hunk("tests/test_a.py"), small={
+            **cc.SMALL_DEFAULTS, "max_files": 1}), "full")
+
+    def test_exclusions_are_full(self):
+        test = hunk("tests/test_a.py")
+        cases = {
+            "new file": (hunk("src/a.py"), new_file("src/b.py"), test),
+            "deleted file": (hunk("src/a.py"), test, "diff --git a/src/b.py b/src/b.py\n"
+                             "deleted file mode 100644\nindex 1..0\n--- a/src/b.py\n+++ /dev/null\n"
+                             "@@ -1 +0,0 @@\n-x\n"),
+            "no test": (hunk("src/a.py"),),
+            "auth path": (hunk("src/auth/login.py"), test),
+            "hook path": (hunk("claude/hooks/guard.py"), test),
+            "ci workflow": (hunk(".github/workflows/ci.yml"), test),
+            "skill text": (hunk("claude/skills/foo/run.py"), test),
+            "instruction file": (hunk("src/CLAUDE.md"), hunk("src/a.py"), test),
+            "security segment": (hunk("src/Security/policy.py"), test),
+            "gate skill": (hunk("claude/skills/co-review/scripts/x.py"), test),
+        }
+        for name, parts in cases.items():
+            self.assertEqual(tier(*parts), "full", name)
+        self.assertEqual(tier(hunk("src/a.py"), test, small={
+            **cc.SMALL_DEFAULTS, "sensitive_paths": ["src/"]}), "full")
+
+    def test_prose_and_lessons_keep_their_tiers_and_caps_are_bounded(self):
+        self.assertEqual(tier(hunk("docs/x.md")), "light")
+        self.assertEqual(tier(hunk(cc.LESSONS_PATH)), "lessons")
+        self.assertEqual(tier(""), "full")
+        for bad in ({"max_files": 6}, {"max_lines": 151}, {"max_files": 0}, {"max_lines": True},
+                    {"sensitive_paths": ["a b"]}, {"sensitive_paths": [""]}, {"sensitive_paths": "src/"}):
+            small = {**cc.SMALL_DEFAULTS, **bad}
+            self.assertIsNotNone(cc.small_caps_error(small), bad)
+            self.assertEqual(tier(hunk("src/a.py"), hunk("tests/test_a.py"), small=small), "full")
+        self.assertIsNone(cc.small_caps_error({"max_files": 5, "max_lines": 150, "sensitive_paths": ["x/"]}))

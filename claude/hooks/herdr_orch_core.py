@@ -811,9 +811,20 @@ def _brief_ship_values(rd, record, ns, head, blocks, config):
         tier = _brief_fill(blocks["ship-tier-delta"], {
             "prior_handoff": ns.prior_handoff, "head_sha": head,
             "delta_files": str(delta.get("max_files", 5)), "delta_lines": str(delta.get("max_lines", 150))})
-    else:
+    elif ns.tier == "full":
         _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
         tier = blocks["ship-tier-full"]
+    else:
+        _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
+        small = {**_co_review_module("change_class").SMALL_DEFAULTS,
+                 **((config.get("ship") or {}).get("small") or {})}
+        error = _co_review_module("change_class").small_caps_error(small)
+        _require(error is None, f"config ship.small is invalid: {error}")
+        prefixes = " ".join(small["sensitive_paths"])
+        tier = _brief_fill(blocks["ship-tier-auto"], {
+            "small_files": str(small["max_files"]), "small_lines": str(small["max_lines"])})
+        if prefixes:
+            tier += f"\nherdr-ship-small-sensitive: {prefixes}"
     task_id = record["task_id"]
     return {"pr_number": str(int(pr)), "pr_repo": f"{owner_repo[0]}/{owner_repo[1]}",
             "live_base_sha": live, "tier-lines": tier,
@@ -837,7 +848,7 @@ def render_brief(rd, record, ns, repo_root):
     blocks = brief_blocks(BRIEF_TEMPLATE_PATH.read_text(encoding="utf-8"))
     needed = (*spec["blocks"], spec["lessons"], "lessons", "opt-in-granted", "opt-in-withheld")
     if ns.phase == "ship":
-        needed += ("ship-tier-full", "ship-tier-delta")
+        needed += ("ship-tier-full", "ship-tier-auto", "ship-tier-delta")
     missing = [name for name in needed if name not in blocks]
     _require(not missing, f"brief template lacks blocks: {', '.join(missing)}")
     worktree, task_id = record["worktree"], record["task_id"]

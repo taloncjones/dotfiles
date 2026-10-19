@@ -217,6 +217,7 @@ class SubstitutesTests(unittest.TestCase):
         self.assertEqual(self.substitutes(only_skeptic, "full").stdout, "breaker\n")
         light = {"probe-claude-skeptic.json": OK_CLAUDE, "probe-codex-reviewer.json": limit(BARE)}
         self.assertEqual(self.substitutes(light, "light").stdout, "codex\n")
+        self.assertEqual(self.substitutes(light, "small").stdout, "codex\n")
         unparseable = {**self.BASE, "probe-codex-reviewer.json": limit(AT, status="unparseable")}
         self.assertEqual(self.substitutes(unparseable, "full").stdout, "codex\n")
 

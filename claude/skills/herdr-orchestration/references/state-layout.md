@@ -393,7 +393,13 @@ section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
 "merge": "auto"}}`. An optional
 `"delta": {"max_files": 5, "max_lines": 150}` (positive ints, those defaults
 when absent) sets the caps the director's delta-tier step (SKILL.md section 6)
-passes to `delta-class` and binds in the ship brief. `push` and `pr` are
+passes to `delta-class` and binds in the ship brief. An optional
+`"small": {"max_files": 3, "max_lines": 40, "sensitive_paths": []}` sets the
+small-tier caps (`ship.small`): positive ints up to 5 files and 150 lines
+(defaults 3 and 40) and path prefixes that force a full gate (no empty
+prefix, no whitespace). `dispatch-gate` renders them as
+`herdr-ship-small-caps:` and `herdr-ship-small-sensitive:` brief lines and
+refuses invalid values. `push` and `pr` are
 booleans defaulting to true; `merge`
 is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
 the owner's confirm). When the block or `merge` is absent, `merge` is

@@ -706,11 +706,13 @@ that agent name, then close that exact pane if it
 remains. Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
-`handoff_state` is `current`, the handoff report has `class` `delta`, and
-its verdict is not `APPROVE`;
+`handoff_state` is `current`, the handoff report has `class` `delta` or `small`, and
+its verdict is not `APPROVE` (rule (c) passes `--tier full`);
 every such relaunch brief carries `herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
 (section 6a step 0 owns it), except rule (c). Dispatch with
 `python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
+Without `--tier` the brief carries `herdr-ship-brief: tier=auto` and the
+small-tier caps from `config.json` `ship.small`; co-review picks the tier.
 Every ship brief is the text `dispatch-gate` renders from the `brief:ship`
 block of `references/brief-template.md`; never hand-write a ship brief or
 copy one from another task.
@@ -780,7 +782,7 @@ check-in report while it holds, with no mutating retry.
 `settle --workspace-id <ship_ws> --launch-id <ship_launch_id>`, flags as
 section 4; `<ship_ws>` is the ship row's `workspace_id`; report non-`settled`.
 
-0. A handoff whose report `class` is `delta` is not handled here:
+0. A handoff whose report `class` is `delta` or `small` is not handled here:
    section 6 rule (c) dispatches a full gate. Current handoff verdict
    `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
    report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff

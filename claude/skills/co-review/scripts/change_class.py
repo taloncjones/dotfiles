@@ -94,7 +94,7 @@ def delta_stats(text: str) -> dict | None:
     if paths is None:
         return None
     added = removed = 0
-    binary = submodule = False
+    binary = submodule = new_file = deleted_file = False
     in_hunk = False
     for line in text.split("\n"):
         if line.startswith(_HEADER):
@@ -104,7 +104,11 @@ def delta_stats(text: str) -> dict | None:
         elif not in_hunk:
             if line.startswith(("Binary files ", "GIT binary patch")):
                 binary = True
-            elif line.startswith(_MODE_LINES) and line.endswith(" 160000"):
+            elif line.startswith("new file mode "):
+                new_file = True
+            elif line.startswith("deleted file mode "):
+                deleted_file = True
+            if line.startswith(_MODE_LINES) and line.endswith(" 160000"):
                 submodule = True
         elif line.startswith("+"):
             added += 1
@@ -115,7 +119,8 @@ def delta_stats(text: str) -> dict | None:
     if submodule:
         classes.add("submodule")
     return {"files": len(paths), "added": added, "removed": removed,
-            "paths": paths, "classes": sorted(classes), "binary": binary}
+            "paths": paths, "classes": sorted(classes), "binary": binary,
+            "new_files": new_file, "deleted_files": deleted_file}
 
 
 def delta_class(stats: dict | None, max_files: int, max_lines: int) -> dict:
@@ -133,3 +138,67 @@ def delta_class(stats: dict | None, max_files: int, max_lines: int) -> dict:
     reasons.extend(f"delta touches a {name} path" for name in BLOCKING_CLASSES
                    if name in stats["classes"])
     return {"eligible": not reasons, "reasons": reasons}
+
+
+# Small tier. Config may tune the caps up to the ceiling (the delta defaults).
+SMALL_DEFAULTS = {"max_files": 3, "max_lines": 40, "sensitive_paths": []}
+SMALL_CEILING = {"max_files": 5, "max_lines": 150}
+INSTRUCTION_FILES = ("SKILL.md", "AGENTS.md", "CLAUDE.md")
+
+
+def small_caps_error(small: object) -> str | None:
+    """Why a small-caps block is unusable, or None when it is valid."""
+    if not isinstance(small, dict):
+        return "small caps must be an object"
+    for key, ceiling in SMALL_CEILING.items():
+        value = small.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= ceiling:
+            return f"{key} must be an integer from 1 to {ceiling}"
+    prefixes = small.get("sensitive_paths")
+    if not isinstance(prefixes, list) or not all(
+            isinstance(p, str) and p and not any(c.isspace() for c in p) for p in prefixes):
+        return "sensitive_paths must be a list of non-empty strings without whitespace"
+    return None
+
+
+def small_class(stats: dict | None, small: dict) -> dict:
+    """Whether a diff qualifies for the small tier, with every reason it does not."""
+    if stats is None:
+        return {"eligible": False, "reasons": ["diff is empty or unparsable"]}
+    reasons = []
+    if stats["files"] > small["max_files"]:
+        reasons.append(f"{stats['files']} files exceed max_files {small['max_files']}")
+    lines = stats["added"] + stats["removed"]
+    if lines > small["max_lines"]:
+        reasons.append(f"{lines} changed lines exceed max_lines {small['max_lines']}")
+    if stats["new_files"] or stats["deleted_files"]:
+        reasons.append("diff adds or deletes a file")
+    if stats["binary"]:
+        reasons.append("diff has a binary change")
+    reasons.extend(f"diff touches a {name} path" for name in BLOCKING_CLASSES
+                   if name in stats["classes"])
+    for path in stats["paths"]:
+        parts = path.split("/")
+        if "skills" in parts or parts[-1] in INSTRUCTION_FILES:
+            reasons.append(f"{path} is skill or agent-instruction text")
+        if any("security" in part.lower() for part in parts):
+            reasons.append(f"{path} is on a security path")
+        if path.startswith(tuple(small["sensitive_paths"])):
+            reasons.append(f"{path} is on a configured sensitive path")
+    if "tests" not in stats["classes"]:
+        reasons.append("diff touches no test")
+    return {"eligible": not reasons, "reasons": reasons}
+
+
+def tier_of(text: str, small: dict | None = None) -> str:
+    """The tier of a frozen diff: lessons, light, small or full, in that precedence."""
+    stats = delta_stats(text)
+    if stats is None:
+        return "full"
+    tier = classify(stats["paths"])
+    if tier != "full":
+        return tier
+    caps = small if small is not None else SMALL_DEFAULTS
+    if small_caps_error(caps) is None and small_class(stats, caps)["eligible"]:
+        return "small"
+    return "full"

@@ -33,6 +33,9 @@ object with exactly these keys:
   test, the owning suite, or an executable probe). Record each command you
   ran in `tests` with its exit code and a one-line result. A failing command
   is still evidence; list it. Never list a command you did not run.
+- Small tier: when the prompt has a `## Small tier` section, it replaces the
+  two rules above and the disposable-copy rule below. Run no test suite, build
+  no copy, and list only read-only inspection commands (or none) in `tests`.
 - Run commands in a disposable copy outside the snapshot root, built with
   `d=$(mktemp -d) && git -C <snapshot root> archive <reviewed tree> | tar -x -C "$d"`,
   or with a command that writes nothing under the snapshot root.

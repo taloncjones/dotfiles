@@ -29,6 +29,7 @@ EXPECTED_PROBES = {
         "probe-claude-skeptic.json",
     ),
     "light": ("probe-codex-reviewer.json", "probe-claude-skeptic.json"),
+    "small": ("probe-codex-reviewer.json", "probe-claude-skeptic.json"),
 }
 SEAT_PROBES = {
     "codex": "probe-codex-reviewer.json",
