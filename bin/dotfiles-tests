@@ -44,6 +44,7 @@ before_state=$(list_state_roots)
 # *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
 SUITES="
 sh install/install.test.sh
+sh install/herdr-manifest.test.sh
 sh bin/remote-access-doctor.test.sh
 sh bin/zed-claude-agent.test.sh
 bash bin/op-env.test.sh

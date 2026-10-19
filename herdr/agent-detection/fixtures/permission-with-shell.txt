@@ -1,0 +1,17 @@
+
+⏺ Bash(sleep 120)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   sleep 120
+   Run a background sleep
+
+ Do you want to proceed?
+ > 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain
+
+  █░░░░░░░░░ 12% │ Sonnet 5.5 │ dotfiles  ⑂ talon/example-branch
+  ⏵⏵ auto mode on · PR #289 · 1 shell · ← 3 agents

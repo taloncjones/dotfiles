@@ -699,7 +699,9 @@ is not the live head) or `current`. The ship agent's herdr name is the
 the launch id itself is longer and does not resolve). It is live only when
 `herdr agent get <that agent>` finds it in state `working`; `idle`, `done`
 or not found (including a launch that never started) is not live, because
-agents stay present after their work ends. Before any dispatch, and
+agents stay present after their work ends. A ship agent waiting on its own
+background shell reads `working` through the dotfiles herdr rule, so it stays
+live. Before any dispatch, and
 whenever `handoff_state` is not `none`, close a pinned ship agent that is
 present but not live, as for review panes: send `esc`, then `/exit` to
 that agent name, then close that exact pane if it

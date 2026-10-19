@@ -172,5 +172,30 @@ else
     fail "update --ai fails on an unfinished sweep after running Codex"
 fi
 
+# herdr detection override: a valid remote cache yields the override; an
+# invalid one fails the run after the later steps ran.
+HM_HOME="$TMP/hm-home"
+mkdir -p "$HM_HOME/.local/state/herdr/agent-detection/remote"
+printf 'id = "claude"\nversion = "1"\n' >"$HM_HOME/.local/state/herdr/agent-detection/remote/claude.toml"
+if env -i HOME="$HM_HOME" PATH="$STUB_BIN" TMPDIR="$TMP" \
+        CODEX_HOME="$HM_HOME/.codex" DOTFILEDIR="$DOTFILEDIR" \
+        bash "$AI_UPDATE" >"$TMP/hm.log" 2>&1 &&
+   head -1 "$HM_HOME/.config/herdr/agent-detection/claude.toml" | grep -qF 'dotfiles-generated'; then
+    pass "update --ai writes the herdr detection override from a valid cache"
+else
+    fail "update --ai writes the herdr detection override from a valid cache (see $TMP/hm.log)"
+fi
+printf 'broken = [\n' >"$HM_HOME/.local/state/herdr/agent-detection/remote/claude.toml"
+rm -f "$HM_HOME/.codex/skills/handoff"
+if env -i HOME="$HM_HOME" PATH="$STUB_BIN" TMPDIR="$TMP" \
+        CODEX_HOME="$HM_HOME/.codex" DOTFILEDIR="$DOTFILEDIR" \
+        bash "$AI_UPDATE" >"$TMP/hm2.log" 2>&1; then
+    fail "update --ai fails on an invalid herdr remote cache after later steps"
+elif grep -qF 'herdr detection override failed' "$TMP/hm2.log" && [ -L "$HM_HOME/.codex/skills/handoff" ]; then
+    pass "update --ai fails on an invalid herdr remote cache after later steps"
+else
+    fail "update --ai fails on an invalid herdr remote cache after later steps"
+fi
+
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

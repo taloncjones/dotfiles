@@ -117,3 +117,6 @@ ln -sf "$DOTFILEDIR"/ghostty/config "$HOME"/.config/ghostty/config
 # (install/common/ai-update.sh). Step list lives in codex-links.sh only.
 source "$DOTFILEDIR"/install/common/codex-links.sh
 link_codex_surfaces
+
+# herdr Claude detection override (background shells count as working).
+python3 "$DOTFILEDIR"/install/common/herdr_manifest.py || echo "[WARNING] herdr manifest step failed"
