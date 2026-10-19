@@ -610,7 +610,7 @@ EOF
 # the pinned config; strip them (this zsh suite's convention is a HOME
 # sandbox, not env -i, so the strip is explicit).
 ugit() {
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u ZSH \
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
         -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
         HOME="$TMP/home" GIT_CONFIG_NOSYSTEM=1 \
         GIT_CONFIG_GLOBAL="$TMP/upd-gitconfig" git "$@"
@@ -637,7 +637,7 @@ ugit -C "$UPD/work" push -q origin main
 # for dotfiles/tldr; staleness cache under the sandbox HOME.
 run_update() {
     updir="$1"; shift
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u ZSH \
         -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
     HOME="$TMP/home" XDG_CACHE_HOME="$TMP/home/.cache" \
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/upd-gitconfig" \
