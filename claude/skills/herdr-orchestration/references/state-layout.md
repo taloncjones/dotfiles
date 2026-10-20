@@ -155,15 +155,15 @@ STATE_ROOT/
   = `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
   Verify uniqueness via `agent list`; each launch also gets a collision-resistant
   launch ID. Names are transport handles, not task identity.
-- Display label: the workspace label is `<state>: <title>` (at most 25
-  characters, no ids), derived from the task record by `core.task_label`
+- Display label: the workspace label is `<title>`, or `? <title>` for an
+  owner wait (at most 25 characters, no ids), derived from the task record by `core.task_label`
   (SKILL.md section 8); director `director:<repo>`. Pane metadata carries
   role/runtime/model/status separately. Stable task and launch IDs stay
   behind the label.
 - **One workspace/worktree per task.** git allows only one worktree per branch,
   so a task's plan -> implement -> review phases all run in the SAME
   worktree-backed workspace (a fresh agent per phase, sequentially). The
-  workspace label follows the task state (`plan`, `impl`, `review`, ...)
+  workspace label follows the task title (`? ` for an owner wait)
   and its index `role` the current phase; there is never a second
   workspace on the same branch.
 

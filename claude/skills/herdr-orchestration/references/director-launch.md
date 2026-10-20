@@ -36,7 +36,7 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
 "$HERDR_WORKSPACE_ID"` -> `.result.workspace.label`). This is display-only
   Herdr state, never repo/worktree state; a worker's own workspace is
   labelled `<task_id>` at `worktree create` (section 2) and then
-  `<state>: <title>` from its task record (section 8, Compact
+  `<title>` (`? <title>` for an owner wait) from its task record (section 8, Compact
   presentation), so no worker is ever left as a generic "Worker N".
 
 ## Inbox socket, launch line and auto-mode classifier (section 1 step 4)

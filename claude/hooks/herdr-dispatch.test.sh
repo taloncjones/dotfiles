@@ -4534,21 +4534,21 @@ def test_state_token_covers_every_status_row():
 LABEL_RENDER_ROWS = (
     # (record fields, expected label)
     ({"task_id": "td-a", "status": "in-progress",
-      "title": "Label herdr workspaces with task state, not just the task id"}, "plan: Label herdr"),
+      "title": "Label herdr workspaces with task state, not just the task id"}, "Label herdr workspaces"),
     ({"task_id": "td-a", "status": "completed",
-      "title": "BESS-3473: HIL smoke tiers (#2567)"}, "review-due: HIL smoke"),
+      "title": "BESS-3473: HIL smoke tiers (#2567)"}, "HIL smoke tiers ( )"),
     ({"task_id": "2026-09-28-label-herdr-workspaces-with-task-state-not-just-the-id",
-      "status": "in-progress"}, "plan: label herdr"),
+      "status": "in-progress"}, "label herdr workspaces"),
     ({"task_id": "BESS-2989", "status": "reviewed", "pr_number": 12}, "co-review"),
     ({"task_id": "td-a", "status": "review-dispatched", "title": "PROJ-1 #4"}, "review"),
     ({"task_id": "td-a", "status": "in-progress",
-      "title": "Supercalifragilisticexpialidocious words"}, "plan: Supercalifragilisti"),
+      "title": "Supercalifragilisticexpialidocious words"}, "Supercalifragilisticexpia"),
     ({"task_id": "td-a", "status": "pr-open-pending-merge",
-      "title": "Fix dropped messages on the device bus"}, "merge?: Fix dropped"),
+      "title": "Fix dropped messages on the device bus"}, "? Fix dropped messages on"),
     ({"task_id": "td-a", "status": "something-very-long-status", "title": "Fix bus"},
-     "something-ve: Fix bus"),
+     "Fix bus"),
     ({"task_id": "td-a", "status": "merged", "title": "Tab\tand\nnewline title"},
-     "merged: Tab and newline"),
+     "Tab and newline title"),
 )
 
 
@@ -4559,8 +4559,32 @@ def test_label_rendering_pins_titles_and_bound():
     long_title = "Word " * 20
     for name, fields, handoff, token in STATE_TOKEN_ROWS:
         got = core.task_label({"task_id": "PROJ-9", "title": long_title, **fields}, handoff)
-        assert len(got) <= core.LABEL_MAX and got.startswith(token), (name, got)
+        assert len(got) <= core.LABEL_MAX and got.startswith("? ") == token.endswith("?"), (name, got)
         assert "PROJ" not in got and "#" not in got, (name, got)
+
+
+def test_label_marks_only_owner_waits():
+    title = "Name herdr workspaces by their task, not their state"
+    impl = {"task_id": "td-a", "status": "in-progress", "title": title,
+            "workers": [label_row("implement")]}
+    assert core.task_label(impl) == "Name herdr workspaces by", core.task_label(impl)
+    reviewed = {"task_id": "td-a", "status": "reviewed", "title": title,
+                "pr_number": 7, "review_head_sha": "S"}
+    approve = {"verdict": "APPROVE", "head_sha": "S"}
+    assert core.task_label(reviewed, approve) == "? Name herdr workspaces"
+    short = {"task_id": "td-a", "title": "Fix bus"}
+    for fields, handoff in (
+        ({"status": "pr-open-pending-merge"}, None),
+        ({"status": "reviewed"}, None),
+        ({"status": "reviewed", "pr_number": 7, "review_head_sha": "S"},
+         {"verdict": "REQUEST_CHANGES", "head_sha": "S"}),
+        ({"status": "reviewed", "pr_number": 7, "review_head_sha": "S"},
+         {"verdict": "APPROVE", "head_sha": "OLD"}),
+    ):
+        assert core.task_label({**short, **fields}, handoff) == "? Fix bus", fields
+    assert core.task_label({**short, "status": "reviewed", "pr_number": 7}) == "Fix bus"
+    assert core.task_label({"task_id": "BESS-2989", "status": "reviewed", "pr_number": 12}) == "co-review"
+    assert core.task_label({"task_id": "BESS-1", "status": "reviewed"}) == "open-pr?"
 
 
 def test_label_target_fallback():
@@ -4582,14 +4606,14 @@ def test_apply_label_applies_once_then_unchanged():
     fx = Fixture()
     try:
         task = label_task(fx)
-        first = core.apply_workspace_label(task, "open-pr?: td a", herdr_cli=str(fx.bin), env=fx.env)
-        assert first == {"status": "applied", "label": "open-pr?: td a",
+        first = core.apply_workspace_label(task, "? td a", herdr_cli=str(fx.bin), env=fx.env)
+        assert first == {"status": "applied", "label": "? td a",
                          "workspace_id": "w1", "reason": None}, first
-        second = core.apply_workspace_label(task, "open-pr?: td a", herdr_cli=str(fx.bin), env=fx.env)
+        second = core.apply_workspace_label(task, "? td a", herdr_cli=str(fx.bin), env=fx.env)
         assert second["status"] == "unchanged", second
         renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
-        assert renames == [["workspace", "rename", "w1", "open-pr?: td a"]], renames
-        assert workspace_labels(fx) == {"w1": "open-pr?: td a"}
+        assert renames == [["workspace", "rename", "w1", "? td a"]], renames
+        assert workspace_labels(fx) == {"w1": "? td a"}
     finally:
         fx.close()
 
@@ -4665,7 +4689,7 @@ def test_present_task_prints_label_without_herdr():
         put_task(fx, "td-a", status="completed", title="HIL smoke tiers")
         out = core_cli(fx, *present_argv(fx, "--task-id", "td-a"))
         assert out.returncode == 0, out.stderr
-        assert out.stdout == "review-due: HIL smoke\n", out.stdout
+        assert out.stdout == "HIL smoke tiers\n", out.stdout
         assert fx.calls() == [], fx.calls()
     finally:
         fx.close()
@@ -4678,11 +4702,11 @@ def test_present_task_apply_renames_under_fence():
         argv = present_argv(fx, "--task-id", "td-a", "--apply", "--session", "S", "--fence", "1")
         out = core_cli(fx, *argv, herdr_on_path=True)
         assert out.returncode == 0, out.stderr
-        assert out.stdout == "open-pr?: Fix bus\n", out.stdout
+        assert out.stdout == "? Fix bus\n", out.stdout
         again = core_cli(fx, *argv, herdr_on_path=True)
         assert again.returncode == 0, again.stderr
         renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
-        assert renames == [["workspace", "rename", "w1", "open-pr?: Fix bus"]], renames
+        assert renames == [["workspace", "rename", "w1", "? Fix bus"]], renames
         write_workspaces(fx, [ws_entry("w1", "td-a", fx.root / "elsewhere")])
         refused = core_cli(fx, *argv, herdr_on_path=True)
         assert refused.returncode == 1, refused
@@ -4926,10 +4950,10 @@ def test_present_all_orders_terminal_first():
             rows = [json.loads(line) for line in out.stdout.splitlines()]
             assert [r["task_id"] for r in rows] == ["td-old", "td-new"], rows
             assert (rows[0]["status"], rows[0]["reason"]) == ("skipped", "superseded"), rows
-            assert workspace_labels(fx) == {"w1": "plan: New work"}, workspace_labels(fx)
+            assert workspace_labels(fx) == {"w1": "New work"}, workspace_labels(fx)
         assert rows[1]["status"] == "unchanged", rows
         renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
-        assert renames == [["workspace", "rename", "w1", "plan: New work"]], renames
+        assert renames == [["workspace", "rename", "w1", "New work"]], renames
     finally:
         fx.close()
 
@@ -4950,11 +4974,11 @@ def test_write_task_present_relabels():
         record = fixture_record(fx, status="reviewed", title="Fix bus", workspace_id="w1")
         out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
         assert out.returncode == 0, out.stderr
-        assert workspace_labels(fx) == {"w1": "open-pr?: Fix bus"}, workspace_labels(fx)
+        assert workspace_labels(fx) == {"w1": "? Fix bus"}, workspace_labels(fx)
         record["pr_number"] = 5
         out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
         assert out.returncode == 0, out.stderr
-        assert workspace_labels(fx) == {"w1": "co-review: Fix bus"}, workspace_labels(fx)
+        assert workspace_labels(fx) == {"w1": "Fix bus"}, workspace_labels(fx)
     finally:
         fx.close()
 
@@ -5003,8 +5027,8 @@ def test_launch_relabels_task_workspace():
     try:
         result = fx.launch()
         assert result["label"]["status"] == "applied", result
-        assert ["workspace", "rename", "w1", "impl: td a"] in fx.calls(), fx.calls()
-        assert workspace_labels(fx) == {"w1": "impl: td a"}
+        assert ["workspace", "rename", "w1", "td a"] in fx.calls(), fx.calls()
+        assert workspace_labels(fx) == {"w1": "td a"}
     finally:
         fx.close()
 
@@ -5077,7 +5101,7 @@ def test_ship_settle_relabels_merge_ready():
         result = fx.settle(ship["launch_id"])
         assert result["status"] == "settled", result
         assert result["label"]["status"] == "applied", result
-        assert workspace_labels(fx) == {"w1": "merge?: Fix bus"}, workspace_labels(fx)
+        assert workspace_labels(fx) == {"w1": "? Fix bus"}, workspace_labels(fx)
     finally:
         fx.close()
 
@@ -6337,6 +6361,7 @@ for name, test in (
     ("launch presentation passes the recorded ttl rule", test_launch_presentation_passes_recorded_ttl_rule),
     ("state token covers every status row", test_state_token_covers_every_status_row),
     ("label rendering pins titles and the 25 char bound", test_label_rendering_pins_titles_and_bound),
+    ("workspace label marks only owner waits", test_label_marks_only_owner_waits),
     ("label target falls back to the launched plan or implement row", test_label_target_fallback),
     ("workspace label applies once then reports unchanged", test_apply_label_applies_once_then_unchanged),
     ("workspace label refuses a checkout-path mismatch", test_apply_label_refuses_checkout_mismatch),
