@@ -1,0 +1,10 @@
+
+⏺ Started the capture in the background.
+
+* Worked for 8s · done 2:23 PM · 2 shells still running
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+> 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  █░░░░░░░░░ 12% │ Sonnet 5.5 │ dotfiles  ⑂ talon/example-branch
+  ⏵⏵ auto mode on · 1 shell, 2 monitors · ← for agents
