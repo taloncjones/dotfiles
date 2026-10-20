@@ -11,6 +11,16 @@ export type FleetTaskRow = {
   verdict: string
   isDirty: boolean
   isTerminal: boolean
+  owner: string | null
+  gateSince: number | null
+  reviewLaunch: string | null
+}
+export type FleetDeadline = {
+  launch: string
+  state: 'running' | 'overdue' | 'expired' | 'unknown'
+  remaining: number | null
+  deadlineSecs: number
+  hardSecs: number
 }
 export type FleetPrRow = {
   number: number
@@ -33,6 +43,7 @@ export type FleetSnapshot = {
   archived: FleetPart<FleetTaskRow>
   prs: (FleetPart<FleetPrRow> & { at: number }) | null
   ghError: { slug: string; reason: string } | null
+  deadlines: { slug: string; at: number; rows: Record<string, FleetDeadline> } | null
   readError: string | null
   readAt: number | null
 }

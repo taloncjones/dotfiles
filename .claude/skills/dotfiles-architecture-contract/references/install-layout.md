@@ -95,4 +95,7 @@ ignores it. `claude/plugins/herdr-fleet/plugin.test.sh` runs `claude plugin
 validate` and `claude plugin test`, and skips when `claude` is not on PATH.
 The mod's CI cell (`hooks/fleet.ts` `ciCell`) copies
 `claude/skills/pr-status/scripts/pr_status.py` `ci_state`/`ci_cell`; change
-both together.
+both together. On the 300 s slow tick the mod runs the core's read-only
+`review-deadlines` verb to draw review countdowns, and `hooks/state-cases.ts`
+keeps its owner-band token port (`ownerToken`) in step with
+`task_state_token`; `plugin.test.sh` checks both.
