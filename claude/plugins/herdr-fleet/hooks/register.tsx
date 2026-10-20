@@ -10,6 +10,7 @@ import type {
 } from '../types'
 import {
   GH_ARGV,
+  GH_LIMIT,
   activeRows,
   clip,
   plain,
@@ -436,7 +437,7 @@ export const register: Register = on => {
     const { slug, live, archived, prs, ghError } = view(snap)
     const done = doneRows(live, archived)
     const active = activeRows(live)
-    const summary = summaryLine(active.length, done.length, prs?.rows ?? [], ghError !== null)
+    const summary = summaryLine(active.length, done.length, prs ? prs.rows : null, ghError !== null)
     const detail =
       slug === null
         ? []
@@ -477,7 +478,7 @@ export const register: Register = on => {
     const done = doneRows(live, archived)
     const tabs: Array<[FleetTab, string, string]> = [
       ['tasks', '1', `tasks (${active.length})`],
-      ['prs', '2', `PRs (${prs.length})`],
+      ['prs', '2', `PRs (${prPart ? prs.length : '?'})`],
       ['done', '3', `done (${done.length})`],
     ]
     let header = NO_LEASE
@@ -520,9 +521,11 @@ export const register: Register = on => {
             }`,
           )
         }
-        if (!prPart && !ghError) say('reading...')
-        else if (prs.length) prs.forEach(r => say(prLine(r, width)))
-        else say('no open PRs')
+        if (!prPart) say(ghError ? 'PR list unknown' : 'reading...')
+        else if (prs.length) {
+          if (prs.length >= GH_LIMIT) say(`showing ${prs.length} (limit reached)`)
+          prs.forEach(r => say(prLine(r, width)))
+        } else say('no open PRs')
       }
     }
 

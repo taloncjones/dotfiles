@@ -1,11 +1,11 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { age, ciCell, fitTitle, labelTitle, ownerToken, repoName } from './fleet'
+import { age, ciCell, fitTitle, labelTitle, ownerToken, repoName, summaryLine } from './fleet'
 import { LABEL_CASES } from './label-cases'
 import { STATE_CASES } from './state-cases'
 
 const ROOT = '/h/.claude/herdr-orch'
-const GH = ['gh', 'pr', 'list', '--state', 'open', '--json',
+const GH = ['gh', 'pr', 'list', '--state', 'open', '--author', '@me', '--json',
   'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision',
   '--limit', '100']
 const OK = { exitCode: 0, stdout: '[]', stderr: '' }
@@ -257,6 +257,35 @@ test('gh rejection shows an unavailable line', async ($, on) => {
   expect(await prsText(await pane($))).toContain('gh unavailable:')
 })
 
+test('a gh error before any read says the PR list is unknown', async ($, on) => {
+  const w = newWorld(owner('a'))
+  w.gh = 'reject'
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  const text = await prsText(ui)
+  expect(text).toContain('gh unavailable:')
+  expect(text).toContain('PR list unknown')
+  expect(text).not.toContain('no open PRs')
+  expect((await ui.find({ key: 'tab-prs' })).props.label).toBe('PRs (?)')
+})
+
+test('a full page of PRs says the limit is reached', async ($, on) => {
+  const w = newWorld(owner('a'))
+  const many = (n: number) => prJson(Array.from({ length: n }, (_, i) => ({
+    number: i + 1, title: `p${i + 1}`, isDraft: false, headRefName: `b${i + 1}`,
+    headRefOid: 'fffffff111', statusCheckRollup: [], reviewDecision: '',
+  })))
+  w.gh = { exitCode: 0, stderr: '', stdout: many(100) }
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  expect(await prsText(ui)).toContain('showing 100 (limit reached)')
+  w.gh = { exitCode: 0, stderr: '', stdout: many(99) }
+  await clock.advance(300000)
+  expect(await prsText(ui)).not.toContain('limit reached')
+})
+
 test('gh non-zero exit keeps the last good list', async ($, on) => {
   const w = newWorld(owner('a'))
   w.gh = { exitCode: 0, stderr: '', stdout: prJson([
@@ -266,10 +295,13 @@ test('gh non-zero exit keeps the last good list', async ($, on) => {
   await boot($, clock)
   w.gh = { exitCode: 1, stderr: 'boom\nsecond line', stdout: '' }
   await clock.advance(300000)
-  const text = await prsText(await pane($))
+  const ui = await pane($)
+  const text = await prsText(ui)
   expect(text).toContain('gh unavailable: boom')
   expect(text).not.toContain('second line')
+  expect(text).toContain('(as of ')
   expect(text).toContain('#3')
+  expect((await ui.find({ key: 'tab-prs' })).props.label).toBe('PRs (1)')
 })
 
 test('gh output that is not an array shows an unavailable line', async ($, on) => {
@@ -362,6 +394,16 @@ test('/fleet opens the pane and summarises', async ($, on) => {
   expect(detail.join('\n')).toContain('lease a | gh /repo')
   expect(detail.join('\n')).toContain('t1')
   expect(w.opened).toContain('herdr-fleet')
+})
+
+test('/fleet says the PR list is unknown before any read', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...task('a', 't1') })
+  w.gh = 'reject'
+  const clock = stub(on, w)
+  await boot($, clock)
+  const result = await command($)
+  expect(result.text.split('\n')[0]).toBe('fleet: 1 active, 0 done, PR list unknown; gh unavailable')
+  expect(summaryLine(0, 0, null, false)).toBe('fleet: 0 active, 0 done, PR list unknown')
 })
 
 test('/fleet during an in-flight gh runs exactly one more, never concurrently', async ($, on) => {
@@ -494,9 +536,11 @@ test('a gh error stays with its own lease', async ($, on) => {
   Object.assign(w.files, owner('b'))
   w.ghGate = new Promise<void>(() => {})
   await clock.advance(15000)
-  const text = await prsText(await pane($))
+  const ui = await pane($)
+  const text = await prsText(ui)
   expect(text).not.toContain('gh unavailable')
   expect(text).toContain('reading...')
+  expect((await ui.find({ key: 'tab-prs' })).props.label).toBe('PRs (?)')
 })
 
 test('a failing task refresh shows a message instead of reading', async ($, on) => {
