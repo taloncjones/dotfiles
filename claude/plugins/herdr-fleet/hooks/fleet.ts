@@ -4,16 +4,20 @@ import type {
   FleetTaskRow,
 } from '../types'
 
+export const GH_LIMIT = 100
+
 export const GH_ARGV = [
   'gh',
   'pr',
   'list',
   '--state',
   'open',
+  '--author',
+  '@me',
   '--json',
   'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision',
   '--limit',
-  '100',
+  String(GH_LIMIT),
 ] as const
 
 const TERMINAL = new Set(['merged', 'abandoned', 'failed'])
@@ -460,12 +464,13 @@ export function ghReason(error: unknown): string {
 export function summaryLine(
   active: number,
   done: number,
-  prs: FleetPrRow[],
+  prs: FleetPrRow[] | null,
   ghError: boolean,
 ): string {
-  const drafts = prs.filter(pr => pr.isDraft).length
+  const drafts = prs ? prs.filter(pr => pr.isDraft).length : 0
+  const prText = prs ? `${prs.length} PRs (${drafts} draft)` : 'PR list unknown'
   return (
-    `fleet: ${active} active, ${done} done, ${prs.length} PRs (${drafts} draft)` +
+    `fleet: ${active} active, ${done} done, ${prText}` +
     (ghError ? '; gh unavailable' : '')
   )
 }
