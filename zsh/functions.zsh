@@ -67,6 +67,10 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 		# update tldr definitions
 		tldr --update
 
+		# oh-my-zsh only reminds at shell start (.zshrc); upgrade it here, non-fatally
+		local omz="${ZSH:-$HOME/.oh-my-zsh}"
+		[[ -r "$omz/tools/upgrade.sh" ]] && { ZSH="$omz" zsh -f "$omz/tools/upgrade.sh" -v minimal || echo "[WARNING] oh-my-zsh upgrade failed; run omz update"; }
+
 		# execute the install script
 		# note: we manually specify bash here, since the install script is written in bash
 		# and we're calling it from zsh. bad things happen if you use source instead

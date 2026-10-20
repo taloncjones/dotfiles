@@ -183,6 +183,11 @@ elif args[:2] == ["pane", "process-info"]:
         "pane_id": pane, "shell_pid": 101,
         "foreground_processes": foreground}}}))
 elif args[:2] == ["pane", "read"]:
+    if mode == "omz-prompt-shell":
+        print("[oh-my-zsh] Would you like to update? [Y/n] ")
+        raise SystemExit(0)
+    if mode == "omz-prompt-read-fails":
+        raise SystemExit(1)
     if mode == "exit-background-prose":
         print("A background task is currently running in this project.")
         raise SystemExit(0)
@@ -267,7 +272,7 @@ elif args[:2] == ["pane", "wait-output"]:
     count_file = Path(os.environ["FAKE_WAIT_COUNT"])
     waits = int(count_file.read_text()) if count_file.exists() else 0
     count_file.write_text(str(waits + 1))
-    if mode == "dead-shell" or (mode == "slow-shell" and waits < 2):
+    if mode in ("dead-shell", "omz-prompt-shell", "omz-prompt-read-fails") or (mode == "slow-shell" and waits < 2):
         print(json.dumps({"id": "cli:pane:wait-output",
                           "error": {"code": "timeout", "message": "no match"}}))
         raise SystemExit(1)
@@ -1110,7 +1115,7 @@ def test_pane_prep_dead_shell_records_launch_failed_with_cause():
         try:
             fixture.launch()
         except herdr_dispatch.DispatchError as exc:
-            assert str(exc).startswith("pane-prep: shell-not-ready"), exc
+            assert str(exc) == "pane-prep: shell-not-ready", exc
         else:
             raise AssertionError("a shell that never answers must fail the launch")
         rows = fixture.worker_records()
@@ -1123,6 +1128,32 @@ def test_pane_prep_dead_shell_records_launch_failed_with_cause():
         assert len(runs) == 1, runs  # the prep script is never sourced
     finally:
         fixture.close()
+
+
+def _launch_fails_with_cause(mode, cause):
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = mode
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == cause, exc
+        else:
+            raise AssertionError("a shell that never answers must fail the launch")
+        rows = fixture.worker_records()
+        assert len(rows) == 1, rows
+        assert rows[0]["status"] == "launch_failed", rows
+        assert rows[0]["launch_failed_cause"] == cause, rows
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_names_an_omz_update_prompt_as_the_shell_not_ready_cause():
+    _launch_fails_with_cause("omz-prompt-shell", "pane-prep: shell-not-ready: omz-update-prompt")
+
+
+def test_pane_prep_keeps_the_plain_shell_not_ready_cause_when_the_pane_read_fails():
+    _launch_fails_with_cause("omz-prompt-read-fails", "pane-prep: shell-not-ready")
 
 
 def test_pane_run_lines_stay_under_max_canon_and_script_is_removed():
@@ -6170,6 +6201,8 @@ for name, test in (
     ("launch refuses a pane that never reaches its shell after the bounded wait", test_launch_refuses_a_pane_that_never_reaches_its_shell_after_the_bounded_wait),
     ("pane prep waits out a slow shell before sourcing the prep", test_pane_prep_waits_out_a_slow_shell),
     ("pane prep that never sees a prompt records launch_failed with its cause", test_pane_prep_dead_shell_records_launch_failed_with_cause),
+    ("pane prep names an oh-my-zsh update prompt as the shell-not-ready cause", test_pane_prep_names_an_omz_update_prompt_as_the_shell_not_ready_cause),
+    ("pane prep keeps the plain shell-not-ready cause when the pane read fails", test_pane_prep_keeps_the_plain_shell_not_ready_cause_when_the_pane_read_fails),
     ("pane run lines stay under MAX_CANON and the prep script is removed", test_pane_run_lines_stay_under_max_canon_and_script_is_removed),
     ("pane prep script write failure records launch_failed", test_pane_prep_script_write_failure_records_launch_failed),
     ("pane prep source line failure records launch_failed", test_pane_prep_source_line_failure_records_launch_failed),

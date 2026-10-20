@@ -39,6 +39,8 @@ PHASES = ("plan", "implement", "review", "think", "read", "mechanical", "ship")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = core.IDLE_AGENT_STATES
 PANE_READY_ATTEMPTS = 3
+# Prompt text oh-my-zsh prints in its default update mode; reminder mode never prints it.
+OMZ_UPDATE_PROMPT = "Would you like to update? [Y/n]"
 SHELL_READY_POLLS = 10
 SHELL_READY_POLL_SECS = 0.5
 # macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
@@ -136,6 +138,17 @@ def _wait_for_shell(herdr_cli: str, pane_id: str, env: dict[str, str]) -> None:
             return
         except DispatchError:
             continue
+    try:
+        text = _run_herdr(
+            herdr_cli,
+            ["pane", "read", pane_id, "--source", "recent-unwrapped", "--lines", "40"],
+            env=env,
+            json_result=False,
+        )
+    except DispatchError:
+        text = ""
+    if isinstance(text, str) and OMZ_UPDATE_PROMPT in text:
+        raise DispatchError("pane-prep: shell-not-ready: omz-update-prompt")
     raise DispatchError("pane-prep: shell-not-ready")
 
 
