@@ -558,7 +558,8 @@ want = [{"matcher": "Bash", "hooks": [{"type": "command", "command": "~/.claude/
 pre = [x["command"] for e in h["PreToolUse"] if e.get("matcher") == "Bash" for x in e["hooks"]]
 want_pre = ["~/.claude/hooks/commit_guard.py", "~/.claude/hooks/no_ai_attribution_bash.py",
             "~/.claude/hooks/push_guard.py", "~/.claude/hooks/herdr_worktree_guard.py",
-            "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/pr_post_guard.py",
+            "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/shell_hint.py",
+            "~/.claude/hooks/pr_post_guard.py",
             "~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py",
             "~/.claude/hooks/signer_guard.py"]
 sys.exit(0 if pr == want and pre == want_pre else 1)

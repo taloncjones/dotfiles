@@ -414,6 +414,7 @@ want = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/shell_hint.py",
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
@@ -834,6 +835,64 @@ rmg_silent "silent path as plain word" "$(rmg_json_payload 'cat path; ls ./path/
 rmg_silent "silent for path inside quoted text" "$(rmg_json_payload 'git commit -m "for path in x"')"
 rmg_silent "silent stored prefix inside bash -c" "$(rmg_json_payload "bash -c 'E=\"env -u A\"; \$E true'")"
 rmg_silent 'silent $HOME:/x' "$(rmg_json_payload 'echo $HOME:/x')"
+
+# shell_hint.py: warn-only advisory for a bare background `&`.
+SHH=claude/hooks/shell_hint.py
+SHH_W='[WARNING] shell_hint: a bare & leaves a background job running after this tool call returns, so a later call can start a duplicate; use run_in_background on the Bash tool (in Codex, keep a running exec_command session) instead.'
+shh_payload() {
+    python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))' "$1"
+}
+shh_warns() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | "$SHH" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": sys.argv[2]}} else 1)' "$out" "$SHH_W"; then
+        printf 'PASS  shh: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  shh: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+shh_silent() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | "$SHH" 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        printf 'PASS  shh: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  shh: %s (rc=%s output=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+shh_warns "warn trailing &" "$(shh_payload 'sleep 30 &')"
+shh_warns "warn mid-command &" "$(shh_payload 'make & echo started')"
+shh_warns "warn redirect then &" "$(shh_payload 'nohup srv > log 2>&1 &')"
+shh_warns "warn & inside subshell" "$(shh_payload '(cd x && make &)')"
+shh_warns "warn when wait precedes the last &" "$(shh_payload 'make & wait; sleep 30 &')"
+shh_warns "warn Codex exec_command cmd payload" '{"tool_name":"exec_command","tool_input":{"cmd":"sleep 30 &","workdir":"/tmp"}}'
+shh_warns "warn Codex unified_exec nested args.cmd payload" '{"tool_name":"unified_exec","tool_input":{"args":{"cmd":"sleep 30 &"}}}'
+shh_warns "warn & after an apostrophe comment" "$(shh_payload "# don't start a duplicate
+sleep 30 &")"
+shh_warns "warn when the subshell closes before wait" "$(shh_payload '(sleep 30 &); wait')"
+shh_warns "warn when wait runs in a child subshell" "$(shh_payload 'make & (wait)')"
+
+shh_silent "silent &&" "$(shh_payload 'git fetch && git status')"
+shh_silent "silent single-quoted &" "$(shh_payload "echo 'a & b'")"
+shh_silent "silent quoted and escaped &" "$(shh_payload "echo '&' \"&\" \\&")"
+shh_silent "silent 2>&1 redirect" "$(shh_payload 'make >/dev/null 2>&1')"
+shh_silent "silent &> redirect" "$(shh_payload 'make &>/dev/null')"
+shh_silent "silent <&, N>&M and |& forms" "$(shh_payload 'exec 3>&1; read x <&3; make |& tee log')"
+shh_silent "silent jobs reaped by wait" "$(shh_payload 'make & lint & wait')"
+shh_silent "silent non-shell tool" '{"tool_name":"Edit","tool_input":{"command":"sleep 30 &"}}'
+shh_silent "silent malformed stdin" 'not json'
+shh_silent "silent wait inside the same subshell" "$(shh_payload '(make & wait)')"
+shh_silent "silent wait after a closed child subshell" "$(shh_payload 'make & (cd x; ls); wait')"
+shh_silent "silent wait after a closing paren" "$(shh_payload '(make)& wait')"
 
 rmg_denies_with "deny wins over warnings, stdout empty" "$(rmg_json_payload 'E="env -u A"; $E true; rm -rf $X')" "$RMG_D1"
 
@@ -1383,6 +1442,7 @@ want_bash = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/shell_hint.py",
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",

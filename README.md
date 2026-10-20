@@ -512,6 +512,7 @@ inheriting an unverified work account.
 - `protect_claude_md.py` - Warn before editing global CLAUDE.md
 - `rm_guard.py` - Reject catastrophic removal commands, and warn on zsh variable pitfalls, in Claude and native Codex shell events
 - `scratch_policy.py` - Answer Claude residual permission prompts for verified scratch-only cleanup; Codex retains its native approval flow
+- `shell_hint.py` - Warn (never block) when a shell tool call backgrounds a job with a bare `&`, in Claude and native Codex shell events
 
 ## Configuration
 
