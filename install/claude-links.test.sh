@@ -1110,7 +1110,6 @@ else
 fi
 
 ov_run() { # <name> <override content>; sets OV_RC, writes $TMP/ov-$1.{out,err}
-    local f="$TMP/ov-$1.json"
     printf '%s' "$2" > "$TMP/ov-$1.override"
     mkdir -p "$TMP/ov-$1"
     printf '%s\n' "$OV_SEED" > "$TMP/ov-$1/settings.json"
