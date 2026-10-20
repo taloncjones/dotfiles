@@ -148,10 +148,12 @@ or chooses a different account for the caller.
 ## Compact presentation (section 8)
 
 Compact presentation. The Herdr sidebar label of a task workspace is
-`<state>: <title>`, at most 25 characters, with the state first so any
-truncation keeps it. `<title>` is the record's `title` (the Jira summary
-or todo title) with ticket keys and `#<n>` PR references removed; the
-task record keeps the ids. `core.task_label` derives it:
+`<title>`, or `? <title>` when the state token ends in `?`, within 25 characters.
+`<title>` is the record's `title` (the Jira summary or todo
+title) with ticket keys and `#<n>` PR references removed; the task record
+keeps the ids. The fleet panel and todo board show the state itself. An
+empty title falls back to the state token. `core.task_label` derives the
+label; this table is the state vocabulary that decides the mark:
 
 | Record                                                     | Token                  |
 | ---------------------------------------------------------- | ---------------------- |
@@ -169,7 +171,7 @@ task record keeps the ids. `core.task_label` derives it:
 | `pr-open-pending-merge`                                    | `merge?`               |
 | `merged`, `abandoned`, `failed`, `paused`                  | verbatim               |
 
-A `?` marks a state that waits on the owner. Triggers:
+A `?` marks a state that waits on the owner, and only those get the `? ` label prefix. Triggers:
 `write-task --present` (section 9), the adapter's `launch` and `settle`,
 and `present-task --all --apply` at preflight and every check-in. A
 rename happens only when the workspace's `worktree.checkout_path` is the

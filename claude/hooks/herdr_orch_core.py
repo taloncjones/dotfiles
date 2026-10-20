@@ -4290,7 +4290,7 @@ def _label_pr_number(task):
 
 
 def task_state_token(task, ship_handoff=None):
-    """Short human state for a task's Herdr workspace label; display only."""
+    """Short human state; a trailing `?` marks an owner wait. Display only."""
     status = task.get("status")
     if status == "in-progress":
         return LABEL_PHASE_TOKENS[_label_phase(task)]
@@ -4321,17 +4321,16 @@ def _label_title(task):
 
 
 def task_label(task, ship_handoff=None):
-    """`<token>: <title>`, at most LABEL_MAX chars, with no ticket key or PR ref."""
+    """The readable title in at most LABEL_MAX chars, `? `-led for an owner wait."""
     token = task_state_token(task, ship_handoff)
+    mark = "? " if token.endswith("?") else ""
     title = _label_title(task)
-    budget = LABEL_MAX - len(token) - 2
-    if budget <= 0 or not title:
-        return token[:LABEL_MAX]
+    budget = LABEL_MAX - len(mark)
     if len(title) > budget:
         cut = title.rfind(" ", 0, budget + 1)
         title = title[:cut] if 2 * cut >= budget else title[:budget]
         title = title.rstrip(_LABEL_TRIM)
-    return f"{token}: {title}" if title else token
+    return f"{mark}{title}" if title else token[:LABEL_MAX]
 
 
 def label_target(task):
