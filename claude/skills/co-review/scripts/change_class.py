@@ -100,6 +100,7 @@ def delta_stats(text: str) -> dict | None:
     binary = submodule = new_file = deleted_file = mode_change = False
     in_hunk = malformed = False
     section_hunks = section_changes = file_headers = 0
+    old_hdr = new_hdr = sec_new = sec_del = False
     old_left = new_left = 0
     section = -1
     for line in text.removesuffix("\n").split("\n") + [_HEADER]:
@@ -113,9 +114,11 @@ def delta_stats(text: str) -> dict | None:
             # Git emits hunkless sections only for renames (asymmetric paths,
             # rejected above), mode changes, empty adds and binary markers.
             malformed = malformed or (section >= 0 and section_hunks == 0)
+            malformed = malformed or (section_hunks > 0 and not (old_hdr and new_hdr))
             section += 1
             in_hunk = False
             section_hunks = section_changes = file_headers = 0
+            old_hdr = new_hdr = sec_new = sec_del = False
         elif line.startswith("@@"):
             counts = _HUNK_HEADER.match(line)
             in_hunk = counts is not None
@@ -127,16 +130,21 @@ def delta_stats(text: str) -> dict | None:
             if line.startswith(("Binary files ", "GIT binary patch")):
                 binary = True
             elif line.startswith("new file mode "):
-                new_file = True
+                new_file = sec_new = True
             elif line.startswith("deleted file mode "):
-                deleted_file = True
+                deleted_file = sec_del = True
             elif line.startswith(("--- ", "+++ ")) and section_hunks == 0:
                 file_headers += 1
                 malformed = malformed or file_headers > 2
-                side = "a/" if line.startswith("--- ") else "b/"
+                old_side = line.startswith("--- ")
                 target = line[4:].split("\t")[0]
-                expected = side + paths[section] if section < len(paths) else None
-                malformed = malformed or target not in ("/dev/null", expected)
+                expected = ("a/" if old_side else "b/") + paths[section] if 0 <= section < len(paths) else None
+                null_ok = sec_new if old_side else sec_del
+                malformed = malformed or target != expected and not (target == "/dev/null" and null_ok)
+                if old_side:
+                    old_hdr = True
+                else:
+                    new_hdr = True
             elif line.startswith(("+", "-")):
                 malformed = True
             if line.startswith(_MODE_LINES) and line.endswith(" 160000"):
@@ -246,6 +254,8 @@ def tier_of(text: str, small: dict | None = None) -> str:
     """The tier of a frozen diff: lessons, light, small or full, in that precedence."""
     stats = delta_stats(text)
     if stats is None:
+        return "full"
+    if stats["malformed"]:
         return "full"
     tier = classify(stats["paths"])
     if tier != "full":

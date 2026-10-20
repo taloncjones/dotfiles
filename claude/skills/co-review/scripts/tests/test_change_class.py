@@ -296,5 +296,73 @@ class MalformedDiffTests(unittest.TestCase):
         self.assertFalse(cc.delta_stats(gone)["malformed"])
 
 
+def git_diff_of(setup: dict, change: dict) -> str:
+    """Real `git diff` output of change (path -> text or None to delete) over setup."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def git(*args):
+            return subprocess.run(["git", "-C", tmp, *args], check=True, capture_output=True,
+                                  text=True).stdout
+
+        git("init", "-q")
+        for rel, body in setup.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(body)
+        git("add", "-A")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+        for rel, body in change.items():
+            if body is None:
+                (root / rel).unlink()
+            else:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(body)
+        git("add", "-A")
+        return git("diff", "--cached", "--no-color")
+
+
+class HeaderStrictnessTests(unittest.TestCase):
+    def test_malformed_prose_diff_is_full(self):
+        spoof = ("diff --git a/README.md b/README.md\n--- a/src/auth/login.py\n"
+                 "+++ b/src/auth/login.py\n@@ -1 +1 @@\n-x\n+y\n")
+        lone = "diff --git a/README.md b/README.md\n"
+        truncated = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,2 @@\n-x\n+y\n"
+        self.assertEqual(cc.tier_of(hunk("README.md")), "light")
+        for label, diff in (("spoof", spoof), ("lone", lone), ("truncated", truncated)):
+            with self.subTest(label):
+                self.assertEqual(cc.tier_of(diff), "full")
+
+    def test_hunks_need_both_file_headers(self):
+        base = "diff --git a/src/a.py b/src/a.py\n"
+        cases = {
+            "no headers": base + "@@ -1 +1 @@\n-x\n+y\n",
+            "minus only": base + "--- a/src/a.py\n@@ -1 +1 @@\n-x\n+y\n",
+            "plus only": base + "+++ b/src/a.py\n@@ -1 +1 @@\n-x\n+y\n",
+            "dev null old on edit": base + "--- /dev/null\n+++ b/src/a.py\n@@ -1 +1 @@\n-x\n+y\n",
+            "dev null new on edit": base + "--- a/src/a.py\n+++ /dev/null\n@@ -1 +1 @@\n-x\n+y\n",
+            "dev null old on delete": base + "deleted file mode 100644\n--- /dev/null\n"
+                                      "+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+        }
+        for label, diff in cases.items():
+            with self.subTest(label):
+                self.assertTrue(cc.delta_stats(diff)["malformed"])
+
+    def test_real_git_add_delete_and_edit_stay_well_formed(self):
+        edit = git_diff_of({"src/a.py": "x\n"}, {"src/a.py": "y\n"})
+        add = git_diff_of({"src/z.py": "z\n"}, {"src/n.py": "n\n"})
+        gone = git_diff_of({"src/n.py": "n\n"}, {"src/n.py": None})
+        for label, diff in (("edit", edit), ("add", add), ("delete", gone)):
+            with self.subTest(label):
+                self.assertFalse(cc.delta_stats(diff)["malformed"])
+        self.assertTrue(cc.delta_stats(add)["new_files"])
+        self.assertTrue(cc.delta_stats(gone)["deleted_files"])
+        self.assertEqual(cc.tier_of(edit + hunk("tests/test_a.py")), "small")
+
+    def test_preamble_file_header_is_malformed(self):
+        diff = "--- a/tests/test_a.py\n" + hunk("src/a.py") + hunk("tests/test_a.py")
+        self.assertTrue(cc.delta_stats(diff)["malformed"])
+        self.assertEqual(cc.tier_of(diff), "full")
+
+
 def tier_text(path: str) -> str:
     return hunk(path)
