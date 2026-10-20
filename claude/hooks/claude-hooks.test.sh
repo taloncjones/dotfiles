@@ -1428,5 +1428,134 @@ else
     PASS=$((PASS + 1))
 fi
 
+# format_files.py formats only files the repo already formats with prettier.
+# The stub "formats" by turning every ' into ".
+FMT_HOOK="$PWD/claude/hooks/format_files.py"
+FMT_TMP=$(mktemp -d)
+mkdir -p "$FMT_TMP/stub"
+cat >"$FMT_TMP/stub/prettier" <<'STUB'
+#!/bin/sh
+case "$1" in
+--write) tr "'" '"' <"$3" >"$3.fmt" && mv "$3.fmt" "$3"; echo "$3" ;;
+--stdin-filepath) tr "'" '"' ;;
+--find-config-path) [ -f "$(dirname "$2")/.prettierrc" ] ;;
+*) exit 2 ;;
+esac
+STUB
+chmod +x "$FMT_TMP/stub/prettier"
+FMT_BASEPATH="$PATH"
+
+fmt_repo() {
+    rm -rf "$FMT_TMP/repo"
+    mkdir "$FMT_TMP/repo"
+    git -C "$FMT_TMP/repo" init -q
+}
+fmt_commit() {
+    GIT_CONFIG_GLOBAL=/dev/null git -C "$FMT_TMP/repo" add -A
+    GIT_CONFIG_GLOBAL=/dev/null git -C "$FMT_TMP/repo" \
+        -c user.name=t -c user.email=t@example.com commit -q -m init
+}
+# fmt_run <path> [PATH override]; prints hook stdout, exit status in FMT_RC
+fmt_run() {
+    FMT_OUT=$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$1" \
+        | (cd "$FMT_TMP" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+            GIT_CONFIG_GLOBAL=/dev/null PATH="${2:-$FMT_TMP/stub:$FMT_BASEPATH}" \
+            python3 "$FMT_HOOK") 2>/dev/null) && FMT_RC=0 || FMT_RC=$?
+}
+fmt_check() {
+    label="$1"
+    shift
+    if "$@"; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+fmt_same() { [ "$(cat "$1")" = "$2" ]; }
+SQ="const a = 'x'
+const b = 'z'"
+
+mkdir "$FMT_TMP/norepo"
+printf "%s\n" "$SQ" >"$FMT_TMP/norepo/a.ts"
+fmt_run "$FMT_TMP/norepo/a.ts"
+fmt_check "fmt: skips a file outside every git work tree" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$(cat "$3")" = "$4" ]' _ "$FMT_RC" "$FMT_OUT" "$FMT_TMP/norepo/a.ts" "$SQ"
+
+fmt_repo
+printf "const a = 'x'\nconst b = 'y'\n" >"$FMT_TMP/repo/a.ts"
+fmt_commit
+printf "%s\n" "$SQ" >"$FMT_TMP/repo/a.ts"
+fmt_run "$FMT_TMP/repo/a.ts"
+fmt_check "fmt: leaves untouched lines of a non-prettier tracked file byte-identical" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$(cat "$3")" = "$4" ]' _ "$FMT_RC" "$FMT_OUT" "$FMT_TMP/repo/a.ts" "$SQ"
+
+fmt_repo
+printf 'const a = "x"\n' >"$FMT_TMP/repo/b.md"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/b.md"
+fmt_run "$FMT_TMP/repo/b.md"
+fmt_check "fmt: still formats a tracked file already in prettier style" \
+    fmt_same "$FMT_TMP/repo/b.md" 'const a = "x"'
+
+fmt_repo
+: >"$FMT_TMP/repo/.prettierrc"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/c.ts"
+fmt_run "$FMT_TMP/repo/c.ts"
+fmt_check "fmt: formats an untracked file when a prettier config covers it" \
+    fmt_same "$FMT_TMP/repo/c.ts" 'const a = "x"'
+
+fmt_repo
+printf 'seed\n' >"$FMT_TMP/repo/seed.txt"
+fmt_commit
+printf "%s\n" "$SQ" >"$FMT_TMP/repo/d.ts"
+fmt_run "$FMT_TMP/repo/d.ts"
+fmt_check "fmt: skips an untracked file in a repo without a prettier config" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$(cat "$3")" = "$4" ]' _ "$FMT_RC" "$FMT_OUT" "$FMT_TMP/repo/d.ts" "$SQ"
+
+fmt_repo
+printf 'const a = "x"\n' >"$FMT_TMP/repo/b.md"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/b.md"
+mkdir "$FMT_TMP/elsewhere"
+ln -s "$FMT_TMP/repo/b.md" "$FMT_TMP/elsewhere/link.md"
+fmt_run "$FMT_TMP/elsewhere/link.md"
+fmt_check "fmt: formats an owned file edited through a symlink" \
+    fmt_same "$FMT_TMP/repo/b.md" 'const a = "x"'
+
+fmt_repo
+printf 'const a = "x"\n' >"$FMT_TMP/repo/b.md"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/b.md"
+NOPRETTIER="$FMT_TMP/nopretty"
+mkdir -p "$NOPRETTIER"
+for tool in git python3 sh env tr mv cat dirname; do
+    ln -sf "$(command -v "$tool")" "$NOPRETTIER/$tool"
+done
+fmt_run "$FMT_TMP/repo/b.md" "$NOPRETTIER"
+fmt_rc1=$FMT_RC
+fmt_out1=$FMT_OUT
+bad_rc=0
+printf 'not json' | python3 "$FMT_HOOK" >/dev/null 2>&1 || bad_rc=$?
+fmt_check "fmt: fails open when prettier is missing" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$3" = 0 ] && [ "$(cat "$4")" = "const a = '"'"'x'"'"'" ]' _ \
+    "$fmt_rc1" "$fmt_out1" "$bad_rc" "$FMT_TMP/repo/b.md"
+
+if command -v prettier >/dev/null 2>&1; then
+    fmt_repo
+    printf "const a = 'x'\nconst b = 'y'\n" >"$FMT_TMP/repo/fleet.test.ts"
+    fmt_commit
+    printf "const a = 'x'\nconst b = 'z'\n" >"$FMT_TMP/repo/fleet.test.ts"
+    fmt_run "$FMT_TMP/repo/fleet.test.ts" "$FMT_BASEPATH"
+    fmt_check "fmt: live prettier leaves a non-prettier ts file byte-identical" \
+        fmt_same "$FMT_TMP/repo/fleet.test.ts" "const a = 'x'
+const b = 'z'"
+else
+    printf 'SKIP  fmt: live prettier leaves a non-prettier ts file byte-identical\n'
+fi
+rm -rf "$FMT_TMP"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
