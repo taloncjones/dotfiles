@@ -819,7 +819,11 @@ section 4; `<ship_ws>` is the ship row's `workspace_id`; report non-`settled`.
 6. Run the adapter's `sweep` for the task workspace, then close the task's
    todo (todos skill). The sweep keeps the root pane and any pane a live
    process holds.
-7. Teardown: run `/post-merge` for the PR in its director mode. Before it
+7. Teardown. First sync the main checkout, even if teardown later stops:
+   `python3 "$CORE" sync-main --repo-slug <slug> --repo-path <repo path> --branch <defaultBranchRef name>`.
+   Report a `reason` other than `synced` or `up-to-date`. On `update_ai: true`,
+   tell the owner to run `update --ai` for `update_ai_paths`; never run it.
+   Then run `/post-merge` for the PR in its director mode. Before it
    deletes anything, `git -C <worktree> rev-parse HEAD` must equal the
    merged PR's `headRefOid` (or be an ancestor of `origin/<default>`); a
    later, unpublished commit stops it with `teardown_blocked: "head-moved"`
