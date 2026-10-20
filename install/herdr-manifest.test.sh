@@ -111,7 +111,7 @@ want = [{
     "priority": 960,
     "region": "after_last_horizontal_rule",
     "visible_working": True,
-    "line_regex": ['(?:^|\\s·)\\s+[1-9]\\d*\\s+shells?(?:\\s+·|\\s*$)'],
+    "line_regex": ['(?:^|\\s·)\\s+[1-9]\\d*\\s+shells?(?:\\s+·|,|\\s*$)'],
     "not": [{"contains": [s]} for s in (
         "do you want to proceed?", "esc to cancel", "waiting for permission",
         "do you want to allow this connection?", "tab to amend", "ctrl+e to explain")],
@@ -285,6 +285,7 @@ for spec in \
     "19 idle-one-shell.txt working dotfiles_background_shells_working" \
     "20 idle-two-shells.txt working dotfiles_background_shells_working" \
     "21 idle-shells-only.txt working dotfiles_background_shells_working" \
+    "26 idle-shell-monitors.txt working dotfiles_background_shells_working" \
     "22 idle-no-shell.txt idle" \
     "23 shell-exited.txt idle" \
     "24 quoted-footer.txt idle" \
