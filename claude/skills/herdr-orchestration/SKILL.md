@@ -709,8 +709,8 @@ either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `current`, the handoff report has `class` `delta` or `small`, and
 its verdict is not `APPROVE` (rule (c) passes `--tier full`);
 every such relaunch brief carries `herdr-ship-brief: tier=full`: `dispatch-gate`
-forces it for a stopped run and whenever the task's newest ship handoff, on this
-head or an earlier one, has a verdict other than `APPROVE`, whatever `--tier` says. Never on a `current` non-APPROVE handoff
+forces it for a stopped run and whenever the handoff of the row `ship_launch_id`
+pins, on this head or an earlier one, has a verdict other than `APPROVE`, whatever `--tier` says. Never on a `current` non-APPROVE handoff
 (section 6a step 0 owns it), except rule (c). Dispatch with
 `python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
 Without `--tier`, on a first gate or after an `APPROVE`, the brief carries `herdr-ship-brief: tier=auto` and the

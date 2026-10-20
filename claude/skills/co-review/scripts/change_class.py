@@ -97,7 +97,7 @@ def delta_stats(text: str) -> dict | None:
     if paths is None:
         return None
     added = removed = 0
-    binary = submodule = new_file = deleted_file = False
+    binary = submodule = new_file = deleted_file = mode_change = False
     in_hunk = malformed = False
     section_hunks = section_changes = file_headers = 0
     old_left = new_left = 0
@@ -133,6 +133,8 @@ def delta_stats(text: str) -> dict | None:
                 malformed = True
             if line.startswith(_MODE_LINES) and line.endswith(" 160000"):
                 submodule = True
+            elif line.startswith(_MODE_LINES[1:]):
+                mode_change = True
         elif line.startswith("+"):
             added += 1
             new_left -= 1
@@ -155,6 +157,7 @@ def delta_stats(text: str) -> dict | None:
     return {"files": len(paths), "added": added, "removed": removed,
             "paths": paths, "classes": sorted(classes), "binary": binary,
             "new_files": new_file, "deleted_files": deleted_file,
+            "mode_change": mode_change,
             "malformed": malformed}
 
 
@@ -212,6 +215,8 @@ def small_class(stats: dict | None, small: dict) -> dict:
         reasons.append("diff adds or deletes a file")
     if stats["binary"]:
         reasons.append("diff has a binary change")
+    if stats["mode_change"]:
+        reasons.append("diff changes a file mode")
     if stats["malformed"]:
         reasons.append("diff is not a plain unified diff")
     reasons.extend(f"diff touches a {name} path" for name in BLOCKING_CLASSES

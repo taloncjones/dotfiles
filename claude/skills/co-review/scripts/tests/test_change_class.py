@@ -255,6 +255,12 @@ class MalformedDiffTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertTrue(cc.delta_stats(bad)["malformed"])
 
+    def test_mode_only_change_beside_a_test_is_full(self):
+        mode = ("diff --git a/src/a.py b/src/a.py\nold mode 100644\nnew mode 100755\n")
+        diff = hunk("tests/test_a.py") + mode
+        self.assertEqual(cc.tier_of(hunk("tests/test_a.py") + hunk("src/b.py")), "small")
+        self.assertEqual(cc.tier_of(diff), "full")
+
     def test_hunk_section_without_changes_is_malformed(self):
         empty = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n context\n")
         self.assertTrue(cc.delta_stats(empty)["malformed"])

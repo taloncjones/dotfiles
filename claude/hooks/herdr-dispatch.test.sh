@@ -5548,7 +5548,8 @@ def ship_ready(fx, pinned=None, recorded=False):
             launch_dir = core.ship_launch_dir(fx.rd, "td-a", pinned)
             launch_dir.mkdir(parents=True)
             (launch_dir / "ship.json").write_text(json.dumps(
-                {"launch_id": pinned, "verdict": recorded if isinstance(recorded, str) else None}))
+                {"launch_id": pinned, "verdict": recorded if isinstance(recorded, str) else None,
+                 "written_at": "2000-01-01T00:00:00+00:00"}))
     fx.task_file.write_text(json.dumps(task))
     return head, focus
 
