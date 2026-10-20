@@ -1,12 +1,14 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { age, ciCell, fitTitle, labelTitle, ownerToken, repoName, summaryLine } from './fleet'
+import {
+  age, ciCell, classify, fitTitle, labelTitle, ownerToken, prRows, repoName, shipVerdict, summaryLine, taskRow,
+} from './fleet'
 import { LABEL_CASES } from './label-cases'
 import { STATE_CASES } from './state-cases'
 
 const ROOT = '/h/.claude/herdr-orch'
 const GH = ['gh', 'pr', 'list', '--state', 'open', '--author', '@me', '--json',
-  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision',
+  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews',
   '--limit', '100']
 const OK = { exitCode: 0, stdout: '[]', stderr: '' }
 const OK_VERB = { exitCode: 0, stdout: '', stderr: '' }
@@ -160,6 +162,7 @@ test('task row shows every field with matching evidence', async ($, on) => {
   const w = newWorld({
     ...owner('a'),
     ...task('a', 't1', {
+      status: 'merged',
       workers: [{ agent: 'impl-x', phase: 'implement', status: 'launched', started_ns: 1e15 }],
       pr_number: 12, ship_launch_id: 'L1',
     }, {
@@ -169,31 +172,37 @@ test('task row shows every field with matching evidence', async ($, on) => {
   })
   const clock = stub(on, w)
   await boot($, clock)
-  const text = (await lines(await pane($))).join('\n')
-  for (const part of ['t1', 'in-progress', 'impl-x', 'working', 'abcdef0', '#12', 'ship:APPROVE', 'dirty']) {
+  const ui = await pane($)
+  await ui.press({ key: 'tab-done' })
+  const text = (await lines(ui)).join('\n')
+  for (const part of ['t1', 'merged', 'impl-x', 'abcdef0', '#12', 'ship:APPROVE', 'dirty']) {
     expect(text).toContain(part)
   }
 })
 
 test('bare record shows dash defaults', async ($, on) => {
-  const w = newWorld({ ...owner('a'), ...task('a', 't1', { head_sha: null }) })
+  const w = newWorld({ ...owner('a'), ...task('a', 't1', { status: 'merged', head_sha: null }) })
   const clock = stub(on, w)
   await boot($, clock)
-  const text = (await lines(await pane($))).join('\n')
-  expect(text).toMatch(/t1\s+in-progress\s+-\s*$/)
+  const ui = await pane($)
+  await ui.press({ key: 'tab-done' })
+  const text = (await lines(ui)).join('\n')
+  expect(text).toMatch(/t1\s+merged\s+-\s*$/)
 })
 
 test('older-head evidence is marked and dirty is hidden', async ($, on) => {
   const w = newWorld({
     ...owner('a'),
-    ...task('a', 't1', { ship_launch_id: 'L1' }, {
+    ...task('a', 't1', { status: 'merged', ship_launch_id: 'L1' }, {
       'tasks/t1.done.json': { head_sha: '1111111999', dirty: true },
       'artifacts/t1/ship-L1/ship.json': { head_sha: '2222222999', verdict: 'APPROVE' },
     }),
   })
   const clock = stub(on, w)
   await boot($, clock)
-  const text = (await lines(await pane($))).join('\n')
+  const ui = await pane($)
+  await ui.press({ key: 'tab-done' })
+  const text = (await lines(ui)).join('\n')
   expect(text).toContain('ship:APPROVE@2222222')
   expect(text).not.toContain('dirty')
 })
@@ -375,7 +384,7 @@ test('a malformed record shows an unreadable row', async ($, on) => {
   const w = newWorld({ ...owner('a'), [`${ROOT}/a/tasks/bad.json`]: '{' })
   const clock = stub(on, w)
   await boot($, clock)
-  expect((await lines(await pane($))).join('\n')).toMatch(/bad\.json\s+unreadable/)
+  expect((await lines(await pane($))).join('\n')).toMatch(/bad\.json\s+record unreadable/)
 })
 
 const command = ($: any) =>
@@ -469,7 +478,8 @@ test('a lease change never draws the old lease archive under the new one', async
   const ui = await pane($)
   await ui.press({ key: 'tab-done' })
   const text = (await lines(ui)).join('\n')
-  expect(text).toContain('fence 2')
+  expect(text).toContain(' | read ')
+  expect(text).not.toContain('fence')
   expect(text).not.toContain('from-a')
 })
 
@@ -613,7 +623,7 @@ test('a date-prefixed task id shows its title', async ($, on) => {
   await boot($, clock)
   const ui = await pane($)
   let rows = await lines(ui)
-  expect(rows.some((line) => line.startsWith('herdr fleet: Make rows readable'))).toBe(true)
+  expect(rows.some((line) => line.slice(7).startsWith('herdr fleet: Make rows readable'))).toBe(true)
   expect(rows.join('\n')).not.toContain('2026-10-19-herdr')
   await ui.press({ key: 'tab-done' })
   rows = await lines(ui)
@@ -631,9 +641,9 @@ test('a record without a title shows its id without the date', async ($, on) => 
   const clock = stub(on, w)
   await boot($, clock)
   const rows = await lines(await pane($))
-  expect(rows.some((line) => line.startsWith('zsh fix'))).toBe(true)
-  expect(rows.some((line) => line.startsWith('only-ids'))).toBe(true)
-  expect(rows.some((line) => /^bad\.json\s+unreadable/.test(line))).toBe(true)
+  expect(rows.some((line) => line.slice(7).startsWith('zsh fix'))).toBe(true)
+  expect(rows.some((line) => line.slice(7).startsWith('only-ids'))).toBe(true)
+  expect(rows.some((line) => /^\s+bad\.json\s+record unreadable/.test(line))).toBe(true)
 })
 
 test('titles match the shared core label cases', () => {
@@ -659,7 +669,8 @@ test('the header keeps the read clock at 60 columns', async ($, on) => {
   const header = (await lines(await pane($, 60)))[0]
   expect(header.length).toBeLessThanOrEqual(60)
   expect(header).toContain('rrrr')
-  expect(header).toContain(' | fence 7 | read ')
+  expect(header).toContain(' | read ')
+  expect(header).not.toContain('fence')
   expect(header).toMatch(/read \d\d:\d\d:\d\d$/)
   expect(header).not.toContain(slug)
   expect(header).not.toContain('gh ')
@@ -677,8 +688,8 @@ test('a plan row shows a live worker cell and no evidence cells', async ($, on) 
   })
   const clock = stub(on, w)
   await bootAt($, clock)
-  const row = (await lines(await pane($))).find((line) => line.startsWith('t1'))!
-  expect(row).toMatch(/^t1\s+in-progress\s+impl-x working 30s\s*$/)
+  const row = (await lines(await pane($))).find((line) => line.slice(7).startsWith('t1'))!
+  expect(row).toMatch(/^\s+t1\s+plan running\s+30s\s*$/)
   expect(w.runs).toEqual([GH])
 })
 
@@ -691,8 +702,8 @@ test('a stop after launch shows idle and a later reprompt shows working', async 
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
-  expect(await cell()).toMatch(/impl-x idle 1m/)
+  const cell = async () => (await lines(ui)).find((line) => line.slice(7).startsWith('t1'))!
+  expect(await cell()).toMatch(/plan idle\s+1m/)
 
   Object.assign(
     w.files,
@@ -701,11 +712,11 @@ test('a stop after launch shows idle and a later reprompt shows working', async 
     }),
   )
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x working/)
+  expect(await cell()).toMatch(/plan running/)
 
   Object.assign(w.files, events(evt(80, 'stopped'), evt(60, 'stopped')))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x working/)
+  expect(await cell()).toMatch(/plan running/)
 
   Object.assign(
     w.files,
@@ -721,11 +732,11 @@ test('a stop after launch shows idle and a later reprompt shows working', async 
     }),
   )
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x unknown/)
+  expect(await cell()).toMatch(/plan state unknown/)
 
   Object.assign(w.files, events(evt(60, 'stopped'), evt(30, 'stopped')))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x idle/)
+  expect(await cell()).toMatch(/plan idle/)
 
   Object.assign(
     w.files,
@@ -734,11 +745,11 @@ test('a stop after launch shows idle and a later reprompt shows working', async 
     }),
   )
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x unknown/)
+  expect(await cell()).toMatch(/plan state unknown/)
 
   Object.assign(w.files, events(evt(30, 'stopped'), evt(10, 'review-stopped')))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x idle/)
+  expect(await cell()).toMatch(/plan idle/)
 })
 
 test('a blocked event shows blocked', async ($, on) => {
@@ -750,16 +761,16 @@ test('a blocked event shows blocked', async ($, on) => {
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
-  expect(await cell()).toMatch(/impl-x blocked 50s/)
+  const cell = async () => (await lines(ui)).find((line) => line.slice(7).startsWith('t1'))!
+  expect(await cell()).toMatch(/blocked\s+50s/)
 
   Object.assign(w.files, events(evt(50, 'blocked'), evt(40, 'stopped', 'other')))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x blocked/)
+  expect(await cell()).toMatch(/blocked/)
 
   Object.assign(w.files, events(evt(50, 'blocked'), evt(50, 'stopped')))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x idle/)
+  expect(await cell()).toMatch(/plan idle/)
 })
 
 test('a done record shows done only for the current launch', async ($, on) => {
@@ -771,16 +782,16 @@ test('a done record shows done only for the current launch', async ($, on) => {
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
-  expect(await cell()).toMatch(/impl-x done 30s/)
+  const cell = async () => (await lines(ui)).find((line) => line.slice(7).startsWith('t1'))!
+  expect(await cell()).toMatch(/plan done\s+30s/)
 
   Object.assign(w.files, doneFile({ launch_id: 'L1', outcome: 'paused', ts: iso(30) }))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x paused/)
+  expect(await cell()).toMatch(/plan paused/)
 
   Object.assign(w.files, doneFile({ launch_id: 'L0', outcome: 'completed', ts: iso(30) }))
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x working/)
+  expect(await cell()).toMatch(/plan running/)
 
   Object.assign(
     w.files,
@@ -790,7 +801,7 @@ test('a done record shows done only for the current launch', async ($, on) => {
     }),
   )
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x working/)
+  expect(await cell()).toMatch(/plan running/)
 
   Object.assign(
     w.files,
@@ -801,7 +812,7 @@ test('a done record shows done only for the current launch', async ($, on) => {
     events(evt(69, 'stopped')),
   )
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x idle/)
+  expect(await cell()).toMatch(/plan idle/)
 })
 
 test('rows at 60 columns keep the title, status and live cell', async ($, on) => {
@@ -829,11 +840,12 @@ test('rows at 60 columns keep the title, status and live cell', async ($, on) =>
   })
   const clock = stub(on, w)
   await bootAt($, clock)
-  const rows = (await lines(await pane($, 60))).filter((line) => /^t[12]\s/.test(line))
+  const rows = (await lines(await pane($, 60))).filter((line) => /^(#12)?\s+t[12]\s/.test(line))
   expect(rows.length).toBe(2)
+  expect(rows[0]).toMatch(/^#12\s+t1\s+implement running\s+1m/)
+  expect(rows[1]).toMatch(/^\s+t2\s+plan running\s+1m/)
   for (const row of rows) {
-    expect(row).toMatch(/^t[12]\s+in-progress\s+impl-x working 1m/)
-    expect(row).not.toContain('#12')
+    expect(row.length).toBeLessThanOrEqual(60)
     expect(row).not.toContain('abcdef0')
     expect(row).not.toContain('ship:')
   }
@@ -862,9 +874,9 @@ test('an unsafe workspace id or a malformed log line reads no state', async ($, 
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  const cell = async () => (await lines(ui)).find((line) => line.startsWith('t1'))!
+  const cell = async () => (await lines(ui)).find((line) => line.slice(7).startsWith('t1'))!
   expect(w.reads.some((path) => path.includes('events.jsonl'))).toBe(false)
-  expect(await cell()).toMatch(/impl-x working/)
+  expect(await cell()).toMatch(/plan running/)
 
   Object.assign(w.files, task('a', 't1', { workers: [worker()] }))
   w.files[`${ROOT}/a/workspaces/w1.events.jsonl`] = [
@@ -874,7 +886,7 @@ test('an unsafe workspace id or a malformed log line reads no state', async ($, 
     '{"v":1,"ts"',
   ].join('\n')
   await clock.advance(15000)
-  expect(await cell()).toMatch(/impl-x idle/)
+  expect(await cell()).toMatch(/plan idle/)
   expect(w.reads.some((path) => path.endsWith('/workspaces/w1.events.jsonl'))).toBe(true)
   expect(w.reads.some((path) => path.includes('w9'))).toBe(false)
 })
@@ -892,8 +904,8 @@ test('terminal and non-launched rows show the agent alone or the row status', as
   await bootAt($, clock)
   const ui = await pane($)
   const rows = await lines(ui)
-  expect(rows.find((line) => line.startsWith('failed1'))).toMatch(/impl-x launch_failed 2m/)
-  expect(rows.find((line) => line.startsWith('bare1'))).toMatch(/in-progress\s+-\s*$/)
+  expect(rows.find((line) => line.slice(7).startsWith('failed1'))).toMatch(/plan launch_failed\s+2m/)
+  expect(rows.find((line) => line.slice(7).startsWith('bare1'))).toMatch(/no worker/)
   await ui.press({ key: 'tab-done' })
   const merged = (await lines(ui)).find((line) => line.startsWith('merged1'))!
   expect(merged).toMatch(/merged\s+impl-x\s*$/)
@@ -903,22 +915,26 @@ test('a mixed list blanks the evidence cells of a plan row', async ($, on) => {
   const w = newWorld({
     ...owner('a'),
     ...task('a', 't1', {
+      status: 'merged',
       pr_number: 12,
       workers: [worker({ phase: 'implement', started_ns: ns(60) })],
     }),
     ...task('a', 't2', {
+      status: 'merged',
       head_sha: null,
       workers: [worker({ started_ns: ns(60) })],
     }),
   })
   const clock = stub(on, w)
   await bootAt($, clock)
-  const rows = await lines(await pane($, 160))
+  const ui = await pane($, 160)
+  await ui.press({ key: 'tab-done' })
+  const rows = await lines(ui)
   const t1 = rows.find((line) => line.startsWith('t1'))!
   const t2 = rows.find((line) => line.startsWith('t2'))!
   expect(t1).toContain('abcdef0')
   expect(t1).toContain('#12')
-  expect(t2.trimEnd().endsWith('working 1m')).toBe(true)
+  expect(t2.trimEnd().endsWith('impl-x')).toBe(true)
 })
 
 const VERB = ['python3', '/h/.claude/hooks/herdr_orch_core.py', 'review-deadlines', '--repo-slug', 'a']
@@ -927,55 +943,12 @@ const dl = (id: string, launch: string, state: string, remaining: string, deadli
   `deadline_secs=${deadline} hard_secs=${hard} basis=contract:c,files:f`
 const verbOut = (...list: string[]) => ({ exitCode: 0, stdout: list.join('\n') + '\n', stderr: '' })
 const reviewer = (launch = 'R1') => worker({ phase: 'review', launch_id: launch, agent: 'rev-x' })
-const rowOf = async (ui: any, id: string) => (await lines(ui)).find(line => line.startsWith(id))!
+const rowOf = async (ui: any, id: string) => (await lines(ui)).find(line => line.slice(7).startsWith(id))!
 const textOf = async (ui: any, id: string) =>
-  (await ui.findAll({ type: 'Text' })).find((t: any) => t.text.startsWith(id))
+  (await ui.findAll({ type: 'Text' })).find((t: any) => t.text.slice(7).startsWith(id))
 
-// Band rows are the only yellow Text; the harness does not expose Text keys.
 const shipFile = (id: string, launch: string, body: object) => ({
   [`${ROOT}/a/artifacts/${id}/ship-${launch}/ship.json`]: JSON.stringify(body),
-})
-
-test('the owner band lists a blocked task, then a parked merge? task', async ($, on) => {
-  const w = newWorld({
-    ...owner('a'),
-    ...task('a', 't1-blocked', { status: 'blocked', title: 'Blocked thing' }),
-    ...task('a', 't2-merge', {
-      status: 'pr-open-pending-merge', pr_number: 291, title: 'Merge this long titled task now please',
-    }),
-    ...task('a', 't3-gate', {
-      status: 'reviewed', pr_number: 5, review_head_sha: 'aaa', ship_launch_id: 'S1', title: 'Gate task',
-    }),
-    ...shipFile('t3-gate', 'S1', { launch_id: 'S1', verdict: 'REQUEST_CHANGES', head_sha: 'aaa' }),
-    ...task('a', 't4-open', { status: 'reviewed', title: 'Open a PR' }),
-    ...task('a', 't5-busy', { title: 'Still moving' }),
-    ...task('a', 't6-done', { status: 'merged', title: 'Finished' }),
-  })
-  const clock = stub(on, w)
-  await boot($, clock)
-  const ui = await pane($, 60)
-  const texts = await ui.findAll({ type: 'Text' })
-  const band = texts.filter((t: any) => t.props.color === 'yellow')
-  expect(band.map((t: any) => t.text.trim().split(/\s+/)[0])).toEqual(['blocked', 'merge?', 'gate?', 'open-pr?'])
-  expect(band.every((t: any) => t.props.color === 'yellow')).toBe(true)
-  expect(band[1].text).toMatch(/^merge\?\s+#291\s+Merge this long titled task/)
-  const all: string[] = texts.map((t: any) => t.text)
-  const firstTask = all.findIndex(line => line.startsWith('Still moving'))
-  expect(all.indexOf(band[3].text)).toBeLessThan(firstTask)
-  expect(all.some(line => line.startsWith('merge?') && line.includes('Finished'))).toBe(false)
-  expect(band.some((t: any) => t.text.includes('Still moving') || t.text.includes('Finished'))).toBe(false)
-  await ui.press({ key: 'tab-prs' })
-  const after = await ui.findAll({ type: 'Text' })
-  expect(after.some((t: any) => t.props.color === 'yellow')).toBe(false)
-})
-
-test('the owner band renders no rows when nothing waits', async ($, on) => {
-  const w = newWorld({ ...owner('a'), ...task('a', 't1'), ...task('a', 't2') })
-  const clock = stub(on, w)
-  await boot($, clock)
-  const texts = await (await pane($)).findAll({ type: 'Text' })
-  expect(texts.some((t: any) => t.props.color === 'yellow')).toBe(false)
-  expect(texts.filter((t: any) => t.text.startsWith('t')).length).toBe(2)
 })
 
 test('a review row shows running and overdue countdowns from the deadline verb', async ($, on) => {
@@ -995,9 +968,9 @@ test('a review row shows running and overdue countdowns from the deadline verb',
   expect((await textOf(ui, 't1')).props.color).toBeUndefined()
   expect(await rowOf(ui, 't2')).toMatch(/overdue 2m/)
   expect((await textOf(ui, 't2')).props.color).toBe('red')
-  expect(await rowOf(ui, 't3')).toMatch(/review-dispatc/)
+  expect(await rowOf(ui, 't3')).toMatch(/review running\s/)
   expect((await textOf(ui, 't3')).props.color).toBeUndefined()
-  expect(await rowOf(ui, 't4')).toMatch(/review-dispatc/)
+  expect(await rowOf(ui, 't4')).toMatch(/review running\s/)
   expect((await textOf(ui, 't4')).props.color).toBeUndefined()
 })
 
@@ -1051,11 +1024,11 @@ test('a ship gate row shows co-review and the time since its launch', async ($, 
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($, 100)
-  expect(await rowOf(ui, 'ta')).toMatch(/co-review 12m/)
-  expect(await rowOf(ui, 'tb')).toMatch(/reviewed/)
-  expect(await rowOf(ui, 'tc')).toMatch(/co-review 12m/)
-  const band = (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
-  expect(band.length).toBe(0)
+  expect(await rowOf(ui, 'ta')).toMatch(/co-review running\s+12m/)
+  expect(await rowOf(ui, 'tb')).not.toMatch(/co-review running/)
+  expect(await rowOf(ui, 'tc')).toMatch(/co-review running\s+12m/)
+  const yellow = (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
+  expect(yellow.length).toBe(0)
 })
 
 test('owner tokens match the shared core state cases', () => {
@@ -1066,7 +1039,7 @@ test('owner tokens match the shared core state cases', () => {
   }
 })
 
-test('a worker blocked event puts the task in the owner band', async ($, on) => {
+test('a worker blocked event puts the task under your call', async ($, on) => {
   const w = newWorld({
     ...owner('a'),
     ...task('a', 't1', { workers: [worker()] }),
@@ -1074,10 +1047,12 @@ test('a worker blocked event puts the task in the owner band', async ($, on) => 
   })
   const clock = stub(on, w)
   await bootAt($, clock)
-  const texts = await (await pane($)).findAll({ type: 'Text' })
-  const band = texts.filter((t: any) => t.props.color === 'yellow')
-  expect(band.length).toBe(1)
-  expect(band[0].text).toMatch(/^blocked\s/)
+  const ui = await pane($)
+  const all = await lines(ui)
+  expect(all).toContain('Your call (1)')
+  const yellow = (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
+  expect(yellow.length).toBe(1)
+  expect(yellow[0].text).toMatch(/^\s+t1\s+blocked\s+50s/)
 })
 
 test('a failed deadline read keeps the last countdown', async ($, on) => {
@@ -1116,5 +1091,360 @@ test('a deadline result for an old lease is never drawn under the new one', asyn
   await clock.settle()
   await clock.advance(15000)
   const ui = await pane($, 100)
-  expect(await rowOf(ui, 'r1')).toMatch(/review-dispatc/)
+  expect(await rowOf(ui, 'r1')).toMatch(/review running\s/)
+})
+
+const HEAD = 'a'.repeat(40)
+const OLD = 'b'.repeat(40)
+const ghPr = (number: number, over: object = {}) => ({
+  number, title: `PR ${number}`, isDraft: false, headRefName: `br${number}`, headRefOid: HEAD,
+  statusCheckRollup: [], reviewDecision: '', reviews: [], ...over,
+})
+const approval = (oid: string | null, secAgo = 60) => ({
+  author: { login: 'human' }, state: 'APPROVED', submittedAt: iso(secAgo),
+  commit: oid === null ? null : { oid },
+})
+const withPrs = (w: World, list: object[]) => {
+  w.gh = { exitCode: 0, stderr: '', stdout: prJson(list) }
+}
+// A reviewed task on branch br<n> whose pinned ship gate approved HEAD.
+const reviewed = (id: string, n: number, over: object = {}) => ({
+  ...task('a', id, {
+    status: 'reviewed', pr_number: n, branch: `br${n}`, head_sha: HEAD, review_head_sha: HEAD,
+    ship_launch_id: 'S1', title: id, ...over,
+  }),
+  ...shipFile(id, 'S1', { launch_id: 'S1', verdict: 'APPROVE', head_sha: HEAD }),
+})
+const headers = async (ui: any) => (await lines(ui)).filter(t => /^[A-Z][A-Za-z ]+ \(\d+\)$/.test(t))
+
+test('tasks group under fixed headers in who-acts-next order', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 'ya', { status: 'blocked', title: 'Blocked thing', updated: iso(3000) }),
+    ...task('a', 'yb', {
+      status: 'pr-open-pending-merge', pr_number: 291, branch: 'br291', head_sha: HEAD,
+      title: 'Merge now', updated: iso(7200),
+    }),
+    ...task('a', 'nd', { status: 'completed', title: 'Review not sent task', updated: iso(100) }),
+    ...reviewed('wr', 5, { title: 'Waits on human', updated: iso(600) }),
+    ...task('a', 'aw', { title: 'Doing work', workers: [worker({ started_ns: ns(30) })] }),
+  })
+  withPrs(w, [ghPr(291), ghPr(5, { reviewDecision: 'REVIEW_REQUIRED' })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await headers(ui)).toEqual([
+    'Your call (2)', 'Needs director (1)', 'Waiting on reviewers (1)', 'Agents working (1)',
+  ])
+  const all = await lines(ui)
+  const at = (title: string) => all.findIndex(t => t.slice(7).startsWith(title))
+  expect(at('Merge now')).toBeLessThan(at('Blocked thing'))
+  expect(all[at('Merge now')]).toMatch(/^#291\s+Merge now\s+ready to merge\s+2h\s*$/)
+  expect(all[at('Blocked thing')]).toMatch(/^\s+Blocked thing\s+blocked\s+50m\s*$/)
+  expect(all[at('Review not sent task')]).toMatch(/^\s+Review not sent task\s+review not sent\s+1m\s*$/)
+  expect(all[at('Waits on human')]).toMatch(/^#5\s+Waits on human\s+needs a human review\s+10m\s*$/)
+  expect(all[at('Doing work')]).toMatch(/^\s+Doing work\s+plan running\s+30s\s*$/)
+  const yellow = (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
+  expect(yellow.map((t: any) => t.text.slice(7, 20).trim())).toEqual(['Merge now', 'Blocked thing'])
+
+  // An empty group draws no header.
+  for (const id of ['ya', 'yb', 'nd', 'wr']) delete w.files[`${ROOT}/a/tasks/${id}.json`]
+  await clock.advance(15000)
+  expect(await headers(ui)).toEqual(['Agents working (1)'])
+})
+
+test('a human change request outranks a ship approve', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...reviewed('t1', 5) })
+  withPrs(w, [ghPr(5, { reviewDecision: 'CHANGES_REQUESTED' })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await headers(ui)).toEqual(['Waiting on reviewers (1)'])
+  expect(await rowOf(ui, 't1')).toMatch(/changes requested/)
+  expect((await lines(ui)).join('\n')).not.toContain('ready to merge')
+  // The ship verdict is APPROVE at head; only the human review blocks.
+  expect(shipVerdict({ head_sha: HEAD }, { verdict: 'APPROVE', head_sha: HEAD })).toBe('ship:APPROVE')
+})
+
+test('a required review waits on reviewers', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...reviewed('t1', 5) })
+  withPrs(w, [ghPr(5, { reviewDecision: 'REVIEW_REQUIRED' })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await headers(ui)).toEqual(['Waiting on reviewers (1)'])
+  expect(await rowOf(ui, 't1')).toMatch(/needs a human review/)
+})
+
+test('an approval on an older commit waits on reviewers', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...reviewed('t1', 5), ...reviewed('t2', 6) })
+  withPrs(w, [
+    ghPr(5, {
+      reviewDecision: 'APPROVED', reviews: [approval(OLD)],
+      latestReviews: [{ author: { login: 'human' }, state: 'APPROVED', commit: { oid: '' } }],
+    }),
+    ghPr(6, { reviewDecision: 'APPROVED', reviews: [approval(OLD, 200), approval(HEAD, 100)] }),
+  ])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await rowOf(ui, 't1')).toMatch(/approval on older head/)
+  expect(await rowOf(ui, 't2')).toMatch(/ready to merge/)
+  expect(await headers(ui)).toEqual(['Your call (1)', 'Waiting on reviewers (1)'])
+})
+
+test('an empty review decision with a ship approve is ready to merge', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...reviewed('t1', 5) })
+  withPrs(w, [ghPr(5, { reviewDecision: '' })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await headers(ui)).toEqual(['Your call (1)'])
+  expect(await rowOf(ui, 't1')).toMatch(/ready to merge/)
+})
+
+test('a record without a PR number names the open PR on its branch', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { status: 'reviewed', pr_number: null, branch: 'br8', title: 't1' }),
+    ...task('a', 't2', { status: 'reviewed', pr_number: null, branch: 'nowhere', title: 't2' }),
+  })
+  withPrs(w, [ghPr(8)])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await headers(ui)).toEqual(['Your call (1)', 'Needs director (1)'])
+  expect(await rowOf(ui, 't1')).toMatch(/record lacks PR #8/)
+  expect(await rowOf(ui, 't2')).toMatch(/open the PR/)
+  expect((await textOf(ui, 't2')).props.color).toBe('yellow')
+})
+
+test('a moved PR head or a missing gate needs the director', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...reviewed('t1', 5),
+    ...task('a', 't2', {
+      status: 'reviewed', pr_number: 6, branch: 'br6', head_sha: HEAD, review_head_sha: HEAD, title: 't2',
+    }),
+  })
+  withPrs(w, [
+    ghPr(5, { headRefOid: OLD }),
+    ghPr(6, { reviewDecision: 'APPROVED', reviews: [approval(HEAD)] }),
+  ])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await headers(ui)).toEqual(['Needs director (2)'])
+  expect(await rowOf(ui, 't1')).toMatch(/PR head moved/)
+  expect(await rowOf(ui, 't2')).toMatch(/approved; no co-review/)
+})
+
+test('a task idle over 3 days folds into the parked count', async ($, on) => {
+  const day = 86400
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 'p1', { status: 'completed', title: 'Idle director', updated: iso(4 * day) }),
+    ...task('a', 'c1', { status: 'blocked', title: 'Old question', updated: iso(4 * day) }),
+    ...task('a', 'r1', { status: 'completed', title: 'Recent director', updated: iso(2 * day) }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  let all = await lines(ui)
+  expect(all).toContain('Parked: 1 idle over 3 days')
+  expect(all.some(t => t.includes('Idle director'))).toBe(false)
+  expect(all.some(t => t.includes('Old question'))).toBe(true)
+  expect(all.some(t => t.includes('Recent director'))).toBe(true)
+
+  // A worker launched 4 days ago with no stop or done record is stale, not working.
+  delete w.files[`${ROOT}/a/tasks/p1.json`]
+  Object.assign(w.files, task('a', 'p2', { title: 'Silent worker', workers: [worker({ started_ns: ns(4 * day) })] }))
+  await clock.advance(15000)
+  all = await lines(ui)
+  expect(all).toContain('Parked: 1 idle over 3 days')
+  expect(all.some(t => t.includes('Silent worker'))).toBe(false)
+  expect(await headers(ui)).not.toContain('Agents working (1)')
+})
+
+test('without a PR list a merge row never says ready to merge', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { status: 'pr-open-pending-merge', pr_number: 5, title: 't1' }),
+  })
+  w.gh = 'reject'
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await rowOf(ui, 't1')).toMatch(/merge\? review unknown/)
+  expect((await lines(ui)).join('\n')).not.toContain('ready to merge')
+})
+
+test('a review record outranks a stale review outcome', () => {
+  const record = (over: object = {}) => ({
+    task_id: 't1', review_head_sha: HEAD, review_outcome: 'changes-requested',
+    workers: [{ phase: 'review', launch_id: 'R1' }], ...over,
+  })
+  const sidecar = (over: object = {}) => ({
+    launch_id: 'R1', reviewed_head_sha: HEAD, outcome: 'approved', blocking_count: 0, ts: iso(5), ...over,
+  })
+  expect(shipVerdict(record(), null, sidecar())).toBe('review:approved')
+  expect(shipVerdict(record({ retired_review_launch_ids: ['R0'] }), null, sidecar())).toBe('review:approved')
+  expect(shipVerdict(record(), null, null)).toBe('review:changes-requested')
+  const stale = [
+    shipVerdict(record({ retired_review_launch_ids: ['R1'] }), null, sidecar()),
+    shipVerdict(record({ retired_review_launch_ids: 'R1' }), null, sidecar()),
+    shipVerdict(record({ workers: [{ phase: 'review', launch_id: 'R2' }] }), null, sidecar()),
+    shipVerdict(record(), null, sidecar({ reviewed_head_sha: OLD })),
+  ]
+  for (const verdict of stale) expect(verdict).toBe('review:changes-requested')
+  expect(shipVerdict(record({ review_outcome: undefined }), null, sidecar({ blocking_count: 1 })))
+    .toBe('review:changes-requested')
+})
+
+test('task rows fit the pane and drop internal detail', async ($, on) => {
+  const w = newWorld({
+    ...owner('a', 7),
+    ...task('a', 'w1', {
+      title: 'A long working title that must be clipped to fit the narrow pane', pr_number: 12,
+      workers: [worker({ agent: 'impl-secret-launch', phase: 'implement', started_ns: ns(60) })],
+    }),
+    ...reviewed('w2', 5, { title: 'A long ready to merge title that must be clipped to fit the narrow pane' }),
+    ...task('a', 'w3', { status: 'blocked', title: 'Blocked' }),
+  })
+  w.root = `/a/b/${'r'.repeat(80)}`
+  withPrs(w, [ghPr(5)])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  for (const cols of [60, 109]) {
+    const ui = await pane($, cols)
+    const all = await lines(ui)
+    await ui.unmount()
+    expect(all.length).toBeGreaterThan(4)
+    for (const line of all) {
+      expect(line.length).toBeLessThanOrEqual(cols)
+      expect(line).not.toMatch(/\b[0-9a-f]{7}\b/)
+      for (const hidden of ['@', 'impl-secret-launch', 'fence']) expect(line).not.toContain(hidden)
+    }
+    expect(all[0]).toContain('rrrr')
+    expect(all[0]).toMatch(/ \| read \d\d:\d\d:\d\d$/)
+  }
+})
+
+test('pr rows summarise the human review state', () => {
+  const list = [
+    ghPr(1, { reviewDecision: '' }),
+    ghPr(2, { reviewDecision: 'CHANGES_REQUESTED' }),
+    ghPr(3, { reviewDecision: 'REVIEW_REQUIRED' }),
+    ghPr(4, { reviewDecision: 'APPROVED', reviews: [approval(OLD, 200), approval(HEAD, 100)] }),
+    ghPr(5, { reviewDecision: 'APPROVED', reviews: [approval(HEAD, 200), approval(OLD, 100)] }),
+    ghPr(6, { reviewDecision: 'APPROVED', reviews: [approval(null)] }),
+    ghPr(7, { reviewDecision: 'APPROVED', reviews: [] }),
+    ghPr(8, { reviewDecision: 'SOMETHING_NEW' }),
+    ghPr(9, { reviewDecision: 'APPROVED', reviews: [approval(HEAD, 100), approval(OLD, 100)] }),
+    ghPr(10, { reviewDecision: 'APPROVED', reviews: [approval(OLD, 100), approval(HEAD, 100)] }),
+    ghPr(11, { reviews: [{ state: 'COMMENTED', submittedAt: iso(30), commit: { oid: HEAD } }] }),
+  ]
+  const rows = prRows(prJson(list), [])
+  expect(rows.map(r => r.human)).toEqual([
+    'none', 'changes', 'required', 'approved', 'approved-old', 'approved-old', 'approved-old',
+    'required', 'approved-old', 'approved', 'none',
+  ])
+  expect(rows[0]).toMatchObject({ branch: 'br1', headOid: HEAD, reviewAt: null })
+  expect(rows[3].reviewAt).toBe(NOW - 100000)
+  expect(rows[10].reviewAt).toBe(NOW - 30000)
+})
+
+const deadline = (launch: string, state: 'running' | 'expired', remaining: number | null) =>
+  ({ at: NOW, rows: { t1: { launch, state, remaining, deadlineSecs: 900, hardSecs: 1500 } } })
+const pinnedShip = (over: object = {}) => ({ launch_id: 'S1', verdict: 'APPROVE', head_sha: HEAD, ...over })
+const shipRecord = (over: object = {}) => ({
+  status: 'reviewed', pr_number: 5, branch: 'br5', head_sha: HEAD, review_head_sha: HEAD,
+  ship_launch_id: 'S1', ...over,
+})
+const finishedReview = { launch_id: 'R1', reviewed_head_sha: HEAD, outcome: 'approved', blocking_count: 0, ts: iso(5) }
+
+test('classify gives each wait phrase its group', () => {
+  type Opts = { ship?: object | null; sidecar?: object; done?: object; prs?: object[]; complete?: boolean; deadlines?: any }
+  const run = (record: object, o: Opts = {}) => classify(
+    taskRow('t1.json', { task_id: 't1', status: 'in-progress', ...record }, o.done ?? null,
+      (o.ship ?? null) as any, null, o.sidecar ?? null),
+    prRows(prJson(o.prs ?? []), []), o.complete ?? true, NOW, o.deadlines ?? null,
+  )
+  const dispatched = { status: 'review-dispatched', review_head_sha: HEAD, workers: [reviewer()] }
+  const cases: Array<[string, ReturnType<typeof run>, string, string]> = [
+    ['blocked', run({ status: 'blocked' }), 'Your call', 'blocked'],
+    ['review expired', run(dispatched, { deadlines: deadline('R1', 'expired', null) }), 'Needs director', 'review expired'],
+    ['review running 10m', run(dispatched, { deadlines: deadline('R1', 'running', 600) }), 'Agents working', 'review running 10m'],
+    ['co-review running', run(shipRecord({ workers: [worker({ phase: 'ship', launch_id: 'S1' })] })), 'Agents working', 'co-review running'],
+    ['plan running', run({ workers: [worker()] }), 'Agents working', 'plan running'],
+    ['implement state unknown', run({
+      workers: [worker({ phase: 'implement', reprompts: [{ started_ns: ns(50), status: 'uncertain' }] })],
+    }), 'Agents working', 'implement state unknown'],
+    ['review not sent', run({ status: 'completed' }), 'Needs director', 'review not sent'],
+    ['repair not started', run({ status: 'changes-requested' }), 'Needs director', 'repair not started'],
+    ['review approved', run(dispatched, { sidecar: finishedReview }), 'Needs director', 'review approved'],
+    ['implement done', run({ workers: [worker({ phase: 'implement' })] }, {
+      done: { launch_id: 'L1', outcome: 'completed', ts: iso(30) },
+    }), 'Needs director', 'implement done'],
+    ['no worker', run({}), 'Needs director', 'no worker'],
+    ['implement no signal', run({ workers: [worker({ phase: 'implement', started_ns: ns(4 * 86400) })] }), 'Parked', 'implement no signal'],
+    ['plan no signal', run({ workers: [worker({ started_ns: null })] }), 'Needs director', 'plan no signal'],
+    ['record unreadable', classify(taskRow('bad.json', null, null, null), [], true, NOW), 'Needs director', 'record unreadable'],
+    ['paused', run({ status: 'paused' }), 'Needs director', 'paused'],
+    ['merge? review unknown', run({ status: 'pr-open-pending-merge', pr_number: 5 }, { complete: false }), 'Your call', 'merge? review unknown'],
+    ['open the PR (incomplete list)', run({ status: 'reviewed' }, { complete: false }), 'Your call', 'open the PR'],
+    ['record lacks PR #8', run({ status: 'reviewed', branch: 'br8' }, { prs: [ghPr(8)] }), 'Needs director', 'record lacks PR #8'],
+    ['PR is not open', run(shipRecord({ pr_number: 9 })), 'Needs director', 'PR is not open'],
+    ['PR head moved', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { headRefOid: OLD })] }), 'Needs director', 'PR head moved'],
+    ['changes requested', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'CHANGES_REQUESTED' })] }), 'Waiting on reviewers', 'changes requested'],
+    ['needs a human review', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'REVIEW_REQUIRED' })] }), 'Waiting on reviewers', 'needs a human review'],
+    ['approval on older head', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'APPROVED', reviews: [approval(OLD)] })] }), 'Waiting on reviewers', 'approval on older head'],
+    ['ready to merge', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5)] }), 'Your call', 'ready to merge'],
+    ['co-review on old head', run(shipRecord(), { ship: pinnedShip({ head_sha: OLD }), prs: [ghPr(5)] }), 'Needs director', 'co-review on old head'],
+    ['co-review: changes', run(shipRecord(), { ship: pinnedShip({ verdict: 'CHANGES' }), prs: [ghPr(5)] }), 'Needs director', 'co-review: changes'],
+    ['approved; no co-review', run(shipRecord(), { prs: [ghPr(5, { reviewDecision: 'APPROVED', reviews: [approval(HEAD)] })] }), 'Needs director', 'approved; no co-review'],
+    ['co-review not run', run(shipRecord(), { prs: [ghPr(5)] }), 'Needs director', 'co-review not run'],
+  ]
+  for (const [name, got, group, waits] of cases) {
+    expect({ name, group: got.group, waits: got.waits }).toEqual({ name, group, waits })
+  }
+  expect(cases[1][1].isLate).toBe(true)
+  expect(cases[8][1].group).not.toBe('Agents working')
+  // A finished review outranks an expired deadline, and is not drawn red.
+  const finished = run(dispatched, { sidecar: finishedReview, deadlines: deadline('R1', 'expired', null) })
+  expect({ group: finished.group, waits: finished.waits, isLate: finished.isLate })
+    .toEqual({ group: 'Needs director', waits: 'review approved', isLate: false })
+})
+
+test('the age is the latest activity the panel reads', () => {
+  const sidecar = (over: object = {}) => ({ ...finishedReview, ts: iso(300), ...over })
+  const build = (record: object = {}, o: { sidecar?: object; ship?: object; done?: object } = {}) =>
+    taskRow('t1.json', {
+      task_id: 't1', status: 'review-dispatched', review_head_sha: HEAD,
+      workers: [reviewer()], ship_launch_id: 'S1', ...record,
+    }, o.done ?? null, (o.ship ?? null) as any, null, o.sidecar ?? null)
+  const ago = (secs: number) => NOW - secs * 1000
+  const start = { workers: [{ ...reviewer(), started_ns: ns(1000) }] }
+  expect(build(start).since).toBe(ago(1000))
+  const reprompted = { workers: [{ ...start.workers[0], reprompts: [{ started_ns: ns(600), status: 'delivered' }] }] }
+  expect(build(reprompted).since).toBe(ago(600))
+  const done = { launch_id: 'L0', outcome: 'completed', ts: iso(400) }
+  expect(build(reprompted, { done }).since).toBe(ago(400))
+  expect(build(reprompted, { done, sidecar: sidecar() }).since).toBe(ago(300))
+  // A sidecar that is not current is ignored.
+  expect(build(reprompted, { done, sidecar: sidecar({ launch_id: 'R9', ts: iso(10) }) }).since).toBe(ago(400))
+  const ship = { launch_id: 'S1', verdict: 'APPROVE', head_sha: HEAD, written_at: iso(200) }
+  expect(build(reprompted, { done, sidecar: sidecar(), ship }).since).toBe(ago(200))
+  const all = { done, sidecar: sidecar(), ship }
+  expect(build({ ...reprompted, updated: iso(100) }, all).since).toBe(ago(100))
+  // Unparseable values are skipped.
+  expect(build({ ...reprompted, updated: 'not a date' }, { ...all, ship: { ...ship, written_at: 'x' } }).since)
+    .toBe(ago(300))
+  expect(build({ workers: [], updated: 'x' }).since).toBeNull()
+  // A PR review counts when the row matches a PR.
+  const row = build({ ...reprompted, updated: iso(100) }, all)
+  const prs = prRows(prJson([ghPr(5, { reviews: [{ state: 'COMMENTED', submittedAt: iso(50) }] })]), [])
+  expect(classify(row, prs, true, NOW).since).toBe(ago(100))
+  const matched = { ...row, branch: 'br5' }
+  expect(classify(matched, prs, true, NOW).since).toBe(ago(50))
 })
