@@ -10,7 +10,8 @@ therefore misses `rm -rf /*`, `rm -rf ~/*`, `rm -rf $HOME/*`, `rm -rf .git/*`,
 (`sh -c 'rm -rf /*'`), brace-expanded targets (`rm -rf /{,bin}`), and variable
 targets (`rm -rf "$X"`) -- see push_guard.py's docstring for the same class of
 problem with git push. This hook resolves what a literal rule cannot: it
-splits compound commands, unwraps shell/env/nice-style wrappers, shlex-parses
+splits compound commands, skips leading shell keywords (`do`, `then`, `{`, `!`),
+unwraps shell/env/nice-style wrappers, shlex-parses
 each `rm`/`rmdir` invocation, brace-expands and normalizes every target, and
 denies the shapes that are actually catastrophic. A permissionDecision "ask"
 could be auto-approved in auto permission mode, so the hook denies (exit 2)
@@ -102,6 +103,7 @@ def is_env_assignment(tok: str) -> bool:
 
 
 def strip_prefixes(tokens: list[str]) -> list[str]:
+    """Drop leading shell keywords, env assignments and wrapper names."""
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -109,9 +111,17 @@ def strip_prefixes(tokens: list[str]) -> list[str]:
             i += 1
         elif basename(tok) in PREFIX_WRAPPERS:
             i += 1
+        elif tok in LEADING_KEYWORDS:
+            i += 1
         else:
             break
     return tokens[i:]
+
+
+def skipped_keyword(tokens: list[str], stripped: list[str]) -> bool:
+    """True when strip_prefixes dropped a conditional keyword; a cd there may never run."""
+    dropped = tokens[: len(tokens) - len(stripped)]
+    return any(t in LEADING_KEYWORDS and t not in ("{", "!") for t in dropped)
 
 
 def strip_line_comments(command: str) -> str:
@@ -389,7 +399,8 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
     if cwd is None:
         cwd = real_cwd
     for tokens in split_segments(tokenize(command)):
-        tokens = strip_prefixes(tokens)
+        raw = tokens
+        tokens = strip_prefixes(raw)
         if not tokens:
             continue
         head = basename(tokens[0])
@@ -398,7 +409,8 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
             if reason:
                 return reason
         elif head == "cd":
-            cwd = resolve_cd_target(tokens, cwd, home)
+            if not skipped_keyword(raw, tokens):
+                cwd = resolve_cd_target(tokens, cwd, home)
         elif head in SHELL_WRAPPERS:
             inner = extract_shell_c_arg(tokens)
             if inner is not None:

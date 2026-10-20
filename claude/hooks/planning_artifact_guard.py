@@ -450,13 +450,14 @@ def check_command(command, ctx, start=None):
             and len(stripped) >= 2
             and not stripped[1].lstrip("+-").isdigit()
         )
-        if (head == "cd" or pushd_dir) and term not in ("|", "&"):
+        kw = rm_guard.skipped_keyword(raw, stripped)
+        if (head == "cd" or pushd_dir) and term not in ("|", "&") and not kw:
             targets = {
                 grg.cd_target(stripped, cwd, home) if grg.literal(cwd) else grg.UNTRUSTED
                 for cwd in possible
             }
             chain.record_cd(next(iter(targets)) if len(targets) == 1 else grg.UNTRUSTED)
-        elif head in ("pushd", "popd") and term not in ("|", "&"):
+        elif head in ("pushd", "popd") and term not in ("|", "&") and not kw:
             chain.record_cd(grg.UNTRUSTED)
         reason = None
         if overridden or not stripped or head in ("cd", "pushd", "popd"):

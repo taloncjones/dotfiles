@@ -636,6 +636,26 @@ rmg_allows "allows rm -rf ~/proj/build" 'rm -rf ~/proj/build'
 rmg_allows 'allows rm -rf $HOME/.cache/x' 'rm -rf $HOME/.cache/x'
 rmg_allows "allows rm -rf .git/index.lock" 'rm -rf .git/index.lock'
 rmg_allows "allows non-rm command" 'echo rm -rf /'
+# Leading shell keywords: the rm after do/then/else/elif/if/while/until/{/! is inspected.
+rmg_blocks "blocks rm -rf /* after a do keyword" 'for x in 1; do rm -rf /*; done'
+rmg_blocks "blocks rm -rf /* after a then keyword" 'if true; then rm -rf /*; fi'
+rmg_blocks "blocks rm -rf /* after an else keyword" 'if false; then :; else rm -rf /*; fi'
+rmg_blocks "blocks rm -rf /* after an elif keyword" 'if false; then :; elif rm -rf /*; then :; fi'
+rmg_blocks "blocks rm -rf /* after an if keyword" 'if rm -rf /*; then :; fi'
+rmg_blocks "blocks rm -rf /* after a while keyword" 'while rm -rf /*; do :; done'
+rmg_blocks "blocks rm -rf /* after an until keyword" 'until rm -rf /*; do :; done'
+rmg_blocks "blocks rm -rf /* after a { keyword" '{ rm -rf /*; }'
+rmg_blocks "blocks rm -rf /* after a ! keyword" '! rm -rf /*'
+rmg_blocks "blocks sudo rm -rf /etc after a do keyword" 'for x in 1; do sudo rm -rf /etc; done'
+rmg_blocks "blocks rm -rf /* after time and a ! keyword" 'time ! rm -rf /*'
+rmg_blocks "blocks bash -c rm after a do keyword" "for x in 1; do bash -c 'rm -rf /*'; done"
+rmg_blocks "blocks cd / then rm -rf * after a { keyword" '{ cd / && rm -rf *; }'
+rmg_allows "allows literal rm -rf build after a do keyword" 'for f in a; do rm -rf build; done'
+rmg_allows "allows literal rm -rf build after a then keyword" 'if [ -d build ]; then rm -rf build; fi'
+rmg_allows "allows literal rm -rf ./dist after a { keyword" '{ rm -rf ./dist; }'
+rmg_allows "allows a keyword word as a later argument" 'echo do rm -rf /*'
+rmg_blocks_at "blocks rm -rf * after a conditional cd that may not run" 'if [ -d build ]; then cd build; fi; rm -rf *' "$RMG_HOME"
+rmg_allows_at "allows rm -rf build after a conditional cd that may not run" 'if false; then cd /etc; fi; rm -rf build' "$RMG_HOME"
 if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}' \
         | HOME="$RMG_HOME" "$RMG"; then
     printf 'PASS  rmg: allows non-Bash tool\n'
@@ -743,6 +763,8 @@ RMG_D7DIR=$(mktemp -d)
 rmg_denies_with "deny text D7 cwd at git root" "$(rmg_payload_at 'rm -rf .' "$RMG_D7DIR")" \
     'Blocked: rm target is the current directory, which is a git worktree root or the home directory. Fix: name the specific files or subdirectories to remove, or skip the rm.'
 rm -rf "$RMG_D7DIR"
+rmg_denies_with "deny text D2 after a do keyword" "$(rmg_payload 'for x in 1; do rm -rf /*; done')" \
+    'Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
 rmg_denies_with "deny text D1 via Codex payload shape" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"rm -f \"$RUN_DIR/seat.pid\"","workdir":"/Users/rmg-test-user/proj"}}' "$RMG_D1"
 
