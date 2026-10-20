@@ -148,8 +148,8 @@ or chooses a different account for the caller.
 ## Compact presentation (section 8)
 
 Compact presentation. The Herdr sidebar label of a task workspace is
-`<title>`, or `? <title>` when the state token ends in `?`, at most 25
-characters. `<title>` is the record's `title` (the Jira summary or todo
+`<title>`, or `? <title>` when the state token ends in `?`, within 25 characters.
+`<title>` is the record's `title` (the Jira summary or todo
 title) with ticket keys and `#<n>` PR references removed; the task record
 keeps the ids. The fleet panel and todo board show the state itself. An
 empty title falls back to the state token. `core.task_label` derives the
