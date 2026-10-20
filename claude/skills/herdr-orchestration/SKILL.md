@@ -199,8 +199,11 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
    (add `--personal` when this director runs on an intentional personal
    account in a work repo). The verb splits this pane, writes
    `STATE_ROOT/<slug>/rollover-pending.json` naming the new pane and a
-   one-time token, starts `director` there, and waits up to 120 s for the
-   new director to adopt the lease.
+   one-time token, starts `director` there with this session's recorded model
+   and effort, and waits up to 120 s for the new director to adopt the lease.
+   A `[WARNING] rollover: no recorded model` (or `effort`) line means the
+   statusline had no usable value, so the new director starts on the account
+   default.
 4. `rollover: handed over to pane <p> ...` (exit 0): this session is fenced
    out. The verb stopped this session's watch; on a `watch:` line that says
    `unknown` or `not scanned`, TaskStop the watch task. Make

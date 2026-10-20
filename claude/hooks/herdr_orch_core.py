@@ -1166,10 +1166,9 @@ def context_record_path(session):
     return context_dir() / f"{session}.json"
 
 
-def rollover_due(rd, session, now=None):
-    """(used_pct, threshold) when this session's fresh context record has
-    reached config rollover_pct, else None. A stale, foreign, oversized or
-    malformed record never triggers; the model never writes the record."""
+def _read_context_record(session):
+    """This session's parsed context record, or None when the id is invalid
+    and the record is missing, oversized, malformed or foreign."""
     if not isinstance(session, str) or not _CONTEXT_SESSION_RE.fullmatch(session):
         return None
     try:
@@ -1178,6 +1177,28 @@ def rollover_due(rd, session, now=None):
     except (OSError, ValueError):
         return None
     if not isinstance(rec, dict) or rec.get("session_id") != session:
+        return None
+    return rec
+
+
+def recorded_launch_profile(session):
+    """(model, effort) the host last reported for this session, each None
+    unless it passes the allowlist. Age is not checked."""
+    rec = _read_context_record(session) or {}
+    model, effort = rec.get("model"), rec.get("effort")
+    if not (isinstance(model, str) and ROLLOVER_MODEL_RE.fullmatch(model)):
+        model = None
+    if effort not in EFFORT_LEVELS:
+        effort = None
+    return model, effort
+
+
+def rollover_due(rd, session, now=None):
+    """(used_pct, threshold) when this session's fresh context record has
+    reached config rollover_pct, else None. A stale, foreign, oversized or
+    malformed record never triggers; the model never writes the record."""
+    rec = _read_context_record(session)
+    if rec is None:
         return None
     used, ts = rec.get("used_pct"), rec.get("ts")
     if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= 100:
@@ -2842,7 +2863,9 @@ def watch_state(root_pid, slug):
 ROLLOVER_PENDING_FILE = "rollover-pending.json"
 ROLLOVER_ACK_SECS = 120
 ROLLOVER_POLL_SECS = 1.0
-ROLLOVER_LAUNCH = "director 'resume director'"
+ROLLOVER_MODEL_RE = re.compile(
+    r"(?:(?:%s)|claude-(?:%s)-[0-9][a-z0-9-]{0,40})(?:\[1m\])?\Z"
+    % ("|".join(CAP_MODELS), "|".join(CAP_MODELS)))
 ROLLOVER_TOKEN_RE = re.compile(r"[0-9a-f]{32}\Z")
 ROLLOVER_CARRY_MAX = 4000
 
@@ -5071,9 +5094,17 @@ def _adopt_rollover(ns) -> int:
     return 0
 
 
-def rollover_launch(scope_kind):
+def rollover_launch(scope_kind, model=None, effort=None):
     """The shell line that starts the successor on this director's account."""
-    return "director --personal 'resume director'" if scope_kind == "personal" else ROLLOVER_LAUNCH
+    parts = ["director"]
+    if scope_kind == "personal":
+        parts.append("--personal")
+    if model is not None:
+        parts += ["--model", shlex.quote(model)]
+    if effort is not None:
+        parts += ["--effort", shlex.quote(effort)]
+    parts.append("'resume director'")
+    return " ".join(parts)
 
 
 def marker_live(marker, session, fence):
@@ -5212,8 +5243,13 @@ def _rollover(ns) -> int:
         print("rollover: carry notes not saved; this session keeps the lease")
         return failed("carry-unsaved", hid, new_pane, close_pane=True)
     scope_kind = ((_PAYLOAD_SELECTION.get() or {}).get("scope") or {}).get("kind")
+    model, effort = recorded_launch_profile(ns.session)
+    for name, value in (("model", model), ("effort", effort)):
+        if value is None:
+            print(f"[WARNING] rollover: no recorded {name} for this session; "
+                  f"the new director starts on the account default {name}")
     try:
-        run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
+        run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind, model, effort)],
                   env=env, json_result=False)
     except Exception:  # noqa: BLE001
         # herdr may have delivered the command before failing; the lease decides.

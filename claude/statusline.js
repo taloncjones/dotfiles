@@ -250,6 +250,16 @@ function recordContext(data, env, nowMs) {
       used_pct: used,
       ts: Math.floor(nowMs / 1000),
     };
+    // The successor director launches with these on rollover.
+    const modelId = data.model?.id;
+    if (typeof modelId === "string" && modelId && modelId.length <= 64) {
+      const oneM = data.context_window.context_window_size >= 1000000;
+      record.model = oneM && !modelId.endsWith("[1m]") ? `${modelId}[1m]` : modelId;
+    }
+    const effort = data.effort?.level;
+    if (typeof effort === "string" && effort && effort.length <= 16) {
+      record.effort = effort;
+    }
     fs.writeFileSync(tmp, JSON.stringify(record) + "\n", { mode: 0o600 });
     fs.renameSync(tmp, file);
   } catch (e) {
