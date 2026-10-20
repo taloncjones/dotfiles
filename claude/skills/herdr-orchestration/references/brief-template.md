@@ -518,6 +518,11 @@ below. You do not merge, push, post, or edit anything.
 herdr-ship-brief: tier=full
 ```
 
+```brief:ship-tier-auto
+herdr-ship-brief: tier=auto
+herdr-ship-small-caps: <small_files>/<small_lines>
+```
+
 ```brief:ship-tier-delta
 herdr-ship-brief: tier=delta
 herdr-ship-prior-handoff: <prior_handoff>

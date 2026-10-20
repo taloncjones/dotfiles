@@ -18,12 +18,13 @@ LIGHT_SEATS = ("codex", "verifier")
 FULL_SEATS = ("claude", "codex", "breaker", "verifier")
 DELTA_SEATS = ("claude", "verifier")
 LESSONS_SEATS = ("verifier",)
+SMALL_SEATS = ("codex", "verifier")
 _TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS, "delta": DELTA_SEATS,
-               "lessons": LESSONS_SEATS}
+               "lessons": LESSONS_SEATS, "small": SMALL_SEATS}
 _CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker"), "delta": (),
-                "lessons": ()}
+                "lessons": (), "small": ("codex",)}
 # A light gate may review a lessons-only diff; it is the stronger gate.
-_DIFF_CLASSES = {"light": ("light", "lessons"), "lessons": ("lessons",)}
+_DIFF_CLASSES = {"light": ("light", "lessons"), "lessons": ("lessons",), "small": ("small",)}
 DELTA_MAX_FILES = 5
 DELTA_MAX_LINES = 150
 _BLAST_RADIUS = ("bounded", "unbounded")
@@ -302,7 +303,7 @@ def _substitutes(
     return substituted
 
 
-def _diff_class_ok(preconditions: object, root: Path, tier: str) -> bool:
+def _diff_class_ok(preconditions: object, root: Path, tier: str, small: dict | None = None) -> bool:
     """True when the digest-bound frozen diff classifies as one the tier may gate."""
     entry = preconditions.get("diff") if isinstance(preconditions, dict) else None
     if not isinstance(entry, dict):
@@ -316,13 +317,16 @@ def _diff_class_ok(preconditions: object, root: Path, tier: str) -> bool:
     if hashlib.sha256(content).hexdigest() != entry.get("sha256"):
         return False
     change_class = _load_change_class()
-    paths = change_class.paths_from_diff(content.decode("utf-8", "replace"))
+    text = content.decode("utf-8", "replace")
+    if tier == "small":
+        return change_class.tier_of(text, small) == "small"
+    paths = change_class.paths_from_diff(text)
     return paths is not None and change_class.classify(paths) in _DIFF_CLASSES[tier]
 
 
-def _lessons_ci_ok(preconditions: object, root: Path) -> bool:
-    """True when the digest-bound CI artifact holds at least one check; CI is
-    where the lessons contract check runs."""
+def _ci_has_checks(preconditions: object, root: Path) -> bool:
+    """True when the digest-bound CI artifact holds at least one check; the lessons
+    and small tiers take CI as their test evidence."""
     entry = preconditions.get("ci") if isinstance(preconditions, dict) else None
     path, errors = _load_preconditions()._artifact(entry, root, "CI")
     if errors:
@@ -491,8 +495,8 @@ def _delta_prior(block: dict, wanted: dict, expected: dict, root: Path, reasons:
     prior_expected, _ = _json_artifact(block.get("prior_expected"), root, "delta prior expected", reasons)
     if prior is None or prior_expected is None:
         return
-    if prior.get("class") != "full":
-        reasons.append("delta prior run is not a full round")
+    if prior.get("class") not in ("full", "small"):
+        reasons.append("delta prior run is not a full or small round")
         return
     verdict = evaluate(prior, prior_expected, prior_path.parent)["verdict"]
     if verdict != "APPROVE":
@@ -597,7 +601,7 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
             if block is not None:
                 blocks[name] = block
         substituted = _substitutes(tier, seats, artifact_root, reasons, visible)
-        if tier == "light":
+        if tier in ("light", "small"):
             runtimes = set()
             for name in required:
                 seat = seats[name]
@@ -608,7 +612,7 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
                 elif isinstance(seat.get("runtime"), str):
                     runtimes.add(seat.get("runtime"))
             if runtimes != {"claude", "codex"}:
-                reasons.append("light seats must be one claude and one codex runtime")
+                reasons.append(f"{tier} seats must be one claude and one codex runtime")
         if tier == "delta":
             for name in required:
                 if isinstance(seats[name], dict) and seats[name].get("runtime") != "claude":
@@ -616,17 +620,25 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
         if (tier == "lessons" and isinstance(seats["verifier"], dict)
                 and seats["verifier"].get("runtime") != "claude"):
             reasons.append("lessons seat verifier must run on claude")
-    if (isinstance(tier, str) and tier in _DIFF_CLASSES
-            and not _diff_class_ok(report.get("preconditions"), artifact_root, tier)):
+    small = expected.get("small")
+    small_valid = tier == "small" and _load_change_class().small_caps_error(small) is None
+    if tier == "small" and not small_valid:
+        reasons.append("small caps are invalid")
+    elif "small" in report or (tier != "small" and "small" in expected):
+        reasons.append("small block on a non-small class" if tier != "small"
+                       else "small report carries a small block")
+    if (isinstance(tier, str) and tier in _DIFF_CLASSES and (tier != "small" or small_valid)
+            and not _diff_class_ok(report.get("preconditions"), artifact_root, tier, small)):
         reasons.append(f"class {tier} does not match the frozen diff")
-    if tier == "lessons" and not _lessons_ci_ok(report.get("preconditions"), artifact_root):
-        reasons.append("class lessons needs CI check evidence")
+    if tier in ("lessons", "small") and not _ci_has_checks(report.get("preconditions"), artifact_root):
+        reasons.append(f"class {tier} needs CI check evidence")
     if tier == "delta":
         _delta(report, expected, artifact_root, reasons)
     elif "delta" in report or "delta" in expected:
         reasons.append("delta block on a non-delta class")
     _coverage(report, reasons, visible)
-    _test_evidence(report, blocks, required or (), reasons)
+    if tier != "small":
+        _test_evidence(report, blocks, required or (), reasons)
     changes = _findings(report, expected, reasons)
     source = report.get("preconditions")
     if (
@@ -648,9 +660,9 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
         }
     else:
         result = {"verdict": "APPROVE", "approve_allowed": True, "reasons": visible}
-    # A delta never ends short of APPROVE: the next gate on this head is full
-    # (spec [D7], R21).
-    if tier == "delta" and result["verdict"] != "APPROVE":
+    # A delta or small gate never ends short of APPROVE: the next gate on this
+    # head is full.
+    if tier in ("delta", "small") and result["verdict"] != "APPROVE":
         result["escalate"] = "full"
     return result
 
@@ -785,8 +797,8 @@ def _full_prior(report_path: Path, expected_path: Path, report_sha256: str | Non
         if gate is None:
             return None
         report, expected = gate
-    if report.get("class") != "full":
-        reasons.append("first round on a branch is always full: no prior full APPROVE")
+    if report.get("class") not in ("full", "small"):
+        reasons.append("first round on a branch is always full or small: no prior full or small APPROVE")
         return None
     return (expected, report_path.resolve(), expected_path.resolve(),
             report_sha256, expected_sha256)
@@ -917,6 +929,15 @@ def schema() -> dict:
         "full_seats": list(FULL_SEATS),
         "delta_seats": list(DELTA_SEATS),
         "lessons_seats": list(LESSONS_SEATS),
+        "small_seats": list(SMALL_SEATS),
+        "small": {
+            "expected_fields": {
+                "max_files": "positive int cap, at most 5 (default 3)",
+                "max_lines": "positive int cap on added plus removed lines, at most 150 (default 40)",
+                "sensitive_paths": "list of path prefixes that force full (default empty)",
+            },
+            "report_fields": "none; a small report has no small block",
+        },
         "delta": {
             "expected_fields": {
                 "prior_run": "run_id of the full APPROVE this delta builds on",
@@ -940,9 +961,9 @@ def schema() -> dict:
             "verdict": "APPROVE, CHANGES, or INCOMPLETE",
             "approve_allowed": "true only for APPROVE",
             "reasons": "list of strings",
-            "escalate": "present as full only on a non-APPROVE delta result",
+            "escalate": "present as full only on a non-APPROVE delta or small result",
         },
-        "class": "light, full, delta or lessons; the evaluator recomputes light and lessons from the frozen diff",
+        "class": "light, full, delta, small or lessons; the evaluator recomputes light, small and lessons from the frozen diff",
         "finding_fields": {
             "id": "nonempty unique identifier",
             "severity": "critical, high, major, minor, low, nit, or advisory",
@@ -1066,6 +1087,9 @@ def main(argv: list[str] | None = None) -> int:
     policy_parser.add_argument("--section", required=True)
     classify_parser = sub.add_parser("classify")
     classify_parser.add_argument("--diff", required=True)
+    classify_parser.add_argument("--small-max-files", type=int)
+    classify_parser.add_argument("--small-max-lines", type=int)
+    classify_parser.add_argument("--small-sensitive", action="append", default=[])
     lessons_parser = sub.add_parser("lessons-check")
     lessons_parser.add_argument("--file", required=True)
     capture_parser = sub.add_parser("ci-capture")
@@ -1181,13 +1205,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if not reasons else 1
     if args.command == "classify":
         try:
-            text = Path(args.diff).read_text(encoding="utf-8", errors="replace")
+            text = Path(args.diff).read_bytes().decode("utf-8", "replace")
         except OSError as error:
             print(json.dumps({"error": str(error)}))
             return 1
         change_class = _load_change_class()
-        paths = change_class.paths_from_diff(text)
-        print(change_class.classify(paths or []))
+        small = dict(change_class.SMALL_DEFAULTS)
+        if args.small_max_files is not None:
+            small["max_files"] = args.small_max_files
+        if args.small_max_lines is not None:
+            small["max_lines"] = args.small_max_lines
+        small["sensitive_paths"] = args.small_sensitive
+        error = change_class.small_caps_error(small)
+        if error:
+            print(json.dumps({"error": error}))
+            return 1
+        print(change_class.tier_of(text, small))
         return 0
     if args.command == "policy":
         try:

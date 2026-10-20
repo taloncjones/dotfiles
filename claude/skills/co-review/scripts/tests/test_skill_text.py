@@ -312,8 +312,9 @@ class CoReviewSkillText(unittest.TestCase):
             self.assertIn(needle, CO_REVIEW)
 
     def test_co_review_seats_run_as_detached_jobs_at_1200_seconds(self):
-        self.assertEqual(CO_REVIEW.count("--timeout-secs 1200"), 4)
+        self.assertEqual(CO_REVIEW.count('--timeout-secs "$SEAT_SECS"'), 4)
         self.assertNotIn("--timeout-secs 600", CO_REVIEW)
+        self.assertNotIn("--timeout-secs 1200", CO_REVIEW)
         for needle in ("git apply --index", "nohup uv run", 'echo "$! $(date +%s)"',
                        "echo collected", "kill -TERM", "kill -KILL", "incomplete: ",
                        "Worst case is about 41 minutes", "re-runs the collect block",
@@ -481,7 +482,7 @@ class CoReviewSkillText(unittest.TestCase):
                        "--timeout-secs 60", "nohup uv run", '.pid"',
                        "kill -0", "1200-second deadline"):
             self.assertIn(needle, MIRROR)
-        self.assertEqual(MIRROR.count("--timeout-secs 1200"), 2)
+        self.assertEqual(MIRROR.count('--timeout-secs "$SEAT_SECS"'), 2)
         self.assertNotIn("--timeout-secs 600", MIRROR)
         self.assertNotIn("600-second", MIRROR)
 
@@ -522,7 +523,7 @@ class CoReviewSkillText(unittest.TestCase):
             self.assertEqual(order, sorted(order))
 
     def test_co_review_branches_probes_and_seats_on_delta(self):
-        for needle in ('if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then', 'if [ "$CLASS" = "full" ]; then',
+        for needle in ('if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ] || [ "$CLASS" = "small" ]; then', 'if [ "$CLASS" = "full" ]; then',
                        '[ "$CLASS" = "delta" ] && SEATS="claude verifier"',
                        "Delta tier: only the claude reviewer seat.",
                        "The delta tier runs `claude` and `verifier`"):
@@ -599,7 +600,7 @@ class CoReviewSkillText(unittest.TestCase):
         for needle in ('[ "$CLASS" = "lessons" ] && SEATS="verifier"',
                        '"$GATE_REPORT" lessons-check',
                        '--file "$CODEX_ROOT/claude/rules/personal/agent-lessons.md"',
-                       'if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then',
+                       'if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ] || [ "$CLASS" = "small" ]; then',
                        'if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then',
                        "The lessons tier runs only `verifier`",
                        "falls back to `CLASS=light`"):
@@ -868,6 +869,41 @@ class StructureLensText(unittest.TestCase):
         flat = " ".join(section.split())
         self.assertIn("adds no architecture or lens addendum", flat)
         self.assertIn("`claude/skills/co-review/references/failure-classes.md`", flat)
+
+
+
+class SmallTierTextTests(unittest.TestCase):
+    def test_both_entrypoints_pin_the_caps_and_flags(self):
+        for text in (CO_REVIEW, MIRROR):
+            flat = " ".join(text.split())
+            for needle in ("## Small tier", "at most 3 files", "40 changed lines", "--small-max-files",
+                           "--small-max-lines", "--small-sensitive", "`escalate: \"full\"`", "tier=small"):
+                self.assertIn(needle, flat)
+        for needle in ('[ "$CLASS" = "small" ] && SEATS="codex verifier"',
+                       '[ "$CLASS" = "small" ] && SEAT_SECS=270', "seat-timing.txt",
+                       "removing `expected.small`"):
+            self.assertIn(needle, CO_REVIEW)
+        self.assertIn("`small` class falls back to `CLASS=full`", " ".join(MIRROR.split()))
+
+    def test_policy_and_seat_report_describe_the_small_tier(self):
+        policy = subprocess.run(
+            [sys.executable, str(REPO / "claude/skills/co-review/scripts/gate_report.py"),
+             "policy", "--section", "POLICY"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for needle in ("### Small tier", "3 files and 40 changed lines", "escalate: \"full\"",
+                       "CI is the test"):
+            self.assertIn(" ".join(needle.split()), " ".join(policy.split()))
+        seat_report = (REPO / "claude/skills/co-review/references/seat-report.md").read_text(encoding="utf-8")
+        self.assertIn("Small tier", seat_report)
+
+    def test_ship_and_herdr_name_the_auto_tier(self):
+        for needle in ("herdr-ship-brief: tier=auto", "herdr-ship-small-caps:"):
+            self.assertIn(needle, SHIP)
+        self.assertIn("herdr-ship-brief: tier=auto", BRIEF)
+        self.assertIn("`class` `delta` or `small`", HERDR)
+        self.assertIn("ship.small", (REPO / "claude/skills/herdr-orchestration/references/state-layout.md")
+                      .read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

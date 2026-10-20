@@ -2414,7 +2414,7 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
     if not route.get("ready"):
         raise DispatchError("reviewer route is not ready")
     pinned_id = task.get("ship_launch_id")
-    pinned, stopped = None, False
+    pinned, stopped, handoff = None, False, None
     if pinned_id:
         pinned = next((w for w in task.get("workers", [])
                        if isinstance(w, dict) and w.get("launch_id") == pinned_id), None)
@@ -2424,12 +2424,15 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
         if state == "unknown" or (state == "present" and record.get("agent_status") == "working"):
             raise DispatchError("the pinned ship agent may still be running")
         launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
-        stopped = launch_dir is None or core.read_ship_handoff(launch_dir, pinned_id) is None
+        handoff = core.read_ship_handoff(launch_dir, pinned_id) if launch_dir is not None else None
+        stopped = handoff is None
     if stopped:
         if task.get("ship_relaunch_head") == task["review_head_sha"]:
             raise DispatchError("relaunch budget spent for this head; park the task")
         if tier == "delta":
             raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
+        tier = "full"
+    elif handoff is not None and handoff.get("verdict") != "APPROVE":
         tier = "full"
     ws = impl.get("workspace_id") or ""
     fenced = ("--session", session, "--fence", str(fence))

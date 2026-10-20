@@ -119,14 +119,19 @@ response for that exact expected head:
 git -C "$REPO" -c core.quotePath=true diff --no-color --no-ext-diff --no-textconv --no-renames --binary \
   "$BASE" "$CODEX_TREE" >"$RUN_DIR/frozen.diff" || exit 2
 # A failed capture can leave a partial diff that classifies light; never use it.
-CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff") || exit 2
+CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff" \
+  --small-max-files "${SMALL_MAX_FILES:-3}" --small-max-lines "${SMALL_MAX_LINES:-40}") || exit 2
 # `co-review --full` sets CLASS=full here regardless of the classifier.
 # `co-review --delta` may set CLASS=delta in "Delta tier" below, never by itself.
+# A herdr brief's `herdr-ship-small-sensitive:` prefixes add one
+# `--small-sensitive PREFIX` flag each; see "Small tier" below.
 ```
 
 Both artifacts live inside `RUN_DIR`, are hashed after capture, and are
 referenced by the report's `preconditions` fields defined by `schema`. Write
 `CLASS` into the expected identity's `class` field before any seat runs.
+A `small` class also writes `small: {max_files, max_lines, sensitive_paths}`
+there, with the exact values passed to `classify`.
 
 For a follow-up, also supply each seat the retained initial report and actual
 artifact paths/digests, prior head/base/tree, repair delta and affected callers.
@@ -141,11 +146,11 @@ required by scope/coverage changes stops for a new user decision.
 
 `co-review --delta` asks for the delta round: the `claude` reviewer seat
 and the `verifier`, both on Claude routes, scoped to a small follow-up
-after a full APPROVE on this branch. The first round on a branch is always
-full. The prior report and expected identity come with their SHA-256
+after a full or small APPROVE on this branch, including one from an earlier
+head. The first round on a branch is full or small. The prior report and expected identity come with their SHA-256
 digests from exactly one source: the pinned `ship.json` a herdr ship brief
 names in `herdr-ship-prior-handoff:`, or this same uninterrupted workflow's
-own retained full gate. Caps default to `MAX_FILES=5` and `MAX_LINES=150`;
+own retained full or small gate. Caps default to `MAX_FILES=5` and `MAX_LINES=150`;
 a herdr brief's `herdr-ship-delta-caps: <files>/<lines>` replaces them.
 
 After the snapshot verifies and before the expected identity exists, ask
@@ -220,6 +225,33 @@ interactive workflow, start one fresh full gate (new `run_id`,
 A herdr ship launch runs exactly one gate: write `ship.json` with the delta
 verdict and stop, and the director dispatches the full gate.
 
+## Small tier
+
+The classifier returns `small` for a code or config diff of at most 3 files
+and 40 changed lines (added plus removed) that adds or deletes no file,
+touches at least one test, and touches no gate, CI, auth, hook, submodule,
+skill or agent-instruction text (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`), no
+path with a `security` segment and no configured sensitive prefix. The
+flags `--small-max-files` and `--small-max-lines` (at most 5 and 150) and one
+`--small-sensitive PREFIX` per prefix tune it; a herdr brief's
+`herdr-ship-small-caps: <files>/<lines>` and `herdr-ship-small-sensitive:`
+lines supply them as `SMALL_MAX_FILES`, `SMALL_MAX_LINES` and the prefixes.
+A diff outside any cap stays `full`, and `co-review --full` forces `full`.
+
+A small gate runs `codex` then `verifier` (the light seat set, one Codex and
+one Claude runtime, with the same Codex substitute rule). `ci.json` is its
+test evidence: no seat runs a suite or builds a disposable copy. Each seat
+has a 270-second bound (`SEAT_SECS`), so probes, finder and verifier fit in
+10 minutes when every seat completes. The `## Small tier` section in each
+seat prompt carries those limits.
+
+Any small result other than APPROVE carries `escalate: "full"`. In an
+interactive workflow, start one fresh full gate (new `run_id`,
+`CLASS=full`) on the same head; its verdict is final and never escalates.
+A herdr ship launch runs exactly one gate: write `ship.json` with the small
+verdict and stop, and the director dispatches the full gate. A small APPROVE
+posts a `tier=small` marker and is a valid prior for a later delta round.
+
 ## Capture CI before seats
 
 A PR gate waits for the head's CI to finish and freezes it as `ci.json`
@@ -231,7 +263,8 @@ your own `gh` output. It reads the PR number, head and repository from the
 expected identity, runs `gh pr view` with `--repo` from that identity, and
 refuses a frozen head (`--manifest`) that is not the expected head, before
 any `gh` call or seat. A local no-PR review skips
-this block; a `lessons` class there falls back to `CLASS=light`.
+this block; a `lessons` class there falls back to `CLASS=light` and a
+`small` class falls back to `CLASS=full`, removing `expected.small`.
 
 ```bash
 gh pr checks "$PR" --repo "$PR_REPO" --watch --interval 30 >"$RUN_DIR/ci-watch.txt" 2>&1 || true
@@ -241,9 +274,11 @@ uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "
 The watch's exit status is ignored; `ci-capture` decides. Exit 0
 continues. A nonzero exit whose `reasons` is exactly
 `["CI evidence is missing"]` means the PR has no checks: record the no-CI
-evidence in `preconditions.no_ci` as `schema` describes, and a `lessons`
-class falls back to `CLASS=light` (rewrite the expected identity's `class`
-before any seat runs). Any other nonzero exit stops co-review `INCOMPLETE`
+evidence in `preconditions.no_ci` as `schema` describes, a `lessons`
+class falls back to `CLASS=light`, and a `small` class falls back to
+`CLASS=full` (rewrite the expected identity's `class`, and remove its
+`small` block, before any probe; replace the whole file through a temp file
+and rename). Any other nonzero exit stops co-review `INCOMPLETE`
 before any probe, quoting `reasons`. `ci.json` is the report's
 `preconditions.ci` artifact; its digest is `ci-envelope.json`'s `sha256`.
 
@@ -264,6 +299,7 @@ printed `reasons`.
 The full tier runs `claude`, `codex`, and `breaker`, then `verifier`. The
 light tier runs `codex` and `verifier`: the `codex` reviewer command below,
 then the verifier with that one finder artifact; skip `claude` and `breaker`.
+The small tier runs the same two seats under the "Small tier" rules.
 The delta tier runs `claude` and `verifier`: the `claude` reviewer command
 below, then the verifier with that one finder artifact; skip `codex` and
 `breaker`. `SUBSTITUTE` never applies in the delta tier.
@@ -290,8 +326,9 @@ uv run --no-project python "$CODEX_QUOTA" check >"$RUN_DIR/codex-quota-before.js
 ```
 
 ```bash
+echo "probes $(date +%s)" >>"$RUN_DIR/seat-timing.txt"
 printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
-if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ] || [ "$CLASS" = "small" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime codex --role reviewer --risk normal --provisional \
     --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
@@ -448,6 +485,7 @@ if [ -f "$RUN_DIR/ci-envelope.json" ]; then
 fi
 SEATS="claude codex breaker verifier"
 [ "$CLASS" = "light" ] && SEATS="codex verifier"
+[ "$CLASS" = "small" ] && SEATS="codex verifier"
 [ "$CLASS" = "delta" ] && SEATS="claude verifier"
 [ "$CLASS" = "lessons" ] && SEATS="verifier"
 # A literal word list: the coordinator's zsh does not word-split $SEATS.
@@ -471,26 +509,38 @@ for seat in claude codex breaker verifier; do
   fi
   sed -n '/^## Classes/,$p' "$RUBRIC" >>"$RUN_DIR/$seat.prompt"
   cat "$SEAT_REPORT" >>"$RUN_DIR/$seat.prompt"
+  if [ "$CLASS" = "small" ]; then
+    printf '%s\n' "" "## Small tier" "" \
+      "Run no test suite and build no disposable copy: the ci.json above is the test" \
+      "evidence. Confirm from the frozen tree's CI configuration that a captured check" \
+      "runs the suite owning the touched test, and cite that check in" \
+      "functional_behavior; when none does, report functional_behavior as a material" \
+      "gap. Read-only inspection commands may be listed in tests, which may be empty." \
+      "Finish within 270 seconds." >>"$RUN_DIR/$seat.prompt"
+  fi
 done
 ```
 
-Seats run concurrently for up to 1200 seconds each, beyond a foreground
+Seats run concurrently for up to 1200 seconds each (270 in the small tier), beyond a foreground
 command limit. Each seat runs as its own detached `nohup` job with its own pid
 record, so no call is held open on a shared `wait` and one seat never holds
 the others. After the launch block the coordinator
 re-runs the collect block until it prints `collected`; one run waits at most
 540 seconds and exits 3 while a seat still runs. Set `COLLECT` per pass to
-that pass's seats (full: `claude codex breaker`; light: `codex`; delta:
+that pass's seats (full: `claude codex breaker`; light and small: `codex`; delta:
 `claude`; lessons: none, so skip the pass), then `verifier`. Record each
 `incomplete: <seat>` as a missing seat. The collect block sends SIGTERM after
 the 1200-second deadline plus a 60-second grace (1260 seconds) and SIGKILL at
-1320 seconds, only when `ps -o command= -p` shows that seat's prompt file for
+1320 seconds (`SEAT_SECS` plus 60 and 120 seconds; 330 and 390 in the small
+tier), only when `ps -o command= -p` shows that seat's prompt file for
 the pid. An interruption of the launch block, or between launch and collect
 other than an exit-3 re-run, invalidates the gate: a fresh gate uses
 a new `RUN_DIR` with a new `run_id`, and nothing is relaunched into an
 existing `RUN_DIR`. Worst case is about 41 minutes: probes, finders, then the verifier.
 
 ```bash
+SEAT_SECS=1200
+[ "$CLASS" = "small" ] && SEAT_SECS=270
 # A Codex-routed seat runs on Claude only when the substitute block above
 # named it in SUBSTITUTE; otherwise it takes its normal Codex route.
 CODEX_SEAT_RUNTIME=codex CODEX_SEAT_ROOT=$CODEX_ROOT
@@ -498,26 +548,27 @@ case " ${SUBSTITUTE:-} " in *" codex "*) CODEX_SEAT_RUNTIME=claude CODEX_SEAT_RO
 BREAKER_SEAT_RUNTIME=codex BREAKER_SEAT_ROOT=$CODEX_ROOT
 case " ${SUBSTITUTE:-} " in *" breaker "*) BREAKER_SEAT_RUNTIME=claude BREAKER_SEAT_ROOT=$CLAUDE_ROOT ;; esac
 # Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
+# Small tier: the same single codex reviewer seat as light.
 # Delta tier: only the claude reviewer seat.
 # Lessons tier: no finder seat; only the verifier runs.
-if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ]; then
+if [ "$CLASS" = "full" ] || [ "$CLASS" = "light" ] || [ "$CLASS" = "small" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
-    --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs "$SEAT_SECS" \
     --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" 2>"$RUN_DIR/codex.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/codex.pid"
 fi
 if [ "$CLASS" = "full" ] || [ "$CLASS" = "delta" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
-    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs "$SEAT_SECS" \
     --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" 2>"$RUN_DIR/claude.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/claude.pid"
 fi
 if [ "$CLASS" = "full" ]; then
   nohup uv run --no-project python "$RUNNER" run \
     --runtime "$BREAKER_SEAT_RUNTIME" --role skeptic --risk normal --provisional \
-    --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs "$SEAT_SECS" \
     --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" 2>"$RUN_DIR/breaker.runtime.err" &
   echo "$! $(date +%s)" >"$RUN_DIR/breaker.pid"
 fi
@@ -540,8 +591,8 @@ launch:
 uv run --no-project python "$CODEX_QUOTA" record --run-dir "$RUN_DIR" >"$RUN_DIR/codex-quota-seats.json" || true
 ```
 
-After every finder artifact exists (full: `claude`, `codex`, `breaker`; light:
-`codex`; delta: `claude`; lessons: none, so the verifier starts
+After every finder artifact exists (full: `claude`, `codex`, `breaker`; light
+and small: `codex`; delta: `claude`; lessons: none, so the verifier starts
 once the probes pass) and its digest is recorded, run the verifier with role `skeptic` and
 the same frozen snapshot. Its prompt also contains the finder artifact
 paths/digests and all known blockers; it tests their material claims
@@ -551,9 +602,11 @@ finder reports to the finder seats; the retained initial baseline is shared
 only for follow-up verification.
 
 ```bash
+SEAT_SECS=1200
+[ "$CLASS" = "small" ] && SEAT_SECS=270
 nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs "$SEAT_SECS" \
   --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" 2>"$RUN_DIR/verifier.runtime.err" &
 echo "$! $(date +%s)" >"$RUN_DIR/verifier.pid"
 ```
@@ -563,6 +616,8 @@ after the verifier block:
 
 ```bash
 # Re-run until it prints "collected"; one run waits at most 540 seconds.
+SEAT_SECS=1200
+[ "$CLASS" = "small" ] && SEAT_SECS=270
 # A seat is collected when its own process is gone; ps confirms identity,
 # except in the first 30 seconds, before the child has exec'd its command.
 # A seat with no non-empty runtime JSON after its process is gone is marked error.
@@ -577,12 +632,12 @@ for seat in claude codex breaker verifier; do
   while kill -0 "$pid" 2>/dev/null && { [ $(( $(date +%s) - started )) -lt 30 ] ||
       ps -o command= -p "$pid" 2>/dev/null | grep -qF -- "$RUN_DIR/$seat.prompt"; }; do
     age=$(( $(date +%s) - started ))
-    if [ "$age" -ge 1320 ]; then
+    if [ "$age" -ge $(( SEAT_SECS + 120 )) ]; then
       kill -KILL "$pid"
       echo "incomplete: $seat"
       break
     fi
-    [ "$age" -ge 1260 ] && kill -TERM "$pid"
+    [ "$age" -ge $(( SEAT_SECS + 60 )) ] && kill -TERM "$pid"
     [ $SECONDS -ge 540 ] && { echo "waiting: $seat"; exit 3; }
     sleep 10
   done
@@ -593,6 +648,10 @@ for seat in claude codex breaker verifier; do
 done
 echo collected
 ```
+
+After the verifier pass prints `collected`, append `collected <epoch>` to
+`RUN_DIR/seat-timing.txt` (`echo "collected $(date +%s)" >>"$RUN_DIR/seat-timing.txt"`).
+The file only measures seat time; no decision reads it.
 
 The selected reviewer/skeptic runtime for each seat is resolved by the shared
 runner. For explicitly critical risk, set only that seat's `--risk critical`.

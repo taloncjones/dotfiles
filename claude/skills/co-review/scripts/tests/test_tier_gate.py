@@ -241,8 +241,28 @@ class DeltaClassCliTests(TierFixture):
         code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
                         "--diff-out", str(self.root / "d.diff"))
         self.assertEqual(code, 1)
-        self.assertIn("first round on a branch is always full: no prior full APPROVE",
+        self.assertIn("first round on a branch is always full or small: no prior full or small APPROVE",
                       rec["reasons"])
+
+
+class SmallPriorTests(TierFixture):
+    def test_delta_class_accepts_small_prior(self):
+        run = self.root / "small"
+        report, expected = write_run(run, "small-1", self.gated, "small", gate.SMALL_SEATS)
+        report["seats"]["codex"]["runtime"] = "codex"
+        diff = ("diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+                "@@ -1 +1 @@\n-x\n+y\n"
+                "diff --git a/tests/test_app.py b/tests/test_app.py\n--- a/tests/test_app.py\n"
+                "+++ b/tests/test_app.py\n@@ -1 +1 @@\n-x\n+y\n")
+        report["preconditions"]["diff"] = artifact(run, "frozen.diff", diff)
+        expected["small"] = {"max_files": 3, "max_lines": 40, "sensitive_paths": []}
+        self.report_path, self.expected_path = save(run, report, expected)
+        commit_file(self.repo, "src/app.py", "print(2)\n")
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual(rec["prior_run"], "small-1", rec["reasons"])
+        self.assertNotIn("first round on a branch is always full or small: no prior full or small APPROVE",
+                         rec["reasons"])
 
 
 class DeltaEvaluateTests(TierFixture):
@@ -333,7 +353,7 @@ class DeltaEvaluateTests(TierFixture):
         prior["class"] = "light"
         prior_path.write_text(json.dumps(prior))
         report["delta"]["prior_report"]["sha256"] = sha256(prior_path)
-        self.assert_escalates(report, expected, run, "delta prior run is not a full round")
+        self.assert_escalates(report, expected, run, "delta prior run is not a full or small round")
 
     def test_prior_with_changes_verdict_escalates(self):
         report, expected, run = self.build_delta()

@@ -5628,7 +5628,9 @@ def ship_ready(fx, pinned=None, recorded=False):
         if recorded:
             launch_dir = core.ship_launch_dir(fx.rd, "td-a", pinned)
             launch_dir.mkdir(parents=True)
-            (launch_dir / "ship.json").write_text(json.dumps({"launch_id": pinned}))
+            (launch_dir / "ship.json").write_text(json.dumps(
+                {"launch_id": pinned, "verdict": recorded if isinstance(recorded, str) else None,
+                 "written_at": "2000-01-01T00:00:00+00:00"}))
     fx.task_file.write_text(json.dumps(task))
     return head, focus
 
@@ -5759,6 +5761,92 @@ def test_dispatch_gate_ship_after_a_recorded_handoff_spends_no_budget():
         assert "ship_relaunch_head" not in task and task["ship_launch_id"] == "ship-td-a-dddddddddddd", task
         assert settled == [SHIP_OLD] and out["settle"][0]["reason"] == "superseded", out
     finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_forces_full_after_a_non_approve_handoff():
+    for verdict, expected in (("CHANGES", "full"), ("INCOMPLETE", "full"), ("APPROVE", None)):
+        fx = Fixture()
+        originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+        herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "idle"})
+        herdr_dispatch._gate_split = lambda *a: "w1:p9"
+        herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "ship-td-a-eeeeeeeeeeee"}
+        herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+        renders = []
+        herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+        try:
+            head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded=verdict)
+            run_gate(fx, "ship", focus)
+            args = renders[0]
+            got = args[args.index("--tier") + 1] if "--tier" in args else None
+            assert got == expected, (verdict, args)
+        finally:
+            for name, fn in originals.items():
+                setattr(herdr_dispatch, name, fn)
+            fx.close()
+
+
+def test_dispatch_gate_ship_reads_only_the_pinned_handoff():
+    other = "ship-td-a-ffffffffffff"
+    for label, pinned_verdict, expected in (
+            ("unpinned newer CHANGES row is ignored", "APPROVE", None),
+            ("pinned handoff without a verdict", True, "full")):
+        fx = Fixture()
+        originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+        herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "idle"})
+        herdr_dispatch._gate_split = lambda *a: "w1:p9"
+        herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "ship-td-a-eeeeeeeeeeee"}
+        herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+        renders = []
+        herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+        try:
+            head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded=pinned_verdict)
+            task = json.loads(fx.task_file.read_text())
+            row = settle_row("ship", other, "w1:p4", head)
+            row["agent"] = herdr_dispatch.ship_agent_name(other)
+            task["workers"].append(row)
+            fx.task_file.write_text(json.dumps(task))
+            launch_dir = core.ship_launch_dir(fx.rd, "td-a", other)
+            launch_dir.mkdir(parents=True)
+            (launch_dir / "ship.json").write_text(json.dumps(
+                {"launch_id": other, "verdict": "CHANGES", "written_at": "2099-01-01T00:00:00+00:00"}))
+            run_gate(fx, "ship", focus)
+            args = renders[0]
+            got = args[args.index("--tier") + 1] if "--tier" in args else None
+            assert got == expected, (label, args)
+        finally:
+            for name, fn in originals.items():
+                setattr(herdr_dispatch, name, fn)
+            fx.close()
+
+
+def test_dispatch_gate_ship_reads_the_pinned_handoff_once():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    real_read = core.read_ship_handoff
+    reads = []
+
+    def vanishing(launch_dir, launch):
+        reads.append(launch)
+        return real_read(launch_dir, launch) if len(reads) == 1 else None
+    herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "idle"})
+    herdr_dispatch._gate_split = lambda *a: "w1:p9"
+    herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "ship-td-a-eeeeeeeeeeee"}
+    herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+    renders = []
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded="CHANGES")
+        core.read_ship_handoff = vanishing
+        run_gate(fx, "ship", focus)
+        args = renders[0]
+        got = args[args.index("--tier") + 1] if "--tier" in args else None
+        assert got == "full", args
+        assert len(reads) == 1, reads
+    finally:
+        core.read_ship_handoff = real_read
         for name, fn in originals.items():
             setattr(herdr_dispatch, name, fn)
         fx.close()
@@ -6401,6 +6489,9 @@ for name, test in (
     ("dispatch-gate review names the Jira writeback for a Jira task", test_dispatch_gate_review_names_the_jira_writeback_for_a_jira_task),
     ("dispatch-gate ship: a first launch pins ship_launch_id", test_dispatch_gate_ship_first_launch_pins_ship_launch_id),
     ("dispatch-gate ship: a stopped run writes ship_relaunch_head before the launch", test_dispatch_gate_ship_stopped_run_writes_the_budget_before_launch),
+    ("dispatch-gate ship: a non-APPROVE handoff forces tier full", test_dispatch_gate_ship_forces_full_after_a_non_approve_handoff),
+    ("dispatch-gate ship: only the pinned handoff counts", test_dispatch_gate_ship_reads_only_the_pinned_handoff),
+    ("dispatch-gate ship: the pinned handoff is read once", test_dispatch_gate_ship_reads_the_pinned_handoff_once),
     ("dispatch-gate ship: a spent relaunch budget refuses", test_dispatch_gate_ship_stopped_run_with_the_budget_spent_refuses),
     ("dispatch-gate ship: a stopped run refuses a delta tier", test_dispatch_gate_ship_stopped_run_refuses_a_delta_tier),
     ("dispatch-gate ship: a recorded handoff spends no budget", test_dispatch_gate_ship_after_a_recorded_handoff_spends_no_budget),

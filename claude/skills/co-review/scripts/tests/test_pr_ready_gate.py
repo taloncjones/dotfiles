@@ -176,6 +176,7 @@ class TierMarkerTests(unittest.TestCase):
             ("", None, None),
             (" tier=full", "full", None),
             (" tier=light", "light", None),
+            (" tier=small", "small", None),
             (" tier=lessons", "lessons", None),
             (" tier=delta" + prior, "delta", "run-1.a:b"),
             (" tier=carry-forward" + prior, "carry-forward", "run-1.a:b"),
@@ -187,7 +188,7 @@ class TierMarkerTests(unittest.TestCase):
 
     def test_inconsistent_tier_fields_are_malformed(self):
         prior = f" prior_run=r prior_sha={SHA_B}"
-        for suffix in (" tier=full" + prior, " tier=light" + prior, " tier=lessons" + prior,
+        for suffix in (" tier=full" + prior, " tier=light" + prior, " tier=small" + prior, " tier=lessons" + prior,
                        " tier=delta",
                        " tier=carry-forward", " tier=bogus", " tier=delta prior_run=r",
                        " tier=delta prior_run=r prior_sha=xyz"):

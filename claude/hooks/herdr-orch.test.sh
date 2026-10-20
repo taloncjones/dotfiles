@@ -3439,7 +3439,7 @@ SH
 check "docs pin delta dispatch, forced full, and relaunch-is-full" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 L="claude/skills/herdr-orchestration/references/state-layout.md"
-grep -Fq 'the handoff report has `class` `delta`' "$S"
+grep -Fq 'the handoff report has `class` `delta` or `small`' "$S"
 grep -Fq '(section 6a step 0 owns it), except rule (c)' "$S"
 grep -Fq 'every such relaunch brief carries `herdr-ship-brief: tier=full`' "$S"
 grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$R/ship-carry-forward.md"
@@ -12584,7 +12584,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 586
+assert t.count("\n") <= 591
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -12623,14 +12623,14 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 586
+assert t.count("\n") <= 591
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
 $LOAD
 t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
 blocks = c.brief_blocks(t)
-need = {"lessons", "opt-in-granted", "opt-in-withheld", "ship-tier-full", "ship-tier-delta"}
+need = {"lessons", "opt-in-granted", "opt-in-withheld", "ship-tier-full", "ship-tier-auto", "ship-tier-delta"}
 for spec in c.BRIEF_PHASES.values():
     need.update(spec["blocks"])
     need.add(spec["lessons"])
@@ -12794,7 +12794,17 @@ out, brief = rendered("--phase", "ship", "--focus-file", focus)
 common("ship", out, brief)
 assert out["agent"] not in brief and c.valid_task_id(out["agent"])
 assert re.search(r"Live base: origin/main @ " + C, brief) and re.search(r"Task base: origin/main @ " + A, brief)
-assert "herdr-ship-brief: stop-after-gate" in brief and "herdr-ship-brief: tier=full" in brief
+assert "herdr-ship-brief: stop-after-gate" in brief and "herdr-ship-brief: tier=auto" in brief
+assert "herdr-ship-small-caps: 3/40" in brief and "tier=full" not in brief
+out, forced = rendered("--phase", "ship", "--focus-file", focus, "--tier", "full")
+assert "herdr-ship-brief: tier=full" in forced and "tier=auto" not in forced
+cfg = os.path.join(rd, "config.json")
+open(cfg, "w").write('{"v":1,"ship":{"small":{"max_files":2,"max_lines":20,"sensitive_paths":["infra/"]}}}')
+out, tuned = rendered("--phase", "ship", "--focus-file", focus)
+assert "herdr-ship-small-caps: 2/20" in tuned and "herdr-ship-small-sensitive: infra/" in tuned
+open(cfg, "w").write('{"v":1,"ship":{"small":{"max_files":9}}}')
+assert render("--phase", "ship", "--focus-file", focus).returncode == 2
+os.remove(cfg)
 assert "#77" in brief and "acme/widget" in brief and "ship.json" in brief
 assert os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") in brief
 assert "[td-render-x ship]" in brief and focus_text in brief

@@ -24,6 +24,14 @@ SHA_B = "b" * 40
 QUOTA_ATTEMPT = {"runtime": "codex", "status": "error", "result": None,
                  "errors": ["You've hit your usage limit."]}
 LIMIT_NOTICE = "You've hit your session limit \u00b7 resets 3pm"
+SMALL_CAPS = {"max_files": 3, "max_lines": 40, "sensitive_paths": []}
+
+
+def modified(path: str) -> str:
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n"
+
+
+SMALL_DIFF = modified("src/app.py") + modified("tests/test_app.py")
 LESSONS_DIFF = ("diff --git a/claude/rules/personal/agent-lessons.md "
                 "b/claude/rules/personal/agent-lessons.md\n+x\n")
 AXES = (
@@ -209,6 +217,80 @@ class GateReportTests(unittest.TestCase):
         result = self.verdict()
         self.assertEqual(result["verdict"], "INCOMPLETE")
         self.assertEqual(result["reasons"], ["class lessons needs CI check evidence"])
+
+    def _small(self, diff_text: str = SMALL_DIFF, caps=SMALL_CAPS, runtimes=("codex", "claude")):
+        self.expected["class"] = "small"
+        self.report["class"] = "small"
+        if caps is not None:
+            self.expected["small"] = dict(caps)
+        seats = {}
+        for name, runtime in zip(("codex", "verifier"), runtimes):
+            seat = self._write(f"{name}.txt", seat_text(name, tests=[]))
+            seats[name] = {"status": "complete", **seat, "runtime": runtime,
+                           "model": "unknown", "effort": "unknown"}
+        self.report["seats"] = seats
+        self.report["preconditions"]["diff"] = self._write("review.diff", diff_text)
+
+    def test_small_report_inside_caps_approves_without_seat_tests(self):
+        self._small()
+        result = self.verdict()
+        self.assertEqual((result["verdict"], result.get("escalate")), ("APPROVE", None))
+
+    def test_small_class_over_a_larger_diff_is_refused(self):
+        wide = SMALL_DIFF + "".join(modified(f"src/m{i}.py") for i in range(3))
+        self._small(wide)
+        result = self.verdict()
+        self.assertIn("class small does not match the frozen diff", result["reasons"])
+        self.assertEqual((result["verdict"], result["escalate"]), ("INCOMPLETE", "full"))
+
+    def test_small_caps_are_recomputed_and_bounded(self):
+        for label, caps, reason in (
+            ("tighter", {**SMALL_CAPS, "max_lines": 1}, "class small does not match the frozen diff"),
+            ("prefix", {**SMALL_CAPS, "sensitive_paths": ["src/"]}, "class small does not match the frozen diff"),
+            ("over ceiling", {**SMALL_CAPS, "max_files": 6}, "small caps are invalid"),
+            ("missing", None, "small caps are invalid"),
+        ):
+            with self.subTest(label):
+                self._small(caps=caps)
+                self.assertIn(reason, self.verdict()["reasons"])
+
+    def test_small_claim_over_a_malformed_diff_is_refused(self):
+        no_hunks = "".join(line + "\n" for line in SMALL_DIFF.split("\n") if not line.startswith("@@"))
+        word_diff = SMALL_DIFF.replace("\n-", "\n[-").replace("\n+", "\n{+")
+        for label, diff in (("no hunk headers", no_hunks), ("word diff", word_diff)):
+            with self.subTest(label):
+                self._small(diff)
+                result = self.verdict()
+                self.assertIn("class small does not match the frozen diff", result["reasons"])
+                self.assertEqual((result["verdict"], result["escalate"]), ("INCOMPLETE", "full"))
+
+    def test_small_report_with_a_small_block_is_refused(self):
+        self._small()
+        self.report["small"] = dict(SMALL_CAPS)
+        self.assertIn("small report carries a small block", self.verdict()["reasons"])
+
+    def test_small_block_on_another_class_is_refused(self):
+        self.expected["small"] = dict(SMALL_CAPS)
+        self.assertIn("small block on a non-small class", self.verdict()["reasons"])
+
+    def test_small_needs_ci_checks_and_one_claude_one_codex_seat(self):
+        self._small()
+        self.report["preconditions"]["ci"] = self._write(
+            "ci.json", json.dumps({"head": SHA_A, "check_runs": [], "status_contexts": []}))
+        self.report["preconditions"]["no_ci"] = {"evidence": "repository has no workflows"}
+        self.assertIn("class small needs CI check evidence", self.verdict()["reasons"])
+        self._small(runtimes=("claude", "claude"))
+        self.assertIn("small seats must be one claude and one codex runtime", self.verdict()["reasons"])
+
+    def test_small_changes_escalates_to_full(self):
+        self._small()
+        self.report["findings"] = [{"id": "f", "severity": "major", "disposition": "confirmed",
+                                    "scenario": "s", "evidence": "e", "impact": "i"}]
+        result = self.verdict()
+        self.assertEqual((result["verdict"], result.get("escalate")), ("CHANGES", "full"))
+        self.expected["class"] = self.report["class"] = "full"
+        del self.expected["small"]
+        self.assertNotIn("escalate", self.verdict())
 
     def test_lessons_seat_set_is_only_the_verifier(self):
         self._lessons(LESSONS_DIFF)
@@ -661,9 +743,11 @@ class GateReportTests(unittest.TestCase):
         self.assertNotIn("required_seats", shape)
         self.assertEqual(
             shape["codex_substitute"]["seats"],
-            {"light": ["codex"], "full": ["codex", "breaker"], "delta": [], "lessons": []},
+            {"light": ["codex"], "full": ["codex", "breaker"], "delta": [], "lessons": [],
+             "small": ["codex"]},
         )
         self.assertEqual(shape["lessons_seats"], ["verifier"])
+        self.assertEqual(shape["small_seats"], ["codex", "verifier"])
         self.assertEqual(
             shape["codex_substitute"]["reasons"], ["quota", "auth", "unavailable"]
         )
