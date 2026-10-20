@@ -265,6 +265,36 @@ class MalformedDiffTests(unittest.TestCase):
         empty = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n context\n")
         self.assertTrue(cc.delta_stats(empty)["malformed"])
 
+    def test_hunkless_section_is_malformed(self):
+        base = hunk("src/a.py") + hunk("src/b.py")
+        self.assertEqual(cc.tier_of(base + hunk("tests/test_a.py")), "small")
+        bare = "diff --git a/tests/test_a.py b/tests/test_a.py\n"
+        indexed = bare + "index 1111111..2222222 100644\n"
+        for label, tail in (("bare header", bare), ("index only", indexed)):
+            with self.subTest(label):
+                diff = base + tail
+                self.assertTrue(cc.delta_stats(diff)["malformed"])
+                self.assertEqual(cc.tier_of(diff), "full")
+        self.assertEqual(cc.tier_of(bare), "full")
+
+    def test_file_headers_must_match_the_diff_git_path(self):
+        spoof = ("diff --git a/src/app.py b/src/app.py\n--- a/src/auth/login.py\n"
+                 "+++ b/src/auth/login.py\n@@ -1 +1 @@\n-x\n+y\n")
+        diff = spoof + hunk("tests/test_a.py")
+        self.assertEqual(cc.tier_of(hunk("src/app.py") + hunk("tests/test_a.py")), "small")
+        self.assertTrue(cc.delta_stats(diff)["malformed"])
+        self.assertEqual(cc.tier_of(diff), "full")
+        one_side = spoof.replace("--- a/src/auth/login.py", "--- a/src/app.py")
+        self.assertEqual(cc.tier_of(one_side + hunk("tests/test_a.py")), "full")
+
+    def test_dev_null_headers_match_an_add_or_delete(self):
+        add = ("diff --git a/src/n.py b/src/n.py\nnew file mode 100644\n--- /dev/null\n"
+               "+++ b/src/n.py\n@@ -0,0 +1 @@\n+y\n")
+        self.assertFalse(cc.delta_stats(add)["malformed"])
+        gone = ("diff --git a/src/n.py b/src/n.py\ndeleted file mode 100644\n--- a/src/n.py\n"
+                "+++ /dev/null\n@@ -1 +0,0 @@\n-y\n")
+        self.assertFalse(cc.delta_stats(gone)["malformed"])
+
 
 def tier_text(path: str) -> str:
     return hunk(path)

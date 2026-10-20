@@ -2381,13 +2381,6 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
             "brief_path": brief["brief_path"], "head_sha": head, "follow_up": follow_up}
 
 
-def _pinned_ship_handoff(rd, task_id, task):
-    """The ship.json handoff of the row ship_launch_id pins, or None; no other row counts."""
-    pinned_id = task.get("ship_launch_id")
-    launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
-    return core.read_ship_handoff(launch_dir, pinned_id) if launch_dir is not None else None
-
-
 def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
                         focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
     if runtime != "claude":
@@ -2404,7 +2397,7 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
     if not route.get("ready"):
         raise DispatchError("reviewer route is not ready")
     pinned_id = task.get("ship_launch_id")
-    pinned, stopped = None, False
+    pinned, stopped, handoff = None, False, None
     if pinned_id:
         pinned = next((w for w in task.get("workers", [])
                        if isinstance(w, dict) and w.get("launch_id") == pinned_id), None)
@@ -2414,17 +2407,16 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
         if state == "unknown" or (state == "present" and record.get("agent_status") == "working"):
             raise DispatchError("the pinned ship agent may still be running")
         launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
-        stopped = launch_dir is None or core.read_ship_handoff(launch_dir, pinned_id) is None
+        handoff = core.read_ship_handoff(launch_dir, pinned_id) if launch_dir is not None else None
+        stopped = handoff is None
     if stopped:
         if task.get("ship_relaunch_head") == task["review_head_sha"]:
             raise DispatchError("relaunch budget spent for this head; park the task")
         if tier == "delta":
             raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
         tier = "full"
-    else:
-        handoff = _pinned_ship_handoff(rd, task_id, task)
-        if handoff is not None and handoff.get("verdict") != "APPROVE":
-            tier = "full"
+    elif handoff is not None and handoff.get("verdict") != "APPROVE":
+        tier = "full"
     ws = impl.get("workspace_id") or ""
     fenced = ("--session", session, "--fence", str(fence))
     args = ["--task-id", task_id, "--phase", "ship", "--focus-file", str(focus_file)]

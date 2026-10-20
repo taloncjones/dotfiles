@@ -101,6 +101,7 @@ def delta_stats(text: str) -> dict | None:
     in_hunk = malformed = False
     section_hunks = section_changes = file_headers = 0
     old_left = new_left = 0
+    section = -1
     for line in text.removesuffix("\n").split("\n") + [_HEADER]:
         if line.startswith(_HEADER) or line.startswith("@@"):
             # Each hunk body must match the counts in its own @@ header.
@@ -109,7 +110,10 @@ def delta_stats(text: str) -> dict | None:
         if line.startswith(_HEADER):
             # A hunk section with no +/- line is not a plain unified diff.
             malformed = malformed or (section_hunks > 0 and section_changes == 0)
-            malformed = malformed or (file_headers > 0 and section_hunks == 0)
+            # Git emits hunkless sections only for renames (asymmetric paths,
+            # rejected above), mode changes, empty adds and binary markers.
+            malformed = malformed or (section >= 0 and section_hunks == 0)
+            section += 1
             in_hunk = False
             section_hunks = section_changes = file_headers = 0
         elif line.startswith("@@"):
@@ -129,6 +133,10 @@ def delta_stats(text: str) -> dict | None:
             elif line.startswith(("--- ", "+++ ")) and section_hunks == 0:
                 file_headers += 1
                 malformed = malformed or file_headers > 2
+                side = "a/" if line.startswith("--- ") else "b/"
+                target = line[4:].split("\t")[0]
+                expected = side + paths[section] if section < len(paths) else None
+                malformed = malformed or target not in ("/dev/null", expected)
             elif line.startswith(("+", "-")):
                 malformed = True
             if line.startswith(_MODE_LINES) and line.endswith(" 160000"):
