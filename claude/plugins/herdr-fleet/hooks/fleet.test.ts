@@ -1275,7 +1275,7 @@ test('without a PR list a merge row never says ready to merge', async ($, on) =>
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  expect(await rowOf(ui, 't1')).toMatch(/merge\? review unknown/)
+  expect(await rowOf(ui, 't1')).toContain('merge? review unknown')
   expect((await lines(ui)).join('\n')).not.toContain('ready to merge')
 })
 
