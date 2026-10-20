@@ -186,7 +186,7 @@ Two different settings files; do not conflate them:
 
 | File                                     | Role                                                                                                                                                                                     | Owner of keys                                                                                                                                                                                                 |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude/settings.json.tmpl`              | Template seeded to `~/.claude/settings.json` and `~/.claude-work/settings.json`, then reconciled on every install/update; machine copies remain real files                               | Dotfiles owns `model`, `env`, `permissions`, `hooks`, `statusLine`, `tui`. Plugin installers write `enabledPlugins` and `extraKnownMarketplaces` into the MACHINE copies (never edit those two by hand there) |
+| `claude/settings.json.tmpl`              | Template seeded to `~/.claude/settings.json` and `~/.claude-work/settings.json`, then reconciled on every install/update; machine copies remain real files                               | Dotfiles owns `model` (a config dir's machine-local `settings.override.json` may override it), `env`, `permissions`, `hooks`, `statusLine`, `tui`. Plugin installers write `enabledPlugins` and `extraKnownMarketplaces` into the MACHINE copies (never edit those two by hand there) |
 | `.claude/settings.json` (repo-committed) | `enabledPlugins` pins Superpowers off (retired 2026-09; ECC retired 2026-09 too), and the SessionStart hook registration runs `bootstrap-cloud.sh` for assets, settings and git identity | Dotfiles owns all of it; no plugin declaration remains, since none is installed in cloud any more                                                                                                             |
 
 Template `tui=fullscreen` keeps both accounts on one layout: the herdr-fleet
@@ -199,6 +199,10 @@ key is gone. The top-level
 `model=fable[1m]` is the default for new sessions: family aliases
 (`fable`, `opus`, `sonnet`, `haiku`, optionally suffixed `[1m]`) resolve to the
 newest release of that family, so no session setting names a model version.
+A config dir that needs a different default (for example the work account on
+`opus`) keeps an owner-created, untracked `<config-dir>/settings.override.json`
+such as `{"model":"opus"}`; the reconcile honours its `model` only, warns on
+anything else, and never creates the file.
 
 `reconcile_claude_settings_file` in `install/common/claude-links.sh` propagates
 template-owned keys to existing machine settings on every install/update while

@@ -1072,6 +1072,94 @@ else
     fail "template reasserts tui=fullscreen over a local value"
 fi
 
+# --- per-account model override ---------------------------------------
+OV_SEED='{"model":"opus","theme":"dark","enabledPlugins":{"keep@custom":true}}'
+OV_TMPL="$DOTFILEDIR/claude/settings.json.tmpl"
+OV_HOME="$TMP/ov-home"
+mkdir -p "$OV_HOME/.claude" "$OV_HOME/.claude-work"
+printf '%s\n' "$OV_SEED" > "$OV_HOME/.claude/settings.json"
+printf '%s\n' "$OV_SEED" > "$OV_HOME/.claude-work/settings.json"
+printf '{"model":"opus"}\n' > "$OV_HOME/.claude-work/settings.override.json"
+cp "$OV_HOME/.claude-work/settings.override.json" "$TMP/ov-before.json"
+for dir in .claude .claude-work; do
+    HOME="$OV_HOME" reconcile_claude_settings_file "$OV_TMPL" "$OV_HOME/$dir/settings.json" >/dev/null
+done
+if jget "$OV_HOME/.claude-work/settings.json" "d['model'] == 'opus'"; then
+    pass "work override keeps model opus"
+else
+    fail "work override keeps model opus"
+fi
+ov_strip() {
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("model",None); d.get("enabledPlugins",{}).pop("atlassian@claude-plugins-official",None); print(json.dumps(d,sort_keys=True))' "$1"
+}
+if [ "$(ov_strip "$OV_HOME/.claude/settings.json")" = "$(ov_strip "$OV_HOME/.claude-work/settings.json")" ]; then
+    pass "override changes only model"
+else
+    fail "override changes only model"
+fi
+if jget "$OV_HOME/.claude/settings.json" "d['model'] == 'fable[1m]'"; then
+    pass "personal without override gets template model"
+else
+    fail "personal without override gets template model"
+fi
+if cmp -s "$TMP/ov-before.json" "$OV_HOME/.claude-work/settings.override.json" \
+    && [ ! -e "$OV_HOME/.claude/settings.override.json" ]; then
+    pass "reconcile never creates or modifies the override"
+else
+    fail "reconcile never creates or modifies the override"
+fi
+
+ov_run() { # <name> <override content>; sets OV_RC, writes $TMP/ov-$1.{out,err}
+    local f="$TMP/ov-$1.json"
+    printf '%s' "$2" > "$TMP/ov-$1.override"
+    mkdir -p "$TMP/ov-$1"
+    printf '%s\n' "$OV_SEED" > "$TMP/ov-$1/settings.json"
+    cp "$TMP/ov-$1.override" "$TMP/ov-$1/settings.override.json"
+    reconcile_claude_settings_file "$OV_TMPL" "$TMP/ov-$1/settings.json" >"$TMP/ov-$1.out" 2>"$TMP/ov-$1.err"
+    OV_RC=$?
+}
+ov_run bad '{not json'
+if [ "$OV_RC" = 0 ] && jget "$TMP/ov-bad/settings.json" "d['model'] == 'fable[1m]'"; then
+    pass "invalid-JSON override falls back to template model"
+else
+    fail "invalid-JSON override falls back to template model"
+fi
+if grep -q 'ignoring unreadable override' "$TMP/ov-bad.err"; then
+    pass "invalid-JSON override warns on stderr"
+else
+    fail "invalid-JSON override warns on stderr"
+fi
+ov_run extra '{"model":"opus","tui":"default","permissions":{"allow":[]}}'
+if jget "$TMP/ov-extra/settings.json" "d['model'] == 'opus' and d['tui'] == 'fullscreen' and d['permissions'] != {'allow': []}" \
+    && grep -q 'ignoring key tui' "$TMP/ov-extra.err" \
+    && grep -q 'ignoring key permissions' "$TMP/ov-extra.err" \
+    && grep -q 'Applied model override from' "$TMP/ov-extra.out"; then
+    pass "override honours model only and reports it"
+else
+    fail "override honours model only and reports it"
+fi
+ov_run nonstr '{"model":5}'
+if jget "$TMP/ov-nonstr/settings.json" "d['model'] == 'fable[1m]'" \
+    && grep -q 'ignoring key model' "$TMP/ov-nonstr.err"; then
+    pass "non-string model override is rejected"
+else
+    fail "non-string model override is rejected"
+fi
+ov_run arr '[]'
+if jget "$TMP/ov-arr/settings.json" "d['model'] == 'fable[1m]'" \
+    && grep -q 'ignoring unreadable override' "$TMP/ov-arr.err"; then
+    pass "non-object override is ignored with a warning"
+else
+    fail "non-object override is ignored with a warning"
+fi
+ov_run empty ''
+if jget "$TMP/ov-empty/settings.json" "d['model'] == 'fable[1m]'" \
+    && grep -q 'ignoring unreadable override' "$TMP/ov-empty.err"; then
+    pass "empty override is ignored with a warning"
+else
+    fail "empty override is ignored with a warning"
+fi
+
 # --- reconcile writes a template stamp ---------------------------------
 STAMP_DIR="$TMP/stampdir"
 mkdir -p "$STAMP_DIR"
