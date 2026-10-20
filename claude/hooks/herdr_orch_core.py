@@ -5900,6 +5900,7 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     add("merge-authority")
     add("merge-ready", "--task-id", "--pr-json", "--repo-json")
+    add("sync-main", "--branch")
     pt = add("present-task")
     pt.add_argument("--task-id", default=None)
     pt.add_argument("--all", action="store_true")
@@ -8082,6 +8083,14 @@ def _main(argv=None) -> int:
             return 1
         print(f"archived {ns.task_id} archive/{detail} files={count}")
         return 0
+    if ns.cmd == "sync-main":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(ns.repo_path is not None, "sync-main needs --repo-path")
+        _require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ns.branch) is not None,
+                 "invalid branch")
+        result, code = sync_main(ns.repo_path, ns.branch)
+        print(json.dumps(result, sort_keys=True))
+        return code
     if ns.cmd == "merge-ready":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -8541,6 +8550,104 @@ def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):
                 f"below the required {herdr_caps.REQUIRED_CAPABILITY}"
             ), levels
     return True, "task-lead dispatch is admissible", levels
+
+
+SYNC_MAIN_REASONS = {
+    20: "not-a-worktree", 21: "detached", 22: "not-on-branch", 23: "no-upstream",
+    24: "fetch-failed", 25: "ahead", 26: "diverged", 27: "dirty",
+    28: "ff-refused", 29: "inspect-error",
+}
+SYNC_MAIN_TIMEOUT = 120
+# Paths `update --ai` consumes; a hand list, so a new installer input outside
+# it under-reports and `update`'s staleness notice is the fallback.
+UPDATE_AI_PREFIXES = ("install/", "herdr/", "codex/")
+UPDATE_AI_FILES = ("claude/settings.json.tmpl",)
+
+
+def _sync_main_head(checkout):
+    try:
+        return context_git(checkout, "rev-parse", "HEAD")
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def sync_main(repo_path, branch):
+    """Fast-forward the primary worktree through repo-sync.sh; (result, exit code)."""
+    context = repository_context(repo_path)
+    result = {"branch": branch, "checkout": context["primary_root"], "detail": "",
+              "new_head": None, "old_head": None, "reason": "", "synced": False,
+              "update_ai": False, "update_ai_paths": []}
+    if not context["primary_known"]:
+        result["reason"] = "no-primary"
+        return result, 0
+    checkout = context["primary_root"]
+    head = _sync_main_head(checkout)
+    result["old_head"] = result["new_head"] = head
+    try:
+        lock = context_git(checkout, "rev-parse", "--path-format=absolute",
+                           "--git-path", "index.lock")
+    except (OSError, subprocess.SubprocessError):
+        result["reason"] = "error"
+        return result, 1
+    if os.path.exists(lock):
+        result["reason"] = "locked"
+        return result, 1
+    script = Path(__file__).resolve().parents[2] / "install" / "common" / "repo-sync.sh"
+    if not script.is_file():
+        result["reason"] = "error"
+        result["detail"] = "repo-sync.sh missing"
+        return result, 1
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # RS10: a retry overlapping a sync left running by a dead verb may fail on
+    # a git lock; that is reported as a skip and the next merge syncs again.
+    proc = subprocess.Popen(
+        ["bash", str(script), "--require-branch", branch, checkout], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=SYNC_MAIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        result["reason"] = "timeout"
+        return result, 1
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    result["detail"] = lines[-1][:300] if lines else ""
+    code = proc.returncode
+    if code in SYNC_MAIN_REASONS:
+        result["reason"] = SYNC_MAIN_REASONS[code]
+        return result, 0
+    if code == 30:
+        result["reason"] = "uncertain"
+        return result, 1
+    if code != 0:
+        result["reason"] = "error"
+        return result, 1
+    live = _sync_main_head(checkout)
+    result["old_head"] = result["new_head"] = live
+    forwarded = re.search(r"^\[OK\] fast-forwarded ([0-9a-f]{40,64})\.\.([0-9a-f]{40,64})$",
+                          out, re.M)
+    if forwarded is None and "[OK] already up to date" in out:
+        result["reason"] = "up-to-date"
+        result["synced"] = True
+        return result, 0
+    if forwarded is None or live != forwarded.group(2):
+        result["reason"] = "uncertain"
+        return result, 1
+    old, new = forwarded.groups()
+    result.update(reason="synced", synced=True, old_head=old, new_head=new)
+    if (Path(checkout) / "install" / "common" / "ai-update.sh").exists():
+        try:
+            changed = context_git(checkout, "diff", "--name-only", old, new).splitlines()
+        except (OSError, subprocess.SubprocessError):
+            changed = []
+        paths = sorted(f for f in changed
+                       if f.startswith(UPDATE_AI_PREFIXES) or f in UPDATE_AI_FILES)
+        result.update(update_ai=bool(paths), update_ai_paths=paths)
+    return result, 0
 
 
 def main(argv=None) -> int:
