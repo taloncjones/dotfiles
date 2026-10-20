@@ -21,16 +21,19 @@ import {
   headerLine,
   isRecordName,
   liveCell,
+  ownerBand,
+  parseDeadlines,
   parseEvents,
   parseJson,
   prRows,
   repoName,
+  statusCell,
   summaryLine,
   taskRow,
 } from './fleet'
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
-type Kind = 'tasks' | 'prs' | 'archive'
+type Kind = 'tasks' | 'prs' | 'archive' | 'deadlines'
 
 const PANE = 'herdr-fleet'
 const TASK_TICK_MS = 15000
@@ -45,6 +48,7 @@ const EMPTY: FleetSnapshot = {
   archived: { slug: null, rows: [] },
   prs: null,
   ghError: null,
+  deadlines: null,
   readError: null,
   readAt: null,
 }
@@ -65,7 +69,8 @@ function view(snap: FleetSnapshot) {
   const archived = snap.archived.slug === slug ? snap.archived.rows : []
   const prs = snap.prs && snap.prs.slug === slug ? snap.prs : null
   const ghError = snap.ghError && snap.ghError.slug === slug ? snap.ghError : null
-  return { slug, live, archived, prs, ghError }
+  const deadlines = snap.deadlines && snap.deadlines.slug === slug ? snap.deadlines : null
+  return { slug, live, archived, prs, ghError, deadlines }
 }
 
 function clock(ms: number): string {
@@ -79,13 +84,18 @@ function createFleet($: Dollar, generation: number) {
     tasks: null,
     prs: null,
     archive: null,
+    deadlines: null,
   }
   const triggered = new Map<Kind, Promise<void>>()
 
-  async function stateRoot(): Promise<string> {
+  async function configDir(): Promise<string> {
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     const home = (await $.env.get('HOME')) ?? ''
-    return `${config ?? `${home}/.claude`}/herdr-orch`
+    return config ?? `${home}/.claude`
+  }
+
+  async function stateRoot(): Promise<string> {
+    return `${await configDir()}/herdr-orch`
   }
 
   async function readText(path: string): Promise<string | null> {
@@ -193,6 +203,7 @@ function createFleet($: Dollar, generation: number) {
     if (slug !== null && slug !== before) {
       triggered.set('prs', forced('prs'))
       triggered.set('archive', forced('archive'))
+      triggered.set('deadlines', forced('deadlines'))
     }
   }
 
@@ -261,10 +272,31 @@ function createFleet($: Dollar, generation: number) {
     })
   }
 
+  // Read-only core verb; a failed run keeps the previous part so the countdown keeps stepping.
+  async function refreshDeadlines(): Promise<void> {
+    const slug = heldSlug((await read($, snapAtom)).lease)
+    if (slug === null) return
+    const at = await $.clock.now()
+    let text: string
+    try {
+      const core = `${await configDir()}/hooks/herdr_orch_core.py`
+      const ran = await $.process.run(
+        ['python3', core, 'review-deadlines', '--repo-slug', slug],
+        { timeoutMs: GH_TIMEOUT_MS },
+      )
+      if (ran.exitCode !== 0) return
+      text = ran.stdout
+    } catch {
+      return
+    }
+    await publish(slug, s => ({ ...s, deadlines: { slug, at, rows: parseDeadlines(text) } }))
+  }
+
   const runners: Record<Kind, () => Promise<void>> = {
     tasks: refreshTasks,
     prs: refreshPrs,
     archive: refreshArchive,
+    deadlines: refreshDeadlines,
   }
 
   function start(kind: Kind): Promise<void> {
@@ -295,6 +327,7 @@ function createFleet($: Dollar, generation: number) {
     await Promise.all([
       triggered.get('prs') ?? forced('prs'),
       triggered.get('archive') ?? forced('archive'),
+      triggered.get('deadlines') ?? forced('deadlines'),
     ])
   }
 
@@ -304,6 +337,7 @@ function createFleet($: Dollar, generation: number) {
     startSlow: () => {
       void start('prs')
       void start('archive')
+      void start('deadlines')
     },
   }
 }
@@ -312,9 +346,18 @@ function row(cols: Array<[string, number]>): string {
   return cols.map(([text, width]) => clip(text, width)).join(' ')
 }
 
-function taskLine(r: FleetTaskRow, width: number, readAt: number | null, evidence: boolean): string {
+type Line = { key?: string; text: string; color?: 'red' | 'yellow' }
+
+function taskLine(
+  r: FleetTaskRow,
+  width: number,
+  readAt: number | null,
+  evidence: boolean,
+  deadlines: FleetSnapshot['deadlines'],
+): Line {
+  const status = statusCell(r, deadlines, readAt)
   const cells: Array<[string, number]> = [
-    [r.status, 14],
+    [status.text, 14],
     [liveCell(r, readAt, 26), 26],
   ]
   if (evidence) {
@@ -327,7 +370,23 @@ function taskLine(r: FleetTaskRow, width: number, readAt: number | null, evidenc
   }
   const rest = cells.reduce((n, [, w]) => n + w + 1, 0)
   const titleWidth = Math.max(16, width - rest)
-  return row([[fitTitle(plain(r.title), titleWidth), titleWidth], ...cells])
+  return {
+    text: row([[fitTitle(plain(r.title), titleWidth), titleWidth], ...cells]),
+    color: status.isLate ? 'red' : undefined,
+  }
+}
+
+function bandLine(r: FleetTaskRow, token: string, width: number): Line {
+  const titleWidth = Math.max(16, width - 8 - 5 - 2)
+  return {
+    key: `band-${r.id}`,
+    text: row([
+      [token, 8],
+      [r.prNumber === null ? '' : `#${r.prNumber}`, 5],
+      [fitTitle(plain(r.title), titleWidth), titleWidth],
+    ]),
+    color: 'yellow',
+  }
 }
 
 // Head, PR and verdict show only when some row has one and the title keeps 24 columns.
@@ -412,7 +471,7 @@ export const register: Register = on => {
     const snap = await read($, snapAtom)
     const tab = await read($, tabAtom)
     const width = Math.max(40, e.props.bodyColumns)
-    const { slug, live, archived, prs: prPart, ghError } = view(snap)
+    const { slug, live, archived, prs: prPart, ghError, deadlines } = view(snap)
     const prs = prPart ? prPart.rows : []
     const active = activeRows(live)
     const done = doneRows(live, archived)
@@ -433,38 +492,37 @@ export const register: Register = on => {
         width,
       )
     }
-    const lines: string[] = []
-    if (snap.readError) lines.push(`read failed: ${snap.readError}`)
+    const lines: Line[] = []
+    const say = (text: string) => lines.push({ text })
+    if (snap.readError) say(`read failed: ${snap.readError}`)
     if (snap.readAt === null) {
-      if (!snap.readError) lines.push('reading...')
+      if (!snap.readError) say('reading...')
     } else if (slug !== null) {
       if (tab === 'tasks') {
         const evidence = showEvidence(active, width)
-        lines.push(
-          ...(active.length
-            ? active.map(r => taskLine(r, width, snap.readAt, evidence))
-            : ['no tasks']),
-        )
+        lines.push(...ownerBand(active).map(b => bandLine(b.row, b.token, width)))
+        if (active.length) {
+          lines.push(...active.map(r => taskLine(r, width, snap.readAt, evidence, deadlines)))
+        } else say('no tasks')
       } else if (tab === 'done') {
-        if (snap.archived.slug !== slug) lines.push('reading...')
+        if (snap.archived.slug !== slug) say('reading...')
         else {
           const evidence = showEvidence(done, width)
-          lines.push(
-            ...(done.length
-              ? done.map(r => taskLine(r, width, snap.readAt, evidence))
-              : ['no finished tasks']),
-          )
+          if (done.length) {
+            lines.push(...done.map(r => taskLine(r, width, snap.readAt, evidence, deadlines)))
+          } else say('no finished tasks')
         }
       } else {
         if (ghError) {
-          lines.push(
+          say(
             `gh unavailable: ${ghError.reason}${
               prPart ? ` (as of ${clock(prPart.at)})` : ''
             }`,
           )
         }
-        if (!prPart && !ghError) lines.push('reading...')
-        else lines.push(...(prs.length ? prs.map(r => prLine(r, width)) : ['no open PRs']))
+        if (!prPart && !ghError) say('reading...')
+        else if (prs.length) prs.forEach(r => say(prLine(r, width)))
+        else say('no open PRs')
       }
     }
 
@@ -481,8 +539,10 @@ export const register: Register = on => {
             />
           ))}
         </Box>
-        {lines.map(line => (
-          <Text wrap="truncate-end">{plain(line)}</Text>
+        {lines.map((line, i) => (
+          <Text key={line.key ?? `line-${i}`} color={line.color} wrap="truncate-end">
+            {plain(line.text)}
+          </Text>
         ))}
       </Box>
     )

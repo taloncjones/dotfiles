@@ -1,4 +1,5 @@
 import type {
+  FleetDeadline,
   FleetPrRow,
   FleetTaskRow,
 } from '../types'
@@ -20,7 +21,7 @@ const CI_IGNORED = new Set(['SKIPPED', 'NEUTRAL'])
 
 type Json = Record<string, unknown>
 
-export type ShipHandoff = { head_sha?: unknown; verdict?: unknown } | null
+export type ShipHandoff = { head_sha?: unknown; verdict?: unknown; launch_id?: unknown } | null
 export type DoneRecord = Json | null
 export type EventLines = Json[] | null
 
@@ -118,6 +119,38 @@ export function parseEvents(text: string): Json[] {
 
 const noWorker = { agent: '-', state: '', since: null }
 
+const PARKED_ORDER = ['merge?', 'gate?', 'open-pr?']
+
+function prNumberOf(record: Json): number | null {
+  for (const key of ['pr_number', 'pr']) {
+    const value = record[key]
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value
+  }
+  return null
+}
+
+/** Port of the `?` branch of herdr_orch_core.task_state_token; state-cases.ts keeps the two in step. */
+export function ownerToken(record: Json, ship: ShipHandoff): string | null {
+  const status = record.status
+  if (status === 'pr-open-pending-merge') return 'merge?'
+  if (status !== 'reviewed') return null
+  if (prNumberOf(record) === null) return 'open-pr?'
+  if (!ship) return null
+  const head = str(record.review_head_sha)
+  return ship.verdict === 'APPROVE' && head && ship.head_sha === head ? 'merge?' : 'gate?'
+}
+
+function lastWorker(record: Json, phase: string, launch?: string): Json | null {
+  const workers = Array.isArray(record.workers) ? (record.workers as Json[]) : []
+  for (let i = workers.length - 1; i >= 0; i--) {
+    const w = workers[i]
+    if (w && typeof w === 'object' && w.phase === phase && (launch === undefined || w.launch_id === launch)) {
+      return w
+    }
+  }
+  return null
+}
+
 function nsToMs(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value / 1e6 : null
 }
@@ -193,6 +226,9 @@ export function taskRow(
       verdict: '-',
       isDirty: false,
       isTerminal: false,
+      owner: null,
+      gateSince: null,
+      reviewLaunch: null,
     }
   }
   const status = str(record.status) ?? '-'
@@ -210,6 +246,17 @@ export function taskRow(
   const head = str(record.head_sha)
   const isDirty =
     done !== null && done.dirty === true && str(done.head_sha) === head
+  // The core accepts a ship handoff only for the launch the record pins.
+  const pinned = str(record.ship_launch_id)
+  const pinnedShip = ship && pinned && ship.launch_id === pinned ? ship : null
+  const owner = ownerToken(record, pinnedShip)
+  let gateSince: number | null = null
+  if (status === 'reviewed' && owner === null && pinned && !pinnedShip) {
+    const row = lastWorker(record, 'ship', pinned)
+    if (row && row.status === 'launched') gateSince = nsToMs(row.started_ns)
+  }
+  const reviewLaunch =
+    status === 'review-dispatched' ? str(lastWorker(record, 'review')?.launch_id) : null
   return {
     id: taskId,
     title:
@@ -225,7 +272,90 @@ export function taskRow(
     verdict: shipVerdict(record, ship),
     isDirty,
     isTerminal,
+    owner,
+    gateSince,
+    reviewLaunch,
   }
+}
+
+/** Waiting tasks for the owner band: blocked first, then parked by token; each task once. */
+export function ownerBand(rows: FleetTaskRow[]): Array<{ row: FleetTaskRow; token: string }> {
+  const live = rows.filter(r => !r.isTerminal)
+  const blocked = live.filter(r => r.status === 'blocked' || r.live.state === 'blocked')
+  const parked = live.filter(r => !blocked.includes(r) && r.owner !== null)
+  parked.sort((a, b) => PARKED_ORDER.indexOf(a.owner!) - PARKED_ORDER.indexOf(b.owner!))
+  return [
+    ...blocked.map(row => ({ row, token: 'blocked' })),
+    ...parked.map(row => ({ row, token: row.owner! })),
+  ]
+}
+
+const DEADLINE_STATES = new Set(['running', 'overdue', 'expired', 'unknown'])
+const wholeSecs = (v: string | undefined) => (v !== undefined && /^\d+$/.test(v) ? Number(v) : null)
+
+/** Parses `review-deadline` lines from the core; malformed lines are skipped. */
+export function parseDeadlines(text: string): Record<string, FleetDeadline> {
+  const out: Record<string, FleetDeadline> = {}
+  for (const line of text.split('\n')) {
+    const [head, ...parts] = line.trim().split(/\s+/)
+    if (head !== 'review-deadline') continue
+    const kv: Record<string, string> = {}
+    for (const part of parts) {
+      const at = part.indexOf('=')
+      if (at > 0) kv[part.slice(0, at)] = part.slice(at + 1)
+    }
+    const deadlineSecs = wholeSecs(kv.deadline_secs)
+    const hardSecs = wholeSecs(kv.hard_secs)
+    const remaining = kv.remaining === 'unknown' ? null : wholeSecs(kv.remaining)
+    if (!kv.task || !kv.launch || !DEADLINE_STATES.has(kv.state)) continue
+    if (deadlineSecs === null || hardSecs === null) continue
+    if (remaining === null && kv.remaining !== 'unknown') continue
+    out[kv.task] = {
+      launch: kv.launch,
+      state: kv.state as FleetDeadline['state'],
+      remaining,
+      deadlineSecs,
+      hardSecs,
+    }
+  }
+  return out
+}
+
+/** Countdown text for a verb read `elapsedSecs` ago; null when the verb has no time to show. */
+export function countdown(
+  d: FleetDeadline,
+  elapsedSecs: number,
+): { text: string; isLate: boolean } | null {
+  if (d.state === 'unknown') return null
+  const expired = { text: 'expired', isLate: true }
+  if (d.state === 'expired') return expired
+  if (d.remaining === null) return null
+  const e = Math.max(0, elapsedSecs)
+  const left = d.remaining - e
+  const mins = (secs: number) => age(secs * 1000)
+  if (d.state === 'running' && left > 0) return { text: `running ${mins(left)}`, isLate: false }
+  if (d.state === 'running') {
+    const hard = left + (d.hardSecs - d.deadlineSecs)
+    return hard > 0 ? { text: `overdue ${mins(hard)}`, isLate: true } : expired
+  }
+  return left > 0 ? { text: `overdue ${mins(left)}`, isLate: true } : expired
+}
+
+/** Status cell: review countdown, else ship gate elapsed, else the record status. */
+export function statusCell(
+  r: FleetTaskRow,
+  deadlines: { at: number; rows: Record<string, FleetDeadline> } | null,
+  readAt: number | null,
+): { text: string; isLate: boolean } {
+  const d = deadlines?.rows[r.id]
+  if (r.status === 'review-dispatched' && d && r.reviewLaunch !== null && d.launch === r.reviewLaunch) {
+    const shown = countdown(d, readAt === null || deadlines === null ? 0 : (readAt - deadlines.at) / 1000)
+    if (shown) return shown
+  }
+  if (r.gateSince !== null && readAt !== null) {
+    return { text: `co-review ${age(readAt - r.gateSince)}`, isLate: false }
+  }
+  return { text: r.status, isLate: false }
 }
 
 export function hasEvidence(row: FleetTaskRow): boolean {

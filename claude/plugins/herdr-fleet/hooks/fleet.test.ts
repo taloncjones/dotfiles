@@ -1,13 +1,15 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { age, ciCell, fitTitle, labelTitle, repoName } from './fleet'
+import { age, ciCell, fitTitle, labelTitle, ownerToken, repoName } from './fleet'
 import { LABEL_CASES } from './label-cases'
+import { STATE_CASES } from './state-cases'
 
 const ROOT = '/h/.claude/herdr-orch'
 const GH = ['gh', 'pr', 'list', '--state', 'open', '--json',
   'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision',
   '--limit', '100']
 const OK = { exitCode: 0, stdout: '[]', stderr: '' }
+const OK_VERB = { exitCode: 0, stdout: '', stderr: '' }
 
 type GhAnswer = { exitCode: number; stdout: string; stderr: string } | 'reject'
 
@@ -26,6 +28,11 @@ type World = {
   root: string
   reads: string[]
   openFails: boolean
+  verb: GhAnswer
+  verbGate: Promise<void> | null
+  verbRuns: string[][]
+  verbRunning: number
+  verbMax: number
 }
 
 function newWorld(files: Record<string, string> = {}): World {
@@ -33,6 +40,7 @@ function newWorld(files: Record<string, string> = {}): World {
     files, ghosts: [], gh: OK, ghGate: null, readGate: null,
     runs: [], running: 0, maxRunning: 0, opened: [], logs: [], repoFails: false, openFails: false,
     root: '/repo', reads: [],
+    verb: OK_VERB, verbGate: null, verbRuns: [], verbRunning: 0, verbMax: 0,
   }
 }
 
@@ -99,6 +107,18 @@ function stub(on: any, w: World) {
     return { value: text }
   })
   on('process.run', async (_$: any, e: any, next: any) => {
+    if (e.argv[0] === 'python3') {
+      w.verbRuns.push([...e.argv])
+      w.verbRunning += 1
+      w.verbMax = Math.max(w.verbMax, w.verbRunning)
+      try {
+        if (w.verbGate) await w.verbGate
+        if (w.verb === 'reject') return next(e)
+        return { value: w.verb }
+      } finally {
+        w.verbRunning -= 1
+      }
+    }
     w.runs.push([...e.argv])
     w.running += 1
     w.maxRunning = Math.max(w.maxRunning, w.running)
@@ -855,4 +875,202 @@ test('a mixed list blanks the evidence cells of a plan row', async ($, on) => {
   expect(t1).toContain('abcdef0')
   expect(t1).toContain('#12')
   expect(t2.trimEnd().endsWith('working 1m')).toBe(true)
+})
+
+const VERB = ['python3', '/h/.claude/hooks/herdr_orch_core.py', 'review-deadlines', '--repo-slug', 'a']
+const dl = (id: string, launch: string, state: string, remaining: string, deadline = 900, hard = 1500) =>
+  `review-deadline task=${id} launch=${launch} remaining=${remaining} state=${state} ` +
+  `deadline_secs=${deadline} hard_secs=${hard} basis=contract:c,files:f`
+const verbOut = (...list: string[]) => ({ exitCode: 0, stdout: list.join('\n') + '\n', stderr: '' })
+const reviewer = (launch = 'R1') => worker({ phase: 'review', launch_id: launch, agent: 'rev-x' })
+const rowOf = async (ui: any, id: string) => (await lines(ui)).find(line => line.startsWith(id))!
+const textOf = async (ui: any, id: string) =>
+  (await ui.findAll({ type: 'Text' })).find((t: any) => t.text.startsWith(id))
+
+// Band rows are the only yellow Text; the harness does not expose Text keys.
+const shipFile = (id: string, launch: string, body: object) => ({
+  [`${ROOT}/a/artifacts/${id}/ship-${launch}/ship.json`]: JSON.stringify(body),
+})
+
+test('the owner band lists a blocked task, then a parked merge? task', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1-blocked', { status: 'blocked', title: 'Blocked thing' }),
+    ...task('a', 't2-merge', {
+      status: 'pr-open-pending-merge', pr_number: 291, title: 'Merge this long titled task now please',
+    }),
+    ...task('a', 't3-gate', {
+      status: 'reviewed', pr_number: 5, review_head_sha: 'aaa', ship_launch_id: 'S1', title: 'Gate task',
+    }),
+    ...shipFile('t3-gate', 'S1', { launch_id: 'S1', verdict: 'REQUEST_CHANGES', head_sha: 'aaa' }),
+    ...task('a', 't4-open', { status: 'reviewed', title: 'Open a PR' }),
+    ...task('a', 't5-busy', { title: 'Still moving' }),
+    ...task('a', 't6-done', { status: 'merged', title: 'Finished' }),
+  })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($, 60)
+  const texts = await ui.findAll({ type: 'Text' })
+  const band = texts.filter((t: any) => t.props.color === 'yellow')
+  expect(band.map((t: any) => t.text.trim().split(/\s+/)[0])).toEqual(['blocked', 'merge?', 'gate?', 'open-pr?'])
+  expect(band.every((t: any) => t.props.color === 'yellow')).toBe(true)
+  expect(band[1].text).toMatch(/^merge\?\s+#291\s+Merge this long titled task/)
+  const all: string[] = texts.map((t: any) => t.text)
+  const firstTask = all.findIndex(line => line.startsWith('Still moving'))
+  expect(all.indexOf(band[3].text)).toBeLessThan(firstTask)
+  expect(all.some(line => line.startsWith('merge?') && line.includes('Finished'))).toBe(false)
+  expect(band.some((t: any) => t.text.includes('Still moving') || t.text.includes('Finished'))).toBe(false)
+  await ui.press({ key: 'tab-prs' })
+  const after = await ui.findAll({ type: 'Text' })
+  expect(after.some((t: any) => t.props.color === 'yellow')).toBe(false)
+})
+
+test('the owner band renders no rows when nothing waits', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...task('a', 't1'), ...task('a', 't2') })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const texts = await (await pane($)).findAll({ type: 'Text' })
+  expect(texts.some((t: any) => t.props.color === 'yellow')).toBe(false)
+  expect(texts.filter((t: any) => t.text.startsWith('t')).length).toBe(2)
+})
+
+test('a review row shows running and overdue countdowns from the deadline verb', async ($, on) => {
+  const rev = (id: string) => task('a', id, { status: 'review-dispatched', workers: [reviewer()] })
+  const w = newWorld({ ...owner('a'), ...rev('t1'), ...rev('t2'), ...rev('t3'), ...rev('t4') })
+  w.verb = verbOut(
+    dl('t1', 'R1', 'running', '600'),
+    dl('t2', 'R1', 'overdue', '120'),
+    dl('t3', 'R9', 'running', '600'),
+    dl('t4', 'R1', 'unknown', 'unknown'),
+    'review-deadline task=t5 launch=R1 remaining=oops state=running deadline_secs=9 hard_secs=9',
+  )
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($, 100)
+  expect(await rowOf(ui, 't1')).toMatch(/running 10m/)
+  expect((await textOf(ui, 't1')).props.color).toBeUndefined()
+  expect(await rowOf(ui, 't2')).toMatch(/overdue 2m/)
+  expect((await textOf(ui, 't2')).props.color).toBe('red')
+  expect(await rowOf(ui, 't3')).toMatch(/review-dispatc/)
+  expect((await textOf(ui, 't3')).props.color).toBeUndefined()
+  expect(await rowOf(ui, 't4')).toMatch(/review-dispatc/)
+  expect((await textOf(ui, 't4')).props.color).toBeUndefined()
+})
+
+test('a countdown steps to overdue and expired between verb reads', async ($, on) => {
+  const rev = (id: string) => task('a', id, { status: 'review-dispatched', workers: [reviewer()] })
+  const w = newWorld({ ...owner('a'), ...rev('t1'), ...rev('t2') })
+  w.verb = verbOut(dl('t1', 'R1', 'running', '30'), dl('t2', 'R1', 'overdue', '10'))
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($, 100)
+  expect(await rowOf(ui, 't1')).toMatch(/running 30s/)
+  await clock.advance(45000)
+  expect(await rowOf(ui, 't1')).toMatch(/overdue 9m/)
+  expect((await textOf(ui, 't1')).props.color).toBe('red')
+  expect(await rowOf(ui, 't2')).toMatch(/expired/)
+  expect((await textOf(ui, 't2')).props.color).toBe('red')
+})
+
+test('the deadline verb runs at start and every 300 s, not on the 15 s tick', async ($, on) => {
+  let release = () => {}
+  const w = newWorld(owner('a'))
+  const clock = stub(on, w)
+  await boot($, clock)
+  expect(w.verbRuns).toEqual([VERB])
+  await clock.advance(299000)
+  expect(w.verbRuns.length).toBe(1)
+  await clock.advance(1000)
+  expect(w.verbRuns.length).toBe(2)
+
+  w.verbGate = new Promise<void>(resolve => { release = resolve })
+  await clock.advance(300000)
+  expect(w.verbRuns.length).toBe(3)
+  const pending = command($)
+  await clock.settle()
+  w.verbGate = null
+  release()
+  await pending
+  expect(w.verbRuns.length).toBe(4)
+  expect(w.verbMax).toBe(1)
+})
+
+test('a ship gate row shows co-review and the time since its launch', async ($, on) => {
+  const gate = (id: string, status: string) => task('a', id, {
+    status: 'reviewed', pr_number: 5, ship_launch_id: 'L1',
+    workers: [worker({ phase: 'ship', status, started_ns: ns(720) })],
+  })
+  const w = newWorld({
+    ...owner('a'), ...gate('ta', 'launched'), ...gate('tb', 'failed'), ...gate('tc', 'launched'),
+    ...shipFile('tc', 'L1', { launch_id: 'L0', verdict: 'APPROVE', head_sha: 'x' }),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($, 100)
+  expect(await rowOf(ui, 'ta')).toMatch(/co-review 12m/)
+  expect(await rowOf(ui, 'tb')).toMatch(/reviewed/)
+  expect(await rowOf(ui, 'tc')).toMatch(/co-review 12m/)
+  const band = (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
+  expect(band.length).toBe(0)
+})
+
+test('owner tokens match the shared core state cases', () => {
+  expect(STATE_CASES.length).toBeGreaterThan(0)
+  for (const c of STATE_CASES) {
+    const parked = ['merge?', 'gate?', 'open-pr?'].includes(c.token)
+    expect(ownerToken(c.task, c.ship)).toBe(parked ? c.token : null)
+  }
+})
+
+test('a worker blocked event puts the task in the owner band', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { workers: [worker()] }),
+    ...events(evt(50, 'blocked')),
+  })
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const texts = await (await pane($)).findAll({ type: 'Text' })
+  const band = texts.filter((t: any) => t.props.color === 'yellow')
+  expect(band.length).toBe(1)
+  expect(band[0].text).toMatch(/^blocked\s/)
+})
+
+test('a failed deadline read keeps the last countdown', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { status: 'review-dispatched', workers: [reviewer()] }),
+  })
+  w.verb = verbOut(dl('t1', 'R1', 'running', '600'))
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($, 100)
+  expect(await rowOf(ui, 't1')).toMatch(/running 10m/)
+  w.verb = { exitCode: 1, stdout: '', stderr: 'boom' }
+  await clock.advance(300000)
+  expect(w.verbRuns.length).toBe(2)
+  expect(await rowOf(ui, 't1')).toMatch(/running 5m/)
+})
+
+test('a deadline result for an old lease is never drawn under the new one', async ($, on) => {
+  let release = () => {}
+  const rev = (slug: string) => task(slug, 'r1', { status: 'review-dispatched', workers: [reviewer()] })
+  const w = newWorld({ ...owner('a'), ...rev('a'), ...rev('b') })
+  w.verbGate = new Promise<void>(resolve => { release = resolve })
+  w.verb = verbOut(dl('r1', 'R1', 'running', '600'))
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  expect(w.verbRuns.length).toBe(1)
+  Object.assign(w.files, {
+    [`${ROOT}/a/owner.json`]: JSON.stringify({ session_id: 'other' }),
+    ...owner('b'),
+  })
+  await clock.advance(15000)
+  w.verbGate = null
+  w.verb = OK_VERB
+  release()
+  await clock.settle()
+  await clock.advance(15000)
+  const ui = await pane($, 100)
+  expect(await rowOf(ui, 'r1')).toMatch(/review-dispatc/)
 })
