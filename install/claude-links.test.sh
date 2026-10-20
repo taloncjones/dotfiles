@@ -1026,6 +1026,52 @@ else
     fail "work Claude config retains Atlassian"
 fi
 
+# --- template owns tui=fullscreen for both accounts --------------------
+TUI_SEED='{"model":"opus","promptSuggestionEnabled":true,"enabledPlugins":{"keep@custom":true,"atlassian@claude-plugins-official":true},"env":{"LOCAL_ONLY":"1"},"feedbackSurveyState":{"n":1},"theme":"dark"}'
+python3 - "$DOTFILEDIR/claude/settings.json.tmpl" "$TMP/tmpl-no-tui.json" <<'PYEOF'
+import json, sys
+t = json.load(open(sys.argv[1]))
+t.pop("tui", None)
+json.dump(t, open(sys.argv[2], "w"), indent=2)
+PYEOF
+for variant in with without; do
+    h="$TMP/tui-home-$variant"
+    mkdir -p "$h/.claude" "$h/.claude-work"
+    printf '%s\n' "$TUI_SEED" > "$h/.claude/settings.json"
+    printf '%s\n' "$TUI_SEED" > "$h/.claude-work/settings.json"
+    tmpl="$DOTFILEDIR/claude/settings.json.tmpl"
+    [ "$variant" = without ] && tmpl="$TMP/tmpl-no-tui.json"
+    for dir in .claude .claude-work; do
+        HOME="$h" reconcile_claude_settings_file "$tmpl" "$h/$dir/settings.json" >/dev/null
+    done
+done
+tui_without_key() {
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("tui",None); print(json.dumps(d,sort_keys=True))' "$1"
+}
+for pair in "personal:.claude" "work:.claude-work"; do
+    name="${pair%%:*}"; dir="${pair#*:}"
+    with="$TMP/tui-home-with/$dir/settings.json"
+    without="$TMP/tui-home-without/$dir/settings.json"
+    if jget "$with" "d.get('tui') == 'fullscreen'" && ! jget "$without" "'tui' in d"; then
+        pass "$name Claude config gains tui=fullscreen"
+    else
+        fail "$name Claude config gains tui=fullscreen"
+    fi
+    if [ "$(tui_without_key "$with")" = "$(tui_without_key "$without")" ]; then
+        pass "$name Claude config is otherwise unchanged by tui"
+    else
+        fail "$name Claude config is otherwise unchanged by tui"
+    fi
+done
+TUI_LOCAL="$TMP/tui-local.json"
+printf '{"tui":"default"}\n' > "$TUI_LOCAL"
+reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" "$TUI_LOCAL" >/dev/null
+if jget "$TUI_LOCAL" "d['tui'] == 'fullscreen'"; then
+    pass "template reasserts tui=fullscreen over a local value"
+else
+    fail "template reasserts tui=fullscreen over a local value"
+fi
+
 # --- reconcile writes a template stamp ---------------------------------
 STAMP_DIR="$TMP/stampdir"
 mkdir -p "$STAMP_DIR"
