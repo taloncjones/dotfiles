@@ -120,6 +120,30 @@ test_new_dangling_flag() {
 }
 test_new_dangling_flag
 
+test_new_help_flag() {
+  local repo; repo=$(mk_repo)
+  local out rc1 rc2 rc3 seen=0 absent=0
+  out=$(cd "$repo" && bash "$TODOS" new --help 2>&1); rc1=$?
+  case "$out" in *'usage: todos.sh new "<title>"'*) seen=1;; esac
+  (cd "$repo" && bash "$TODOS" new x --area --help >/dev/null 2>&1); rc2=$?
+  (cd "$repo" && bash "$TODOS" new x --priority low -h >/dev/null 2>&1); rc3=$?
+  [ ! -e "$repo/.todos" ] && absent=1
+  assert_eq "new: help flag prints usage and writes nothing" "$rc1|$rc2|$rc3|$seen|$absent" "1|1|1|1|1"
+  rm -rf "$repo"
+}
+test_new_help_flag
+
+test_new_dash_title() {
+  local repo; repo=$(mk_repo)
+  local out rc seen=0 absent=0
+  out=$(cd "$repo" && bash "$TODOS" new -x 2>&1); rc=$?
+  case "$out" in *'-x'*'usage: todos.sh new "<title>"'*) seen=1;; esac
+  [ ! -e "$repo/.todos" ] && absent=1
+  assert_eq "new: dash title refused and writes nothing" "$rc|$seen|$absent" "1|1|1"
+  rm -rf "$repo"
+}
+test_new_dash_title
+
 test_registry() {
   local reg; reg=$(mktemp); rm -f "$reg"   # path that does not exist yet
   local repo; repo=$(mk_repo)

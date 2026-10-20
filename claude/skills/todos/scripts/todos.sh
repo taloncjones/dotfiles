@@ -616,7 +616,13 @@ cmd_init() {
 }
 
 cmd_new() {
+  local usage='usage: todos.sh new "<title>" [--area A] [--file P]... [--due YYYY-MM-DD] [--surface YYYY-MM-DD] [--priority high|med|low] [--depends-on REF]...'
+  local arg
+  for arg in "$@"; do
+    case "$arg" in -h|--help) die "$usage" ;; esac
+  done
   [ "$#" -ge 1 ] || die 'new requires a "<title>"'
+  case "$1" in -*) die "title cannot start with '-': $1"$'\n'"$usage" ;; esac
   local title="$1"; shift
   local area="" due="" surface="" priority="" files=() deps_in=() deps=() ref d
   while [ "$#" -gt 0 ]; do
