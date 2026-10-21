@@ -54,3 +54,26 @@ round" dispatches as usual. The delta brief carries these lines:
 `herdr-ship-prior-handoff: <pinned ship.json path>`,
 `herdr-ship-delta-head: <head>`, and
 `herdr-ship-delta-caps: <files>/<lines>`.
+
+## Ship dispatch details (section 6)
+
+Without `--tier`, on a first gate or after an `APPROVE`, the brief carries `herdr-ship-brief: tier=auto` and the
+small-tier caps from `config.json` `ship.small`; co-review picks the tier.
+Every ship brief is the text `dispatch-gate` renders from the `brief:ship`
+block of `references/brief-template.md`; never hand-write a ship brief or
+copy one from another task.
+It refuses a live or unknown pinned agent. For a pinned run with no
+`ship.json` (it stopped before the gate wrote it), it relaunches at most
+once per reviewed head: it refuses when `ship_relaunch_head` equals
+`review_head_sha`, otherwise writes `ship_relaunch_head` before launching
+(so an interrupted relaunch parks the task) and forces `tier=full`. It
+launches read-only on `claude`, pins `ship_launch_id`, then settles the old
+pinned row.
+
+The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
+`ship.json` `base_sha` copies the expected identity's `base`, so a fresh
+gate gates the current PR base. A head behind that base is gated on its
+merge result and needs no merge. On a `prepare` conflict the ship worker
+records INCOMPLETE and the director's repair flow resolves it; no worker
+merges the base into the branch. A base that moves cleanly after the gate needs no
+re-gate: `merge-ready` re-checks it with `base-check`.
