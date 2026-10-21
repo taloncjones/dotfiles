@@ -142,6 +142,7 @@ link_codex_surfaces() {
   link_codex_path "$DOTFILEDIR/claude/hooks/git_remote_guard.py" "$HOME/.codex/hooks/git_remote_guard.py"
   link_codex_path "$DOTFILEDIR/claude/hooks/planning_artifact_guard.py" "$HOME/.codex/hooks/planning_artifact_guard.py"
   link_codex_path "$DOTFILEDIR/claude/hooks/signer_guard.py" "$HOME/.codex/hooks/signer_guard.py"
+  link_codex_path "$DOTFILEDIR/claude/hooks/shell_hint.py" "$HOME/.codex/hooks/shell_hint.py"
 
   for shared_skill in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
     link_codex_path "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
@@ -210,6 +211,11 @@ link_codex_surfaces() {
     'signer_guard.py' \
     'Bash|Shell|shell|exec_command|shell_command|unified_exec' \
     "$HOME/.codex/hooks/signer_guard.py"
+
+  add_codex_hook \
+    'shell_hint.py' \
+    'Bash|Shell|shell|exec_command|shell_command|unified_exec' \
+    "$HOME/.codex/hooks/shell_hint.py"
 
   add_codex_hook \
     'orch_edit_guard.py' \
