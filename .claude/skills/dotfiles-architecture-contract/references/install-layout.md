@@ -93,7 +93,15 @@ reviewers, Agents working, and a Parked count), one line per task with the PR
 number, title, what it waits on and the time since the latest activity; a
 status icon (bell, compass, eyes, robot) leads each group header, and a PR with
 a human change request sits under Your call. The PR tab has one row per open
-PR. The Queue tab (hotkey 4) lists the todos in `<state>/<slug>/queue.json`,
+PR. A stack cell follows the `#<pr>` cell on the PRs tab, and on task rows
+when the title keeps its minimum width, once any listed PR is stacked. A PR
+whose base (`baseRefName`) is the head branch of exactly one other listed
+same-repository PR (`isCrossRepository` false) sits above it. The cell reads
+`2/3 #301` (position, height, root PR), `2/3 blocks 1` for the lowest PR below
+the top with failing CI or changes requested (its row draws yellow on the PRs
+tab), and `3/3 blocked by #302` for every PR above that blocker. A base with no
+listed PR makes the lowest listed PR the stack root, and a lone PR shows no
+cell. The Queue tab (hotkey 4) lists the todos in `<state>/<slug>/queue.json`,
 which the director writes with the core's fenced `set-queue` verb (at most 10
 pending todo ids); a todo that any task record names, or that has no pending
 file, is hidden. Cells link out through the terminal's hyperlinks: a task title
