@@ -37,8 +37,16 @@ link_codex_surfaces
 echo "[ai-update] Refreshing plugins..."
 source "$DOTFILEDIR"/install/common/claude-plugins.sh
 
+echo "[ai-update] Generating the herdr Claude detection override..."
+manifest_status=0
+python3 "$DOTFILEDIR"/install/common/herdr_manifest.py || manifest_status=1
+
 if [ "$sweep_status" -ne 0 ]; then
   echo "[ai-update] [X] retired plugin sweep incomplete; see the [X] lines above"
+  exit 1
+fi
+if [ "$manifest_status" -ne 0 ]; then
+  echo "[ai-update] [X] herdr detection override failed; see the [X] line above"
   exit 1
 fi
 echo "[ai-update] Done."

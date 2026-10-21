@@ -474,7 +474,7 @@ fi
 
 fresh_gate
 gh pr review 5 -c -b x >/dev/null 2>"$T/err"; rc=$?
-if [ "$rc" = 1 ] && grep -q 'AskUserQuestion' "$T/err" && grep -q 'Post draft <hash>' "$T/err" \
+if [ "$rc" = 1 ] && grep -q 'AskUserQuestion' "$T/err" && grep -qF '(draft <hash>)' "$T/err" && grep -qF '(skip draft <hash>)' "$T/err" \
     && grep -q 'update --ai' "$T/err" && ! grep -qi 'post it' "$T/err"; then
     pass "N13 the refusal names the prompt and the upgrade fix"
 else

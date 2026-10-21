@@ -39,6 +39,8 @@ PHASES = ("plan", "implement", "review", "think", "read", "mechanical", "ship")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = core.IDLE_AGENT_STATES
 PANE_READY_ATTEMPTS = 3
+# Prompt text oh-my-zsh prints in its default update mode; reminder mode never prints it.
+OMZ_UPDATE_PROMPT = "Would you like to update? [Y/n]"
 SHELL_READY_POLLS = 10
 SHELL_READY_POLL_SECS = 0.5
 # macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
@@ -136,6 +138,17 @@ def _wait_for_shell(herdr_cli: str, pane_id: str, env: dict[str, str]) -> None:
             return
         except DispatchError:
             continue
+    try:
+        text = _run_herdr(
+            herdr_cli,
+            ["pane", "read", pane_id, "--source", "recent-unwrapped", "--lines", "40"],
+            env=env,
+            json_result=False,
+        )
+    except DispatchError:
+        text = ""
+    if isinstance(text, str) and OMZ_UPDATE_PROMPT in text:
+        raise DispatchError("pane-prep: shell-not-ready: omz-update-prompt")
     raise DispatchError("pane-prep: shell-not-ready")
 
 
@@ -378,7 +391,7 @@ def _check_todo_ready(
         raise DispatchError("persisted TODO binding is invalid")
     try:
         process = subprocess.run(
-            ["bash", os.fspath(cli), "ready", todo_id, "--offline"],
+            ["bash", os.fspath(cli), "ready", todo_id, "--online"],
             cwd=cwd,
             check=False,
             capture_output=True,
@@ -609,6 +622,29 @@ class _BoundRecords:
             raise DispatchError("persisted TODO binding changed before dispatch")
         return task
 
+    def seed(self, row: dict[str, Any]) -> None:
+        """Adopt an existing bound row's identity (the reprompt path)."""
+        self.identity = tuple(row[key] for key in core.ATTEMPT_FIELDS)
+
+    def reprompts(self) -> list[dict[str, Any]]:
+        """The final bound row's reprompt entries, read back from disk."""
+        _task, row = self._current()
+        entries = row.get("reprompts", [])
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            raise DispatchError("bound reprompt history is malformed")
+        return entries
+
+    def reserve_reprompt(self, prompt_sha: str, expected_seq: int, reservation_id: str) -> None:
+        self._core("reserve-reprompt", *self._identity_args(),
+                   "--prompt-sha256", prompt_sha, "--expected-seq", str(expected_seq),
+                   "--reservation-id", reservation_id)
+
+    def mark_reprompt(self, reservation_id: str, status: str, prompt_state=None) -> None:
+        args = ["--reservation-id", reservation_id, "--status", status]
+        if prompt_state is not None and core.SHELL_SAFE_RE.fullmatch(prompt_state):
+            args += ["--prompt-state", prompt_state]
+        self._core("enrich-reprompt", *self._identity_args(), *args)
+
     def update(self, launch_id: str, **fields: Any) -> dict[str, Any]:
         if self.identity is None or launch_id != self.identity[0]:
             raise DispatchError("readiness does not belong to the current attempt")
@@ -707,7 +743,11 @@ def _lifecycle_prompt(
     if suffix == "done":
         command += ["--phase", attempt["phase"], "--base-sha", task["base_sha"]]
     elif binding is not None:
-        command += ["--reviewed-base-sha", task["base_sha"]]
+        final_row = task["workers"][-1] if task.get("workers") else {}
+        pin = final_row.get("review_base_sha") if isinstance(final_row, dict) else None
+        if not isinstance(pin, str) or not core.SHA40_RE.fullmatch(pin):
+            raise DispatchError("bound review row has no pinned review_base_sha")
+        command += ["--reviewed-base-sha", pin]
     context = (
         f"{_attempt_context(prompt, attempt)}"
         f"Publish the final result only with this emitter identity: {shlex.join(command)}. "
@@ -820,6 +860,12 @@ def launch(
         base = rd / "leads" / binding
     pending_task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
     _validate_task_context(pending_task, repository, repo_slug)
+    if phase == "ship" and any(
+            isinstance(w, dict) and w.get("pane_id") == pane_id and w.get("phase") != "ship"
+            for w in pending_task.get("workers", [])):
+        # Settle never closes a pane an implementer or reviewer used, so a
+        # gate there would outlive its verdict.
+        raise DispatchError("a ship launch needs its own pane: split one in the task workspace")
     if binding is not None and phase == "review":
         head = pending_task.get("review_head_sha")
         if not isinstance(head, str) or head != repository["head"]:
@@ -1366,10 +1412,121 @@ def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
     return ("delivered", _prompt_state(result))
 
 
+def _entry_by_reservation(records, reservation_id):
+    return next((e for e in records.reprompts()
+                 if e.get("reservation_id") == reservation_id), None)
+
+
+def _bound_reprompt_result(launch_id, phase, status, entry_seq, state):
+    return {"status": status, "launch_id": launch_id, "phase": phase,
+            "reprompt_seq": entry_seq, "prompt_state": state,
+            "observation": REPROMPT_OBSERVATION}
+
+
+def _reprompt_bound(*, rd, repository, repo_slug, binding, task_id, session, fence,
+                    workspace_id, launch_id, phase, cwd, prompt, runtime, herdr_cli,
+                    env, prompt_timeout_ms, personal):
+    """Bound reprompt: probe, reserve through the core, deliver with no lock
+    held, record the outcome through the core. See task-leads.md."""
+    _check_bound_launch(_read_binding_record(rd, binding), task_id, repository)
+    base = rd / "leads" / binding
+    task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
+    _validate_task_context(task, repository, repo_slug)
+    workers = task.get("workers", [])
+    if (not isinstance(workers, list) or not workers
+            or not isinstance(workers[-1], dict)
+            or workers[-1].get("launch_id") != launch_id):
+        raise DispatchError("named launch is not the final bound attempt; re-dispatch instead")
+    target = _find_current_target(task, launch_id, phase, workspace_id, runtime)
+    if target.get("exit_requested"):
+        raise DispatchError("exit was requested for this launch; relaunch for further work")
+    entries = target.get("reprompts", [])
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise DispatchError("bound reprompt history is malformed")
+    if any(e.get("status") in ("starting", "uncertain") for e in entries):
+        raise DispatchError("a prior reprompt on this launch is unresolved; re-dispatch")
+    expected_seq = len(entries)
+    reservation_id = uuid.uuid4().hex
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    agent = target["agent"]
+
+    records = _BoundRecords(
+        rd=rd, task_id=task_id, session=session, fence=fence, repository=repository,
+        repo_slug=repo_slug, binding=binding, runtime=runtime, personal=personal,
+        cwd=cwd, env=env, todo_binding=("todo_id" in task, task.get("todo_id")),
+    )
+    records.seed(target)
+
+    # Probe before reserving: started_ns is then stamped after the worker was
+    # seen idle, so a done record from the previous turn cannot settle this one.
+    try:
+        current = _run_herdr(herdr_cli, ["agent", "get", agent], env=env, json_result=True)
+        assert isinstance(current, dict)
+        _validate_agent(current, agent, runtime, target["pane_id"], states=AGENT_STATES)
+    except (DispatchError, OSError, ValueError) as exc:
+        if isinstance(exc, DispatchError):
+            raise
+        raise DispatchError(f"reprompt could not confirm the live agent: {exc}") from exc
+
+    reserve_error = None
+    try:
+        records.reserve_reprompt(prompt_sha, expected_seq, reservation_id)
+    except DispatchError as exc:
+        reserve_error = exc
+    try:
+        entry = _entry_by_reservation(records, reservation_id)
+    except DispatchError:
+        entry = None
+    if reserve_error is not None:
+        if entry is not None:
+            try:
+                records.mark_reprompt(reservation_id, "failed")
+            except DispatchError:
+                pass
+        raise reserve_error
+    if entry is None or entry.get("status") != "starting":
+        raise DispatchError("reprompt reservation could not be confirmed; nothing was sent")
+    seq = entry["seq"]
+
+    try:
+        outcome, state = _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env)
+    except _RejectedDelivery:
+        try:
+            records.mark_reprompt(reservation_id, "failed")
+        except DispatchError:
+            pass
+        raise DispatchError("reprompt delivery was rejected before acceptance")
+
+    recorded = "delivered" if outcome == "delivered" else "uncertain"
+    try:
+        records.mark_reprompt(reservation_id, recorded, state)
+    except DispatchError:
+        # The write may have committed with its acknowledgment lost, or been
+        # refused (lease lost, binding revoked). Read the entry back by id.
+        try:
+            entry = _entry_by_reservation(records, reservation_id)
+        except DispatchError:
+            entry = None
+        if entry is not None and entry.get("status") != "starting":
+            recorded = entry["status"]
+            state = entry.get("prompt_state", state)
+        else:
+            recorded = "delivered-unrecorded" if outcome == "delivered" else "uncertain"
+            try:
+                records.mark_reprompt(reservation_id, recorded, state)
+            except DispatchError:
+                pass
+    status = "reprompted" if recorded == "delivered" else recorded
+    return _bound_reprompt_result(launch_id, phase, status, seq, state)
+
+
 def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
              phase, cwd, prompt, runtime="claude", herdr_cli="herdr",
-             env=None, prompt_timeout_ms=120_000, personal=False):
-    """Append a follow-up turn to a named, still-live dispatched worker."""
+             env=None, prompt_timeout_ms=120_000, personal=False, binding=None):
+    """Append a follow-up turn to a named, still-live dispatched worker.
+
+    With `binding`, the target is the final row of that lead binding's task
+    record and every write goes through the core's bound reprompt verbs."""
     if phase not in PHASES:
         raise DispatchError(f"unsupported phase: {phase} (expected one of: {', '.join(PHASES)})")
     if phase == "ship":
@@ -1404,6 +1561,14 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     if repo_slug != _expected_slug(repository, cwd):
         raise DispatchError("repo slug does not match repository context")
     rd = _payload_repo_dir(scope, repo_slug)
+    if binding is not None:
+        return _reprompt_bound(
+            rd=rd, repository=repository, repo_slug=repo_slug, binding=binding,
+            task_id=task_id, session=session, fence=fence, workspace_id=workspace_id,
+            launch_id=launch_id, phase=phase, cwd=cwd, prompt=prompt, runtime=runtime,
+            herdr_cli=herdr_cli, env=child_env, prompt_timeout_ms=prompt_timeout_ms,
+            personal=personal,
+        )
     task_path = rd / "tasks" / f"{task_id}.json"
     prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
     started_ns = time.time_ns()
@@ -1574,8 +1739,14 @@ def _agents_snapshot(herdr_cli, env):
 
 def _snapshot(herdr_cli, workspace_id, env):
     agents = _agents_snapshot(herdr_cli, env)
-    panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
-                       env=env).get("panes")
+    try:
+        panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
+                           env=env).get("panes")
+    except DispatchError as exc:
+        # A workspace settle (or the owner) already closed has no panes left.
+        if not str(exc).endswith(": workspace_not_found"):
+            raise
+        panes = []
     if not isinstance(panes, list):
         raise DispatchError("herdr agent or pane list is malformed")
     return (agents,
@@ -1678,13 +1849,17 @@ def _pane_verdict(task, row, agents, panes, reasons):
     pane_id = row["pane_id"]
     if pane_id not in [p.get("pane_id") for p in panes]:
         return "absent"
+    # Only this task's gate rows in the workspace: no implementer pane to keep.
+    gate_only = all(w.get("phase") == "ship" for w in task["workers"]
+                    if isinstance(w, dict) and w.get("workspace_id") == row.get("workspace_id"))
     # Distinct ids: herdr can list one pane twice.
-    if len(_pane_ids(panes)) < 2:
+    last = len(_pane_ids(panes)) < 2
+    if last and not gate_only:
         return "kept-last-pane"
     sharing = [i for i, w in enumerate(task["workers"])
                if isinstance(w, dict) and w.get("pane_id") == pane_id]
     # The first row's pane is the workspace root; a repair may still follow.
-    if pane_id == task["workers"][0].get("pane_id"):
+    if not gate_only and pane_id == task["workers"][0].get("pane_id"):
         return "kept-shared"
     if not all(core.row_releases_pane(task, i, reasons(i)) for i in sharing):
         return "kept-shared"
@@ -1692,7 +1867,7 @@ def _pane_verdict(task, row, agents, panes, reasons):
         return "kept-unsettled"
     if _other_occupants(agents, row):
         return "kept-occupied"
-    return "close"
+    return "close-workspace" if last else "close"
 
 
 def _pane_idle(herdr_cli, pane_id, env):
@@ -1741,6 +1916,57 @@ def _mark_exit_requested(task_path, task, index, reason):
     core.write_json_atomic(task_path, task)
 
 
+def _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
+    """True only when herdr reports the workspace's checkout is the task worktree."""
+    worktree = task.get("worktree")
+    if not isinstance(worktree, str) or not worktree:
+        return False
+    try:
+        workspace = _run_herdr(herdr_cli, ["workspace", "get", workspace_id],
+                               env=env).get("workspace")
+    except DispatchError:
+        return False
+    tree = workspace.get("worktree") if isinstance(workspace, dict) else None
+    checkout = tree.get("checkout_path") if isinstance(tree, dict) else None
+    return _same_directory(checkout, worktree)
+
+
+def _workspace_kept(herdr_cli, task, workspace_id, env):
+    """-> (kept code or None, pane ids): why the workspace may not be closed."""
+    if not _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
+        return "other-worktree", set()
+    agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    ids = _pane_ids(panes)
+    if any(_malformed_agent(a) or a["pane_id"] in ids for a in agents):
+        return "live-agent", ids
+    if not all(_pane_idle(herdr_cli, pane_id, env) for pane_id in sorted(ids)):
+        return "busy-pane", ids
+    return None, ids
+
+
+def close_emptied_workspace(herdr_cli, task, workspace_id, env):
+    """Close a merged task's emptied workspace. -> "closed" or a kept code.
+
+    Caller holds the owner fence. herdr has no compare-and-close, so the
+    checks run twice and the close follows the second.
+    """
+    try:
+        kept, ids = _workspace_kept(herdr_cli, task, workspace_id, env)
+        if kept:
+            return kept
+        kept, fresh_ids = _workspace_kept(herdr_cli, task, workspace_id, env)
+    except DispatchError:
+        return "changed"
+    if kept or fresh_ids != ids:
+        return "changed"
+    try:
+        _run_herdr(herdr_cli, ["workspace", "close", workspace_id], env=env,
+                   json_result=False)
+    except DispatchError:
+        return "close-failed"
+    return "closed"
+
+
 def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env):
     row = task["workers"][index]
     reason = reasons(index)
@@ -1767,15 +1993,16 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
             # freshest one before deciding whether to close.
             agent = "still-live"
     pane = _pane_verdict(task, row, agents, panes, reasons)
-    if pane == "close" and agent == "still-live":
+    closing = pane in ("close", "close-workspace")
+    if closing and agent == "still-live":
         # The agent never actually exited; keep the pane rather than close
         # one whose agent is still working.
         pane = "kept-occupied"
-    elif pane == "close" and not _await_pane_idle(herdr_cli, row["pane_id"], env):
+    elif closing and not _await_pane_idle(herdr_cli, row["pane_id"], env):
         # No registered agent is live, but an untracked live process (the
         # user's own shell command) could still occupy the pane.
         pane = "kept-occupied"
-    elif pane == "close":
+    elif closing:
         # herdr has no compare-and-close; re-read right before closing and
         # keep the pane on any change since the verdict snapshot.
         fresh_agents, fresh_panes = _snapshot(herdr_cli, workspace_id, env)
@@ -1785,10 +2012,20 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
             agent, pane = "still-live", "kept-occupied"
         elif _other_occupants(fresh_agents, row):
             pane = "kept-occupied"
+        elif pane == "close-workspace":
+            if _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
+                # Never pass the group flag: it also closes linked worktree workspaces.
+                _run_herdr(herdr_cli, ["workspace", "close", workspace_id], env=env,
+                           json_result=False)
+                pane = "workspace-closed"
+            else:
+                pane = "kept-workspace-unverified"
         else:
             _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
             pane = "closed"
-    status = "exit-incomplete" if agent == "still-live" and pane != "closed" else "settled"
+    status = ("exit-incomplete"
+              if agent == "still-live" and pane not in ("closed", "workspace-closed")
+              else "settled")
     return {**base, "status": status, "agent": agent, "pane": pane}
 
 
@@ -2060,6 +2297,219 @@ def advance(*, repo_slug, repo_path, runtime, task_id, session, fence, focus_fil
             "agent": brief["agent"], "brief_path": brief["brief_path"],
             "contract_sha256": pin, "lessons": lessons, "warnings": warnings}
 
+
+
+def _gate_split(herdr_cli, pane_id, worktree, env):
+    """A fresh pane split off pane_id, for one gate attempt."""
+    split = _run_herdr(herdr_cli, ["pane", "split", pane_id, "--direction", "right",
+                                   "--no-focus", "--cwd", worktree], env=env)
+    pane = (split.get("pane") or {}).get("pane_id") if isinstance(split, dict) else None
+    if not isinstance(pane, str) or not pane:
+        raise DispatchError("pane split returned no pane id")
+    return pane
+
+
+def _gate_incomplete(phase, task_id, step, detail, **extra):
+    return {"status": "incomplete", "phase": phase, "task_id": task_id, "step": step,
+            "detail": str(detail)[:200], **extra}
+
+
+def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
+                          focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
+    if tier or prior_handoff:
+        raise DispatchError("--tier and --prior-handoff apply to the ship gate only")
+    worktree = task.get("worktree") or ""
+    _core_ok("should-dispatch-review", "--task-id", task_id, "--head-sha", head, ctx=ctx)
+    if task.get("review_head_sha"):
+        # launch() runs before the new pin is written; a kept pin would retire
+        # the fresh reviewer as the prior pin's review.
+        raise DispatchError("review_head_sha is set; clear it (stale-review-reset) first")
+    porcelain = core._git(worktree, "status", "--porcelain")
+    if porcelain is None or porcelain:
+        raise DispatchError("worktree is dirty")
+    base = task.get("base_sha") or ""
+    if head == base or core._git_ancestor(worktree, base, head) != "yes":
+        raise DispatchError("HEAD is not ahead of the task base")
+    impl = _last_row(task, "implement")
+    if impl is None:
+        raise DispatchError("no implement row to split the review pane from")
+    routes = core.read_config(rd).get("routes", {})
+    route = agent_runtime.resolve_route(
+        runtime, agent_runtime.role_for_step("implementation-review"), "normal",
+        {"routes": routes, "provisional": True})
+    if not route.get("ready"):
+        raise DispatchError("implementation-review route is not ready")
+    ws = impl.get("workspace_id") or ""
+    reviews = {w.get("launch_id") for w in task.get("workers", [])
+               if isinstance(w, dict) and w.get("phase") == "review"}
+    try:
+        swept = sweep(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                      workspace_id=ws, cwd=worktree, runtime=runtime, herdr_cli=herdr_cli,
+                      env=env, personal=personal)
+    except DispatchError as exc:
+        return _gate_incomplete("review", task_id, "sweep", exc)
+    live = [r.get("launch_id") for r in swept.get("rows", [])
+            if r.get("launch_id") in reviews and r.get("status") != "settled"]
+    if live:
+        return _gate_incomplete("review", task_id, "sweep",
+                                "a review row is still live: " + ", ".join(map(str, live)))
+    ok, rendered = _core_step("render-brief", "--task-id", task_id, "--phase", "review",
+                              "--focus-file", str(focus_file), ctx=ctx)
+    if not ok:
+        return _gate_incomplete("review", task_id, "render-brief", rendered)
+    brief = json.loads(rendered)
+    try:
+        pane = _gate_split(herdr_cli, impl["pane_id"], worktree, env)
+    except DispatchError as exc:
+        return _gate_incomplete("review", task_id, "pane-split", exc)
+    try:
+        launched = launch(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                          workspace_id=ws, pane_id=pane, phase="review", agent=brief["agent"],
+                          route=route, cwd=worktree, sandbox="read-only",
+                          prompt=core.read_payload_text(Path(brief["brief_path"])),
+                          herdr_cli=herdr_cli, env=env, personal=personal)
+    except DispatchError as exc:
+        return _gate_incomplete("review", task_id, "launch", exc, pane_id=pane)
+    if launched.get("status") != "launched":
+        return _gate_incomplete("review", task_id, "launch", launched.get("status"), pane_id=pane)
+    launch_id = launched.get("launch_id")
+    fenced = ("--session", session, "--fence", str(fence))
+    current = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    record = {**current, "status": "review-dispatched", "review_head_sha": head,
+              "note": f"review dispatched at {head[:7]}"}
+    ok, detail = _core_step("write-task", "--task-id", task_id, "--present", *fenced,
+                            "--json", json.dumps(record), ctx=ctx)
+    if not ok:
+        return _gate_incomplete("review", task_id, "write-task", detail,
+                                launch_id=launch_id, pane_id=pane)
+    index = {"repo_slug": repo_slug, "role": "review", "task_id": task_id}
+    ok, detail = _core_step("write-index", "--workspace", ws, *fenced,
+                            "--json", json.dumps(index), ctx=ctx)
+    if not ok:
+        return _gate_incomplete("review", task_id, "write-index", detail,
+                                launch_id=launch_id, pane_id=pane)
+    account = ["--runtime", runtime] + (["--personal"] if personal else [])
+    follow_up = [core._command(Path(core.__file__).resolve(), "review-deadlines",
+                               "--repo-slug", repo_slug, *account)]
+    if task.get("kind") == "jira":
+        follow_up.append("jira: transition to In Review (SKILL.md section 10)")
+    return {"status": "dispatched", "phase": "review", "task_id": task_id,
+            "launch_id": launch_id, "agent": brief["agent"], "pane_id": pane,
+            "brief_path": brief["brief_path"], "head_sha": head, "follow_up": follow_up}
+
+
+def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
+                        focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
+    if runtime != "claude":
+        raise DispatchError("the ship gate runs on the claude runtime")
+    if task.get("status") != "reviewed" or task.get("review_head_sha") != head:
+        raise DispatchError("ship needs a reviewed task whose review_head_sha is live HEAD")
+    worktree = task.get("worktree") or ""
+    impl = _last_row(task, "implement")
+    if impl is None:
+        raise DispatchError("no implement row to split the ship pane from")
+    routes = core.read_config(rd).get("routes", {})
+    route = agent_runtime.resolve_route("claude", "reviewer", "normal",
+                                        {"routes": routes, "provisional": True})
+    if not route.get("ready"):
+        raise DispatchError("reviewer route is not ready")
+    pinned_id = task.get("ship_launch_id")
+    pinned, stopped, handoff = None, False, None
+    if pinned_id:
+        pinned = next((w for w in task.get("workers", [])
+                       if isinstance(w, dict) and w.get("launch_id") == pinned_id), None)
+        if pinned is None:
+            raise DispatchError("ship_launch_id names no worker row")
+        state, record = _row_agent(herdr_cli, pinned, env)
+        if state == "unknown" or (state == "present" and record.get("agent_status") == "working"):
+            raise DispatchError("the pinned ship agent may still be running")
+        launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
+        handoff = core.read_ship_handoff(launch_dir, pinned_id) if launch_dir is not None else None
+        stopped = handoff is None
+    if stopped:
+        if task.get("ship_relaunch_head") == task["review_head_sha"]:
+            raise DispatchError("relaunch budget spent for this head; park the task")
+        if tier == "delta":
+            raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
+        tier = "full"
+    elif handoff is not None and handoff.get("verdict") != "APPROVE":
+        tier = "full"
+    ws = impl.get("workspace_id") or ""
+    fenced = ("--session", session, "--fence", str(fence))
+    args = ["--task-id", task_id, "--phase", "ship", "--focus-file", str(focus_file)]
+    if tier:
+        args += ["--tier", tier]
+    if prior_handoff:
+        args += ["--prior-handoff", str(prior_handoff)]
+    ok, rendered = _core_step("render-brief", *args, ctx=ctx)
+    if not ok:
+        return _gate_incomplete("ship", task_id, "render-brief", rendered)
+    brief = json.loads(rendered)
+    if stopped:
+        record = {**task, "ship_relaunch_head": task["review_head_sha"]}
+        ok, detail = _core_step("write-task", "--task-id", task_id, *fenced,
+                                "--json", json.dumps(record), ctx=ctx)
+        if not ok:
+            return _gate_incomplete("ship", task_id, "write-task", detail)
+    try:
+        pane = _gate_split(herdr_cli, impl["pane_id"], worktree, env)
+    except DispatchError as exc:
+        return _gate_incomplete("ship", task_id, "pane-split", exc)
+    try:
+        launched = launch(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                          workspace_id=ws, pane_id=pane, phase="ship", agent=brief["agent"],
+                          route=route, cwd=worktree, sandbox="read-only",
+                          prompt=core.read_payload_text(Path(brief["brief_path"])),
+                          herdr_cli=herdr_cli, env=env, personal=personal)
+    except DispatchError as exc:
+        return _gate_incomplete("ship", task_id, "launch", exc, pane_id=pane)
+    if launched.get("status") != "launched":
+        return _gate_incomplete("ship", task_id, "launch", launched.get("status"), pane_id=pane)
+    launch_id = launched.get("launch_id")
+    current = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    ok, detail = _core_step("write-task", "--task-id", task_id, "--present", *fenced,
+                            "--json", json.dumps({**current, "ship_launch_id": launch_id}),
+                            ctx=ctx)
+    if not ok:
+        return _gate_incomplete("ship", task_id, "write-task", detail,
+                                launch_id=launch_id, pane_id=pane)
+    settled = []
+    if pinned is not None:
+        try:
+            settled.append(settle(repo_slug=repo_slug, task_id=task_id, session=session,
+                                  fence=fence, workspace_id=pinned.get("workspace_id") or ws,
+                                  launch_id=pinned_id, cwd=worktree, runtime=runtime,
+                                  herdr_cli=herdr_cli, env=env, personal=personal))
+        except DispatchError as exc:
+            settled.append({"launch_id": pinned_id, "status": "error", "detail": str(exc)[:200]})
+    return {"status": "dispatched", "phase": "ship", "task_id": task_id,
+            "launch_id": launch_id, "agent": brief["agent"], "pane_id": pane,
+            "brief_path": brief["brief_path"], "head_sha": head, "follow_up": [],
+            "settle": settled}
+
+
+def dispatch_gate(*, repo_slug, repo_path, runtime, task_id, session, fence, phase, focus_file,
+                  tier=None, prior_handoff=None, personal=False, herdr_cli="herdr", env=None):
+    """Dispatch or re-dispatch a review or ship gate (references/dispatch-adapter.md)."""
+    if not core.valid_task_id(task_id):
+        raise DispatchError("invalid task identity")
+    gates = {"review": _dispatch_review_gate, "ship": _dispatch_ship_gate}
+    if phase not in gates:
+        raise DispatchError("dispatch-gate phase must be review or ship")
+    child_env, _repository, _scope, rd = _repo_context(
+        repo_slug, repo_path, runtime, personal, env, "dispatch-gate")
+    if not Path(focus_file).is_file():
+        raise DispatchError(f"focus file missing: {focus_file}")
+    ctx = {"repo_slug": repo_slug, "repo_path": str(repo_path), "runtime": runtime,
+           "personal": personal, "env": child_env}
+    task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    head = core._git(task.get("worktree") or "", "rev-parse", "HEAD")
+    if not head:
+        raise DispatchError("cannot read the task worktree HEAD")
+    return gates[phase](ctx=ctx, rd=rd, task=task, head=head, repo_slug=repo_slug,
+                        task_id=task_id, session=session, fence=fence, focus_file=focus_file,
+                        tier=tier, prior_handoff=prior_handoff, runtime=runtime,
+                        personal=personal, herdr_cli=herdr_cli, env=child_env)
 
 
 def runtime_main(argv: list[str] | None = None) -> int:

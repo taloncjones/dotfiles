@@ -35,7 +35,9 @@ ZSH_THEME="alanpeabody"
 # Uncomment one of the following lines to change the auto-update behavior
 # zstyle ':omz:update' mode disabled  # disable automatic updates
 # zstyle ':omz:update' mode auto      # update automatically without asking
-# zstyle ':omz:update' mode reminder  # just remind me to update when it's time
+# Remind instead of prompting: a [Y/n] read at shell start eats the first
+# keystroke typed into a fresh herdr pane. `update` runs the upgrade.
+zstyle ':omz:update' mode reminder
 
 # Uncomment the following line to change how often to auto-update (in days).
 # zstyle ':omz:update' frequency 13

@@ -54,9 +54,13 @@ command to the owner. It posts by audience: maintenance and green evidence on a 
 authored post without asking in any repository, and it prints `[INFO]
 edited PR #n body: <why>` or `[INFO] posted co-review marker on #n:
 APPROVE` in the same turn. In a work repository, text aimed at a person needs the owner's
-`AskUserQuestion` answer `Post draft <hash>` to a prompt that shows that
+`AskUserQuestion` answer to a post option starting `Post` plus a space and ending `(draft <hash>)`, with no negation, hedge or dash aside (refusal words in `references/posting.md`) on a prompt that shows that
 draft.
 It never replies to a human reviewer's thread on its own initiative.
+
+It hands test runs, builds, git writes in task worktrees and investigations
+to a worker or an Explore/general-purpose subagent instead of running them
+itself, and dispatches gates with `dispatch-gate`.
 
 In herdr mode the skill file is the single source of procedure. Never
 restate or adapt its steps from memory; follow the loaded skill text.

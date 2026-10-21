@@ -59,6 +59,7 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   Same for "not X, but Y" reversals, rule-of-three summaries, and
   labeled tradeoff callouts ("Cost accepted:", "The catch:"); they
   read as AI-generated. Applies everywhere: chat, tickets, PRs, docs.
+- Writing style per text kind: `~/.claude/rules/personal/writing-style.md`.
 
 **Stand-alone messages:** the body of every message must read without the
 session in the reader's head -- paste-safe into Slack, a PR thread, or Jira.
@@ -71,6 +72,13 @@ part not meant for pasting.
 - State facts directly in the body; process narration ("the re-review pass
   caught...", "result coming when the background run finishes") belongs in
   the closing block or nowhere.
+- Applies to `AskUserQuestion` question and option text and to every
+  decision note the director records: a reader with no session context must
+  understand both. A short label (R12, run 17, the stand check), an acronym (PRD) and a
+  decision ID are one case: name the thing by its substance on first use in
+  that prompt, option or note, and keep the label in parentheses. The Google
+  developer documentation style in `rules/personal/writing-style.md` is the
+  source of expand-on-first-use.
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --

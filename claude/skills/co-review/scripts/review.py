@@ -18,7 +18,7 @@ SKILLS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS_ROOT))
 HOOKS_ROOT = Path(__file__).resolve().parents[3] / "hooks"
 sys.path.insert(0, str(HOOKS_ROOT))
-from herdr_orch_core import account_payload_root, repo_slug, valid_task_id
+from herdr_orch_core import account_payload_root, github_owner_repo, repo_slug, valid_task_id
 from lib.workflow_context import (
     account_scope,
     atomic_json,
@@ -763,6 +763,17 @@ def cleanup(args: argparse.Namespace) -> dict[str, Any]:
     return {"cleaned": True}
 
 
+def github_repository(repo: str) -> str:
+    """owner/repo from the checkout's stored origin, as herdr resolves it."""
+    proc = subprocess.run(
+        ["git", "-C", repo, "config", "--get", "remote.origin.url"],
+        capture_output=True, text=True, check=False, env=git_environment())
+    pair = github_owner_repo(proc.stdout.strip()) if proc.returncode == 0 else None
+    if pair is None:
+        raise ReviewError("origin is missing or does not resolve to github.com")
+    return f"{pair[0]}/{pair[1]}"
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="review.py")
     commands = result.add_subparsers(dest="command", required=True)
@@ -790,6 +801,8 @@ def parser() -> argparse.ArgumentParser:
     )
     artifact_parser.add_argument("--personal", action="store_true")
     artifact_parser.add_argument("--output-dir")
+    github_parser = commands.add_parser("github-repo")
+    github_parser.add_argument("--repo", required=True)
     cleanup_parser = commands.add_parser("cleanup")
     cleanup_parser.add_argument("--manifest", required=True)
     return result
@@ -809,6 +822,8 @@ def main(argv: list[str] | None = None) -> int:
             }
         elif args.command == "artifact":
             result = artifact(args)
+        elif args.command == "github-repo":
+            result = {"repository": github_repository(args.repo)}
         elif args.command == "resolve-base":
             repo = resolved_repo(args.repo)
             head = full_commit(repo, args.head)

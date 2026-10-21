@@ -78,7 +78,8 @@ row_local() { printf 'machine-local\t%s\n' "$1"; }
 emit_claude_dir() {
   local cdir="$1" name
   row_section "claude config dir: $cdir"
-  for name in CLAUDE.md operating-principles.md commands agents hooks skills rules statusline.js; do
+  row_link "$cdir/CLAUDE.md" "$DOTFILES/claude/global-instructions.md"
+  for name in operating-principles.md commands agents hooks skills rules statusline.js; do
     row_link "$cdir/$name" "$DOTFILES/claude/$name"
   done
   # Local-only audit files: the installer links them only when present.
@@ -141,7 +142,7 @@ emit_map() {
     herdr_stop_gate.py orch_edit_guard.py; do
     row_link "$HOME/.codex/hooks/$name" "$DOTFILES/codex/hooks/$name"
   done
-  for name in herdr_worktree_guard.py rm_guard.py git_remote_guard.py planning_artifact_guard.py; do
+  for name in herdr_worktree_guard.py rm_guard.py git_remote_guard.py planning_artifact_guard.py signer_guard.py shell_hint.py; do
     row_link "$HOME/.codex/hooks/$name" "$DOTFILES/claude/hooks/$name"
   done
   for name in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do

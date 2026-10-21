@@ -26,9 +26,10 @@ sha256(workspace_root). Lead leases coexist with the launcher lease and with
 each other; the launcher lease alone remains one-per-repository. A lead lease
 is claimable only through a launcher-issued dispatch binding whose expected
 session, account, runtime, repository, and workspace all match; a binding
-whose parent is not a launcher is unclaimable (two tiers only). Lead dispatch
-remains inactive until the procedure slice lands; nothing in the current skill
-issues bindings.
+whose parent is not a launcher is unclaimable (two tiers only). The
+director-side procedure is in `task-leads.md`. A bound review row carries
+`review_base_sha`, the task's `base_sha` at reservation; only `reserve-dispatch`
+writes it and `enrich-dispatch` refuses it.
 
 The orch-edit guard reads these records read-only (no lock) to classify a
 session's role: a launcher-tier `owner.json` blanket-fences the session from
@@ -60,6 +61,7 @@ STATE_ROOT/
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
+    queue.json                        # todos queued to start next (see "queue.json" below); `set-queue` writes it
     rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
     decisions.jsonl                   # append-only owner decisions (see "decisions.jsonl" below); fenced verbs and `rollover --carry` write it
     rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed|takeover, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
@@ -81,6 +83,8 @@ STATE_ROOT/
       <binding_id>/                   # one lead's private record subtree
         owner.json                    # mirror of the lead's per-workspace lease
         tasks/                        # lead-scoped task/done/review records
+                                      # (and tasks/<t>.policy.jsonl, the scratch
+                                      # audit of a worker the lead launched)
         workspaces/                   # lead-scoped workspace index records
         envelope.json                 # versioned terminal return envelope
                                       # (schema_version 1; outcome pr_ready|
@@ -104,7 +108,8 @@ STATE_ROOT/
                                                # "last_delivery":{"event","reason","ts"}}.
                                                # Machine-local, written by the hook after
                                                # each delivery attempt. `records` advances
-                                               # only on `sent`, so a debounced record change
+                                               # only on `sent` and covers the task's done, review and
+                                               # ship-report files, so a debounced record change
                                                # is delayed, never dropped.
       <HERDR_WORKSPACE_ID>.wake.jsonl         # one {"v":1,"ts","event","reason"} line per
                                                # delivery attempt; diagnostic only, nothing reads it
@@ -152,15 +157,15 @@ STATE_ROOT/
   = `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
   Verify uniqueness via `agent list`; each launch also gets a collision-resistant
   launch ID. Names are transport handles, not task identity.
-- Display label: the workspace label is `<state>: <title>` (at most 25
-  characters, no ids), derived from the task record by `core.task_label`
+- Display label: the workspace label is `<title>`, or `? <title>` for an
+  owner wait (at most 25 characters, no ids), derived from the task record by `core.task_label`
   (SKILL.md section 8); director `director:<repo>`. Pane metadata carries
   role/runtime/model/status separately. Stable task and launch IDs stay
   behind the label.
 - **One workspace/worktree per task.** git allows only one worktree per branch,
   so a task's plan -> implement -> review phases all run in the SAME
   worktree-backed workspace (a fresh agent per phase, sequentially). The
-  workspace label follows the task state (`plan`, `impl`, `review`, ...)
+  workspace label follows the task title (`? ` for an owner wait)
   and its index `role` the current phase; there is never a second
   workspace on the same branch.
 
@@ -259,6 +264,17 @@ last `carry-batch`. Unparseable lines, other versions, and entries of the wrong 
 `decisions --repo-path <P> [--no-carry] [--all]` verb prints the live entries
 (newest kept, 3000 characters unless `--all`); the SessionStart hook injects
 that block.
+
+### `queue.json`
+
+`{"v": 1, "todos": [<todo id>, ...], "ts": <iso>, "session": <id>, "fence": <n>}`,
+rewritten whole by `set-queue --repo-slug S --repo-path P --session ID --fence F
+[--todo ID ...]` (fenced; atomic). It refuses, writing nothing, an id that is
+not a todo id, an id with no `<repo-path>/.todos/pending/<id>.md`, a repeated
+id, more than 10 ids, a stale fence or a foreign session. No `--todo` clears
+the queue. `session` and `fence` are an audit trail only. The fleet panel's
+Queue tab reads the file for display; nothing else does. A missing file is an
+empty queue; a file of another shape reads as unreadable.
 
 ### `config.json`
 
@@ -391,7 +407,13 @@ section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
 "merge": "auto"}}`. An optional
 `"delta": {"max_files": 5, "max_lines": 150}` (positive ints, those defaults
 when absent) sets the caps the director's delta-tier step (SKILL.md section 6)
-passes to `delta-class` and binds in the ship brief. `push` and `pr` are
+passes to `delta-class` and binds in the ship brief. An optional
+`"small": {"max_files": 3, "max_lines": 40, "sensitive_paths": []}` sets the
+small-tier caps (`ship.small`): positive ints up to 5 files and 150 lines
+(defaults 3 and 40) and path prefixes that force a full gate (no empty
+prefix, no whitespace). `dispatch-gate` renders them as
+`herdr-ship-small-caps:` and `herdr-ship-small-sensitive:` brief lines and
+refuses invalid values. `push` and `pr` are
 booleans defaulting to true; `merge`
 is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
 the owner's confirm). When the block or `merge` is absent, `merge` is
@@ -406,8 +428,8 @@ the branch as reviewed and leave push and PR to the owner. A malformed block
 
 ### `task-lead-gate.json`
 
-The task-lead activation gate record. The intended writer is
-`deactivate-task-leads`, under a launcher fence.
+The task-lead activation gate record. The writers are `activate-task-leads`
+and `deactivate-task-leads`, both under a launcher fence.
 
 ```json
 {
@@ -438,9 +460,9 @@ the installed procedure each advertise a capability at or above the required
 level (the procedure's advertised level is carried by the capability marker
 in the skill's `SKILL.md`).
 
-There is no verb that turns the gate on. `deactivate-task-leads` is the only
-verb this record has; enabling it means writing the record by hand or
-restoring an older one.
+`activate-task-leads` writes `enabled: true` and `deactivate-task-leads`
+writes `enabled: false`. Both write the same five fields, with the live
+`repo_id`, so a rerun leaves identical bytes.
 
 ### `capabilities.json` -- legacy Claude strong-model availability
 
@@ -472,7 +494,10 @@ introducing and mutating worker rows respectively.
 `herdr_dispatch.py` still writes launcher-scope records directly. Binding-scoped
 rows are introduced only by `reserve-dispatch` and mutated only by
 `enrich-dispatch`; `launch --binding` calls those verbs and never writes a
-`leads/` record itself.
+`leads/` record itself. A bound row's `reprompts` list is written only by
+`$CORE reserve-reprompt` (appends a `starting` entry) and
+`$CORE enrich-reprompt` (records its outcome); `enrich-dispatch` refuses the
+key, and `reprompt --binding` calls those verbs.
 
 ```json
 {
@@ -990,8 +1015,9 @@ recovery source when the worktree copy is missing; a mech contract has none).
 
 Validation is fail-closed: `v` must be integer 1; `task_id` must match; 1-32
 commands, each `{name, run[, timeout_secs 1-3600]}` with unique non-blank
-names and no unknown keys. Commands run via `sh -c` from the worktree root
-and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
+names and no unknown keys. Commands run via `/bin/sh -c` from the worktree root with the
+system grep first on PATH and `BASH_ENV` and `BASH_FUNC_*` dropped from the
+environment, and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
 writes, no machine-state mutation, no network, no secret echo. Full
 requirements: the task's private PRD under `docs/superpowers/specs/` and the
 authoring rules echoed in `brief-template.md`.
@@ -1019,6 +1045,20 @@ archived records in two months), `not-found`, `unreadable`, `not-terminal`
 `poll-unavailable`, `workspace-listed` (herdr lists any of the task's
 workspaces), `destination-exists`, `unexpected-type`. Success prints
 `archived <task> archive/<YYYY-MM> files=<n>`.
+
+For a `merged` task, when herdr itself was polled (no override files) and
+`workspace-listed` is the only refusal, `archive-task` closes the task's
+emptied herdr workspace under the held fence, then polls again and
+archives. A workspace is closed only when herdr's checkout for it is the
+task worktree, no agent sits in its panes, and every pane is an idle
+shell. Otherwise it prints
+`refused <task> reason=workspace-listed workspace=<ws> kept=<why>` (exit 1)
+and moves nothing. The `kept` codes: `other-worktree` (checkout is not the
+task worktree, or herdr could not say), `live-agent` (an agent in a pane,
+or a malformed agent row), `busy-pane` (a non-shell foreground process or
+failed inspection), `changed` (the pre-close re-check found a difference),
+`close-failed` (the close raised; a re-run polls fresh). `abandoned` and
+`failed` tasks never close a workspace.
 
 The month is the one holding the archived record, else the current UTC
 month; the record moves first, so an interrupted run finishes in the same

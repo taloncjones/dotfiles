@@ -25,6 +25,14 @@ Exit 1 continues to the ship dispatch rules below. `merge-ready` still pins
 the gated head and reports `head-moved` for it, so the director merges that
 head only after one `AskUserQuestion` merge prompt, as in a work repository.
 
+**Small tier.** A dispatch without `--tier` renders
+`herdr-ship-brief: tier=auto`, `herdr-ship-small-caps: <files>/<lines>` and,
+when `ship.small.sensitive_paths` is set, `herdr-ship-small-sensitive:
+<prefix> ...`. The ship worker passes them to `classify`; co-review picks
+the tier. A `small` handoff other than APPROVE is handled like a `delta`
+one: section 6 rule (c) relaunches with `--tier full`, and 6a step 0
+surfaces a full `INCOMPLETE`. A small APPROVE is a valid delta prior.
+
 **Delta tier.** When a dispatch is due under rule (b), the stale handoff's
 verdict is `APPROVE`, and the carry-forward proof above exited 1, run:
 
@@ -46,3 +54,15 @@ round" dispatches as usual. The delta brief carries these lines:
 `herdr-ship-prior-handoff: <pinned ship.json path>`,
 `herdr-ship-delta-head: <head>`, and
 `herdr-ship-delta-caps: <files>/<lines>`.
+
+## Ship dispatch details (section 6)
+
+Without `--tier`, on a first gate or after an `APPROVE`, the brief carries `herdr-ship-brief: tier=auto` and the
+small-tier caps from `config.json` `ship.small`; co-review picks the tier.
+`dispatch-gate` refuses a live or unknown pinned agent. For a pinned run with no
+`ship.json` (it stopped before the gate wrote it), it relaunches at most
+once per reviewed head: it refuses when `ship_relaunch_head` equals
+`review_head_sha`, otherwise writes `ship_relaunch_head` before launching
+(so an interrupted relaunch parks the task) and forces `tier=full`. It
+launches read-only on `claude`, pins `ship_launch_id`, then settles the old
+pinned row.

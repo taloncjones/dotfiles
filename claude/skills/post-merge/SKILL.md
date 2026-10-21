@@ -121,7 +121,9 @@ no longer appear in `git branch --list` / `git worktree list`.
 
 Director mode only, last: archive the task's orchestration state with
 `python3 "$CORE" archive-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id>`,
-using the director's preflight values. Exit 0 is done. Report any other
+using the director's preflight values. For a merged task whose worktree is
+gone, it closes the task's emptied herdr workspace itself (no hand close),
+then archives. Exit 0 is done. Report any other
 exit as `archive deferred: <refusal line or error>`; it does not fail
 teardown, and the backfill in
 `claude/skills/herdr-orchestration/references/state-layout.md` (Archive)

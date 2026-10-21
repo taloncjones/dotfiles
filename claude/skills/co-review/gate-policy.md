@@ -135,11 +135,36 @@ accepted only digest-pinned, by the pinned herdr `ship.json` or by the same
 uninterrupted workflow; it is re-evaluated before use; and it approves
 nothing new, because the carried head's branch content is proved unchanged.
 
+### Small tier
+
+A small change gets a two-seat gate. The classifier returns `small` for a
+code or config diff of at most 3 files and 40 changed lines (added plus
+removed; config may tune the caps up to 5 files and 150 lines) that adds or
+deletes no file, touches at least one test path, and touches no gate, CI,
+auth, hook, submodule, skill or agent-instruction path (`SKILL.md`,
+`AGENTS.md`, `CLAUDE.md`), no path with a `security` segment and no
+configured sensitive prefix. The evaluator recomputes the tier from the
+digest-bound frozen diff with the caps in `expected.small`, so no brief or
+coordinator can claim `small` for a larger diff. The report needs
+`ci.json` with at least one check; with none, or in a local no-PR review,
+the gate runs as `full`.
+
+The seats are `codex` and `verifier` (one Codex, one Claude runtime, with
+the Codex substitute rule) under a 270-second bound each. CI is the test
+evidence: no seat runs a suite or builds a disposable copy, and a string
+`functional_behavior` entry needs no seat test. A seat cites the captured
+check that runs the suite owning the touched test, or reports
+`functional_behavior` as a material gap. Every small result other than
+APPROVE carries `escalate: "full"`: the next gate on that head is one fresh
+full gate whose verdict is final. A small APPROVE is a valid prior for a
+delta round.
+
 ### Delta tier
 
-A delta round extends one full APPROVE on this branch to a small
-follow-up. `gate_report.py delta-class` recommends it only when the
-digest-pinned prior evaluates APPROVE with class `full` (or is a delta
+A delta round extends one full or small APPROVE on this branch to a small
+follow-up, including one from an earlier head. `gate_report.py delta-class`
+recommends it only when the
+digest-pinned prior evaluates APPROVE with class `full` or `small` (or is a delta
 whose copied prior does); the anchor is the full head or a main merge the
 carry-forward proof carries from it; the range from the anchor has no
 merge; and the delta diff stays within the caps (default 5 files and 150
@@ -205,7 +230,9 @@ arrays are required even when observed empty. Map GraphQL `statusCheckRollup`
 nodes by type, preserving each check/context identity and its actual status,
 conclusion or state; an optional `head_sha` on a record must be its returned
 value. Capture both CheckRun and StatusContext records. An observed empty pair
-may use explicit no-CI evidence. Unavailable or missing provider data is missing
+may use explicit no-CI evidence. Judge only the latest run of each check (grouped by workflow
+and name, ordered by `startedAt`; an unknown or tied start keeps every run);
+list each set-aside run under `superseded_check_runs`, which no gate rule reads. Unavailable or missing provider data is missing
 evidence, not an empty success.
 
 ### Required independent seats
@@ -215,7 +242,8 @@ The seat set follows the change class (`scripts/change_class.py`; `co-review
 `breaker`, `verifier`. The light tier runs `codex` and `verifier`, one Codex
 and one Claude runtime, unless the `codex` seat is an evidenced substitute
 (below), for a diff whose every path is Markdown or `.todos/`
-outside the gate skills. The delta tier runs `claude` and `verifier`, both Claude
+outside the gate skills. The small tier runs the same two seats under the
+Small tier rules. The delta tier runs `claude` and `verifier`, both Claude
 runtimes and never substituted, for a follow-up `co-review --delta` recommends
 (see Delta tier). The lessons tier runs one `verifier`, a Claude runtime
 never substituted, for a diff whose only path is
@@ -237,12 +265,12 @@ controller opinion, or a current-session implementer does not fill a seat.
 3. `breaker`: fresh Codex skeptic route (or an evidenced Claude substitute),
    independent of both finder reports.
 4. `verifier`: fresh skeptic route after every finder report exists (three in
-   the full tier, the `codex` report in the light tier, none in the lessons
-   tier). It receives those
+   the full tier, the `codex` report in the light and small tiers, none in the
+   lessons tier). It receives those
    reports and every known blocker, but performs its own frozen evidence
    check.
 
-The Codex-routed seats are `codex` in both tiers and `breaker` in the full tier.
+The Codex-routed seats are `codex` in the light, small and full tiers and `breaker` in the full tier.
 Such a seat may run on the fresh Claude route of the same role only after its
 own Codex attempt in this gate failed for quota, auth or availability. It then
 records runtime `claude` and a
@@ -310,6 +338,11 @@ still-open material blocker prevents approval. There are no round counts,
 severity floors, or automatic fix-and-repeat loops. Follow-up verification
 covers repairs and affected contracts using the prior coverage rules above.
 Structural or scope changes requiring a new full review stop for a user decision; they do not escape the original workflow allowance.
+
+Each seat's report ends with one `co-review-seat` block (seat, verdict,
+findings, coverage, tests). The evaluator counts a seat only with a valid
+block, and counts `functional_behavior` coverage only when every seat's block
+lists at least one test it ran; otherwise record an accepted gap.
 
 Coverage is separate from findings. Supply evidence or an explicit gap for each
 architecture axis:

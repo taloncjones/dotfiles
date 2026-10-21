@@ -108,7 +108,7 @@ an economics failure:
 planner model to opus as a stopgap. It died with the subsystem at 7fefcb5.
 Do not resurrect it; there is no orchestrator.conf to point it at.
 
-**Resolution.** Current standing routing (claude/CLAUDE.md, "Default Skill
+**Resolution.** Current standing routing (claude/global-instructions.md, "Default Skill
 Routing"): orchestrate multi-task work with the `Workflow` tool directly
 (strong planner/reviewer, cheap workers), implement via superpowers
 subagent-driven-development, single `co-review` second-model pass at the
@@ -139,7 +139,7 @@ a fresh clone has no language rules until it runs.
 **Status: settled, with one OPEN sub-question [SUPERSEDED -- resolved by the
 corrections below; the auto-load claim here was wrong].** Whether vendoring into
 `claude/rules/` is needed AT ALL is unresolved as of 2026-07-02: nothing
-auto-loads `~/.claude/rules` (claude/CLAUDE.md never references it; only some
+auto-loads `~/.claude/rules` (claude/global-instructions.md never references it; only some
 ECC skills read it), and cloud containers already have the full tree at
 `~/.claude/plugins/marketplaces/ecc/rules/`. Do not "fix" this either way
 without settling that question first -- see `dotfiles-research-frontier`.

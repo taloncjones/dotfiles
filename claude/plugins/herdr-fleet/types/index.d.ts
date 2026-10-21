@@ -1,0 +1,88 @@
+export type FleetTab = 'tasks' | 'prs' | 'done' | 'queue'
+export type FleetTaskRow = {
+  id: string
+  status: string
+  title: string
+  live: { agent: string; state: string; since: number | null }
+  head: string
+  pr: string
+  prNumber: number | null
+  prUrl: string | null
+  todoId: string | null
+  jiraKey: string | null
+  branch: string | null
+  verdict: string
+  isDirty: boolean
+  isTerminal: boolean
+  owner: string | null
+  gateSince: number | null
+  reviewLaunch: string | null
+  since: number | null
+  reviewHead: string | null
+  review: string | null
+  phase: string | null
+  ship: { verdict: string | null; head: string | null } | null
+}
+export type FleetGroup =
+  | 'Your call'
+  | 'Needs director'
+  | 'Waiting on reviewers'
+  | 'Agents working'
+  | 'Parked'
+export type FleetDeadline = {
+  launch: string
+  state: 'running' | 'overdue' | 'expired' | 'unknown'
+  remaining: number | null
+  deadlineSecs: number
+  hardSecs: number
+}
+export type FleetPrRow = {
+  number: number
+  title: string
+  isDraft: boolean
+  head: string
+  ci: 'pass' | 'fail' | 'pending' | 'none'
+  review: string
+  task: string | null
+  branch: string | null
+  headOid: string | null
+  reviewAt: number | null
+  url: string | null
+  human: 'none' | 'changes' | 'required' | 'approved' | 'approved-old'
+  base: string | null
+  isFork: boolean
+}
+export type FleetQueueRow = { id: string; title: string }
+export type FleetQueue =
+  | { slug: string; state: 'unreadable' }
+  | { slug: string; state: 'ok'; rows: FleetQueueRow[] }
+export type FleetLease =
+  | { kind: 'none' }
+  | { kind: 'ambiguous'; slugs: string[] }
+  | { kind: 'held'; slug: string; fence: number | null }
+export type FleetPart<T> = { slug: string | null; rows: T[] }
+export type FleetSnapshot = {
+  lease: FleetLease
+  repoRoot: string | null
+  live: FleetPart<FleetTaskRow>
+  archived: FleetPart<FleetTaskRow>
+  prs: (FleetPart<FleetPrRow> & { at: number }) | null
+  ghError: { slug: string; reason: string } | null
+  deadlines: { slug: string; at: number; rows: Record<string, FleetDeadline> } | null
+  queue: FleetQueue | null
+  board: { slug: string; path: string | null } | null
+  jiraUrl: string | null
+  readError: string | null
+  readAt: number | null
+}
+
+declare module 'claude-code' {
+  interface PluginState {
+    'herdr-fleet': {
+      tab: FleetTab
+      snapshot: FleetSnapshot
+      generation: number
+      opened: boolean
+    }
+  }
+}

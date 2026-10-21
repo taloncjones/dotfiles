@@ -983,6 +983,28 @@ if [ -L "$CFG/CLAUDE.md" ] && [ ! -L "$CFG/settings.json" ]; then
 else
     fail "link path symlinks assets but keeps settings.json a real file"
 fi
+if [ "$(readlink "$CFG/CLAUDE.md")" = "$DOTFILEDIR/claude/global-instructions.md" ] && [ -e "$CFG/CLAUDE.md" ]; then
+    pass "link path points CLAUDE.md at claude/global-instructions.md"
+else
+    fail "link path points CLAUDE.md at claude/global-instructions.md"
+fi
+OLDLINK="$TMP/cfg-old-link"
+mkdir -p "$OLDLINK"
+# Old source path, built from parts so the stale-path grep stays clean.
+old_name=CLAUDE
+ln -s "$DOTFILEDIR/claude/$old_name.md" "$OLDLINK/CLAUDE.md"
+link_claude_config_dir "$OLDLINK" >"$TMP/link-old.out" 2>&1
+if [ "$(readlink "$OLDLINK/CLAUDE.md")" = "$DOTFILEDIR/claude/global-instructions.md" ] && [ -e "$OLDLINK/CLAUDE.md" ]; then
+    pass "relink replaces a dangling pre-rename CLAUDE.md link"
+else
+    fail "relink replaces a dangling pre-rename CLAUDE.md link"
+fi
+nested_memory="$(git ls-files | grep -iE '(^|/)claude(\.local)?\.md$' | grep -vx 'CLAUDE.md')"
+if [ -z "$nested_memory" ]; then
+    pass "no tracked CLAUDE.md below the repo root"
+else
+    fail "no tracked CLAUDE.md below the repo root: $nested_memory"
+fi
 
 ACCOUNT_HOME="$TMP/account-home"
 mkdir -p "$ACCOUNT_HOME/.claude" "$ACCOUNT_HOME/.claude-work"
@@ -1002,6 +1024,139 @@ if jget "$ACCOUNT_HOME/.claude-work/settings.json" "d['enabledPlugins']['atlassi
     pass "work Claude config retains Atlassian"
 else
     fail "work Claude config retains Atlassian"
+fi
+
+# --- template owns tui=fullscreen for both accounts --------------------
+TUI_SEED='{"model":"opus","promptSuggestionEnabled":true,"enabledPlugins":{"keep@custom":true,"atlassian@claude-plugins-official":true},"env":{"LOCAL_ONLY":"1"},"feedbackSurveyState":{"n":1},"theme":"dark"}'
+python3 - "$DOTFILEDIR/claude/settings.json.tmpl" "$TMP/tmpl-no-tui.json" <<'PYEOF'
+import json, sys
+t = json.load(open(sys.argv[1]))
+t.pop("tui", None)
+json.dump(t, open(sys.argv[2], "w"), indent=2)
+PYEOF
+for variant in with without; do
+    h="$TMP/tui-home-$variant"
+    mkdir -p "$h/.claude" "$h/.claude-work"
+    printf '%s\n' "$TUI_SEED" > "$h/.claude/settings.json"
+    printf '%s\n' "$TUI_SEED" > "$h/.claude-work/settings.json"
+    tmpl="$DOTFILEDIR/claude/settings.json.tmpl"
+    [ "$variant" = without ] && tmpl="$TMP/tmpl-no-tui.json"
+    for dir in .claude .claude-work; do
+        HOME="$h" reconcile_claude_settings_file "$tmpl" "$h/$dir/settings.json" >/dev/null
+    done
+done
+tui_without_key() {
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("tui",None); print(json.dumps(d,sort_keys=True))' "$1"
+}
+for pair in "personal:.claude" "work:.claude-work"; do
+    name="${pair%%:*}"; dir="${pair#*:}"
+    with="$TMP/tui-home-with/$dir/settings.json"
+    without="$TMP/tui-home-without/$dir/settings.json"
+    if jget "$with" "d.get('tui') == 'fullscreen'" && ! jget "$without" "'tui' in d"; then
+        pass "$name Claude config gains tui=fullscreen"
+    else
+        fail "$name Claude config gains tui=fullscreen"
+    fi
+    if [ "$(tui_without_key "$with")" = "$(tui_without_key "$without")" ]; then
+        pass "$name Claude config is otherwise unchanged by tui"
+    else
+        fail "$name Claude config is otherwise unchanged by tui"
+    fi
+done
+TUI_LOCAL="$TMP/tui-local.json"
+printf '{"tui":"default"}\n' > "$TUI_LOCAL"
+reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" "$TUI_LOCAL" >/dev/null
+if jget "$TUI_LOCAL" "d['tui'] == 'fullscreen'"; then
+    pass "template reasserts tui=fullscreen over a local value"
+else
+    fail "template reasserts tui=fullscreen over a local value"
+fi
+
+# --- per-account model override ---------------------------------------
+OV_SEED='{"model":"opus","theme":"dark","enabledPlugins":{"keep@custom":true}}'
+OV_TMPL="$DOTFILEDIR/claude/settings.json.tmpl"
+OV_HOME="$TMP/ov-home"
+mkdir -p "$OV_HOME/.claude" "$OV_HOME/.claude-work"
+printf '%s\n' "$OV_SEED" > "$OV_HOME/.claude/settings.json"
+printf '%s\n' "$OV_SEED" > "$OV_HOME/.claude-work/settings.json"
+printf '{"model":"opus"}\n' > "$OV_HOME/.claude-work/settings.override.json"
+cp "$OV_HOME/.claude-work/settings.override.json" "$TMP/ov-before.json"
+for dir in .claude .claude-work; do
+    HOME="$OV_HOME" reconcile_claude_settings_file "$OV_TMPL" "$OV_HOME/$dir/settings.json" >/dev/null
+done
+if jget "$OV_HOME/.claude-work/settings.json" "d['model'] == 'opus'"; then
+    pass "work override keeps model opus"
+else
+    fail "work override keeps model opus"
+fi
+ov_strip() {
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("model",None); d.get("enabledPlugins",{}).pop("atlassian@claude-plugins-official",None); print(json.dumps(d,sort_keys=True))' "$1"
+}
+if [ "$(ov_strip "$OV_HOME/.claude/settings.json")" = "$(ov_strip "$OV_HOME/.claude-work/settings.json")" ]; then
+    pass "override changes only model"
+else
+    fail "override changes only model"
+fi
+if jget "$OV_HOME/.claude/settings.json" "d['model'] == 'fable[1m]'"; then
+    pass "personal without override gets template model"
+else
+    fail "personal without override gets template model"
+fi
+if cmp -s "$TMP/ov-before.json" "$OV_HOME/.claude-work/settings.override.json" \
+    && [ ! -e "$OV_HOME/.claude/settings.override.json" ]; then
+    pass "reconcile never creates or modifies the override"
+else
+    fail "reconcile never creates or modifies the override"
+fi
+
+ov_run() { # <name> <override content>; sets OV_RC, writes $TMP/ov-$1.{out,err}
+    printf '%s' "$2" > "$TMP/ov-$1.override"
+    mkdir -p "$TMP/ov-$1"
+    printf '%s\n' "$OV_SEED" > "$TMP/ov-$1/settings.json"
+    cp "$TMP/ov-$1.override" "$TMP/ov-$1/settings.override.json"
+    reconcile_claude_settings_file "$OV_TMPL" "$TMP/ov-$1/settings.json" >"$TMP/ov-$1.out" 2>"$TMP/ov-$1.err"
+    OV_RC=$?
+}
+ov_run bad '{not json'
+if [ "$OV_RC" = 0 ] && jget "$TMP/ov-bad/settings.json" "d['model'] == 'fable[1m]'"; then
+    pass "invalid-JSON override falls back to template model"
+else
+    fail "invalid-JSON override falls back to template model"
+fi
+if grep -q 'ignoring unreadable override' "$TMP/ov-bad.err"; then
+    pass "invalid-JSON override warns on stderr"
+else
+    fail "invalid-JSON override warns on stderr"
+fi
+ov_run extra '{"model":"opus","tui":"default","permissions":{"allow":[]}}'
+if jget "$TMP/ov-extra/settings.json" "d['model'] == 'opus' and d['tui'] == 'fullscreen' and d['permissions'] != {'allow': []}" \
+    && grep -q 'ignoring key tui' "$TMP/ov-extra.err" \
+    && grep -q 'ignoring key permissions' "$TMP/ov-extra.err" \
+    && grep -q 'Applied model override from' "$TMP/ov-extra.out"; then
+    pass "override honours model only and reports it"
+else
+    fail "override honours model only and reports it"
+fi
+ov_run nonstr '{"model":5}'
+if jget "$TMP/ov-nonstr/settings.json" "d['model'] == 'fable[1m]'" \
+    && grep -q 'ignoring key model' "$TMP/ov-nonstr.err"; then
+    pass "non-string model override is rejected"
+else
+    fail "non-string model override is rejected"
+fi
+ov_run arr '[]'
+if jget "$TMP/ov-arr/settings.json" "d['model'] == 'fable[1m]'" \
+    && grep -q 'ignoring unreadable override' "$TMP/ov-arr.err"; then
+    pass "non-object override is ignored with a warning"
+else
+    fail "non-object override is ignored with a warning"
+fi
+ov_run empty ''
+if jget "$TMP/ov-empty/settings.json" "d['model'] == 'fable[1m]'" \
+    && grep -q 'ignoring unreadable override' "$TMP/ov-empty.err"; then
+    pass "empty override is ignored with a warning"
+else
+    fail "empty override is ignored with a warning"
 fi
 
 # --- reconcile writes a template stamp ---------------------------------

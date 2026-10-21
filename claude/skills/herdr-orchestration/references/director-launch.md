@@ -36,7 +36,7 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
 "$HERDR_WORKSPACE_ID"` -> `.result.workspace.label`). This is display-only
   Herdr state, never repo/worktree state; a worker's own workspace is
   labelled `<task_id>` at `worktree create` (section 2) and then
-  `<state>: <title>` from its task record (section 8, Compact
+  `<title>` (`? <title>` for an owner wait) from its task record (section 8, Compact
   presentation), so no worker is ever left as a generic "Worker N".
 
 ## Inbox socket, launch line and auto-mode classifier (section 1 step 4)
@@ -50,6 +50,10 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   (`zsh/claude-account.zsh`), which runs `claude --agent director
 --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' --permission-mode auto`
   through the account-routing wrapper and refuses outside a herdr pane.
+  When `caffeinate` is on PATH the launch runs under `caffeinate -i -w
+  <launch subshell pid>`, so the host does not idle-sleep for exactly the
+  life of the director (`-i` blocks idle sleep only, not lid-close or a
+  forced sleep).
   Auto mode is the documented launch; an explicit `--permission-mode`
   argument overrides it. Nothing in the director flow assumes a
   permission mode; the rollover hook runs in every mode.
@@ -63,23 +67,30 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   `Bash(gh pr comment:*)`, `Bash(gh pr ready:*)`) live in
   `claude/settings.json.tmpl`, so `update --ai` carries them into every
   account's `settings.json`; the post gate hook still runs on each of
-  them. And it refuses any edit that loosens the
-  director's own guardrails (this skill's launch and posting rules, the
-  post gate, the `director` function's permission mode), from the
-  director and from every worker it launches, which also run in auto
-  mode. Those edits run from a manual-mode session
-  (`director --permission-mode manual`).
+  them. And it refuses any edit that loosens the director's own guardrails
+  (this skill's launch and posting rules, the post gate, the `director`
+  function's permission mode), from the director and from every worker it
+  launches, which also run in auto mode. In the personal dotfiles checkout,
+  where those files are the product, `director()` passes `--allowedTools`
+  rules (`Read` and `Edit` on the checkout and on
+  `~/.herdr/worktrees/dotfiles/**`) so the director reads a guard file
+  and edits it under an allow-edit marker without the classifier. Workers
+  keep the classifier: a refused worker reports `blocked:` with the denial text and the director
+  applies that edit. Paths under `.claude/` stay protected in every mode
+  and still need a manual-mode session. Other repositories keep the
+  classifier for the director too, and their guardrail edits run from a
+  manual-mode session (`director --permission-mode manual`).
 
   What the director runs, and what the classifier does with it:
 
-  | Action                                                                                                                 | Covering template rule              | Prompt in manual mode | Auto mode                                                 | Recovery                                                                                   |
-  | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | --------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-  | `gh pr view`, `gh pr comment`, `gh pr merge`                                                                           | `Bash(gh pr:*)`                     | no                    | allowed by the template allow rules; refused without them | run `update --ai` to reconcile the rules into settings.json                                |
-  | `gh repo view`, `gh api`                                                                                               | `Bash(gh repo:*)`, `Bash(gh api:*)` | no                    | allowed                                                   | none needed                                                                                |
-  | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready`                               | `Bash(python3:*)`                   | no                    | allowed; an occasional refusal is reported                | rerun the verb from a manual-mode session                                                  |
-  | `git worktree remove`                                                                                                  | `Bash(git worktree:*)`              | no                    | allowed                                                   | none needed                                                                                |
-  | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                                                    | none                                | accepted prompt       | refused                                                   | finish `/post-merge` by hand                                                               |
-  | an edit to this skill's launch or posting rules, the post gate, or the `director` permission mode (director or worker) | not applicable                      | accepted prompt       | refused as self-modification                              | make the edit from a manual-mode session; a worker reports `blocked:` with the denial text |
+  | Action                                                                                                                 | Covering template rule                                            | Prompt in manual mode | Auto mode                                                                                                    | Recovery                                                                                                                                                |
+  | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `gh pr view`, `gh pr comment`, `gh pr merge`                                                                           | `Bash(gh pr:*)`                                                   | no                    | allowed by the template allow rules; refused without them                                                    | run `update --ai` to reconcile the rules into settings.json                                                                                             |
+  | `gh repo view`, `gh api`                                                                                               | `Bash(gh repo:*)`, `Bash(gh api:*)`                               | no                    | allowed                                                                                                      | none needed                                                                                                                                             |
+  | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready`                               | `Bash(python3:*)`                                                 | no                    | allowed; an occasional refusal is reported                                                                   | rerun the verb from a manual-mode session                                                                                                               |
+  | `git worktree remove`                                                                                                  | `Bash(git worktree:*)`                                            | no                    | allowed                                                                                                      | none needed                                                                                                                                             |
+  | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                                                    | none                                                              | accepted prompt       | refused                                                                                                      | finish `/post-merge` by hand                                                                                                                            |
+  | an edit to this skill's launch or posting rules, the post gate, or the `director` permission mode (director or worker) | `--allowedTools` rules from `director()` in the dotfiles checkout | accepted prompt       | dotfiles director: allowed by the launch rules; workers and other repositories: refused as self-modification | a worker reports `blocked:` with the denial text and the director applies the edit under allow-edit; elsewhere make the edit from a manual-mode session |
 
   The explicit `accept` is safe here because every inbound message is
   wake-only (Safety); a bypass-mode director without it has every
@@ -93,10 +104,20 @@ While a task is
 active it refreshes this session's ownership heartbeat itself every
 `BACKSTOP_REFRESH_SECS` (300 s), following the lease this Claude process
 holds across `/clear`, so worker pushes stay deliverable without a wake.
-It prints nothing while pushes are delivered. It exits with one `signal`
+It prints nothing while pushes are delivered. A completion record is a
+task's `.done.json`, `.review.json` or ship report (`.ship.md`). The
+keepalive backstop (armed with `--messaging-socket`) never prints `heartbeat`,
+so an empty output file is its healthy state; `--exit-on-signal` ends it on a
+`signal` line, and it always exits (status 1) after an `owner:` line. It exits
+with one `signal`
 line when a completion record stays undelivered for 120 s, or as soon as
 a worker's `blocked` wake was dropped after this session's last check-in
-(the next check-in row's `wake=<reason>` names why); with
+(the next check-in row's `wake=<reason>:<event>` names why). The wake column
+reads `wake=unsent:<names>` (for example `unsent:ship.md`) when no sent push
+covers the current version of a record: a delivery fact, not an
+acknowledgement, cleared only by a later `sent` push; without a messaging
+socket every record reads `unsent`, because the Monitor watch is the wake
+path there. The backstop also exits with
 `owner: lost` when another process holds the lease; and with
 `owner: holder-gone` when it can no longer see this session's process as
 its ancestor.
@@ -124,6 +145,20 @@ Rules:
   heartbeat and prints `signal`, `owner: lost` or `owner: holder-gone`;
   worst-case wake latency is one `--interval`
   (default 15s) plus one `--debounce-secs` (default 60s) after a burst.
-  The default watch fires on completion-record, think-answer, and
+  The default watch fires on completion-record (done, review and ship report), think-answer, and
   mech-ledger writes; the hook pushes on completion-record changes and
   blocks; an ordinary worker turn end produces neither.
+
+## Host-sleep re-gate (section 6a step 0)
+
+Host-sleep re-gate (owner standing request, 2026-10-12): treat an
+`INCOMPLETE` handoff as if the human asked for a re-gate, with the same
+`write-task`, only when all of these hold: (a) the task's live HEAD
+equals the gate's reviewed head; (b) the gate's ship launch `started_ns`
+(Unix nanoseconds) divided by 1000000000 is earlier than the `sec` field
+of `sysctl -n kern.waketime` (seconds); (c) every report reason
+is `seat <name> runner status is not success`, and each named seat's
+runner JSON has `timed_out: true` and a file write time at or after that
+wake. Anything else waits for the human: any other reason, a seat that
+failed without `timed_out`, a seat result written before the wake, or an
+unreadable wake time, launch time or seat result.

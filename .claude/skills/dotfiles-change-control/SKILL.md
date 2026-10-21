@@ -43,7 +43,7 @@ your change needs.
 
 | Class                          | Examples                                                                                                | What a change requires                                                                                                                                                                                            |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tracked asset (symlinked live) | `zsh/*.zsh`, `claude/CLAUDE.md`, `claude/skills/`, `claude/hooks/*.py`, `git/hooks/commit-msg`, `bin/*` | Normal commit + tests. Takes effect on machines at next symlink resolution (usually immediately -- symlinks point into the repo checkout). Hook changes: update `claude/hooks/claude-hooks.test.sh` drift checks. |
+| Tracked asset (symlinked live) | `zsh/*.zsh`, `claude/global-instructions.md`, `claude/skills/`, `claude/hooks/*.py`, `git/hooks/commit-msg`, `bin/*` | Normal commit + tests. Takes effect on machines at next symlink resolution (usually immediately -- symlinks point into the repo checkout). Hook changes: update `claude/hooks/claude-hooks.test.sh` drift checks. |
 | Installer logic                | `bootstrap.sh`, `bootstrap-cloud.sh`, `install/**`, `zsh/functions.zsh` install helpers                 | Must stay idempotent (`update` re-runs `install.sh`). Update `install/install.test.sh` if flow shape changes. Platform-gate macOS/Linux paths.                                                                    |
 | Machine-local template         | `claude/settings.json.tmpl`, `git/work/.gitconfig-work.tmpl`, `ssh/configs/agent.toml`                  | Seed-once: template edits reach only FRESH machines automatically. Follow the settings.json.tmpl protocol below.                                                                                                  |
 | Private planning artifact      | `docs/superpowers/`, `docs/plans/`, `docs/specs/`, `claude/contracts/`, `.planning/`                    | Keep local-only and ignored. Never force-add or publish these files in this public repository; `planning_artifact_guard.py` refuses the add or commit.                                                            |
@@ -129,7 +129,7 @@ In order, for a change made inside a Claude Code session:
 5. **PR review**: target `main`, squash merge, description + test plan. Do not
    push directly to `main` for anything non-trivial.
 
-## Commit, branch, PR format (from claude/CLAUDE.md, hook-enforced)
+## Commit, branch, PR format (from claude/global-instructions.md, hook-enforced)
 
 - Commit: `<scope>: <summary>` -- imperative mood, under 75 chars, scope =
   affected area. Examples: `zsh: Add geoip lookup function`,

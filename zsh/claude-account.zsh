@@ -99,6 +99,10 @@ typeset -g DOTFILES_GH_SHIM_HOME="${${(%):-%N}:A:h:h}/bin/herdr-shims"
 # a launch. Resolved at source time for the same snapshot reason as above.
 typeset -g DOTFILES_OP_ENV="${${(%):-%N}:A:h:h}/bin/op-env"
 
+# The herdr-fleet mod loads into the director only, via --plugin-dir. Resolved
+# at source time for the same snapshot reason as above.
+typeset -g DOTFILES_FLEET_PLUGIN="${${(%):-%N}:A:h:h}/claude/plugins/herdr-fleet"
+
 function dotfiles_op_env_apply() {    # dotfiles_op_env_apply() loads a project's op-env exports into the current subshell; a no-op without op.env. ex: $ ( dotfiles_op_env_apply "$PWD"; command claude )
     [[ -x "${DOTFILES_OP_ENV:-}" ]] || return 0
     local exports
@@ -174,7 +178,7 @@ function claude() {    # claude() will launch Claude Code with the work account 
     fi
 }
 
-function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(). ex: $ director
+function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(), under caffeinate -i when available. ex: $ director
     emulate -L zsh
     if [[ "${HERDR_ENV:-}" != 1 ]]; then
         echo "[X] director: run inside a herdr pane (HERDR_ENV is not 1)." >&2
@@ -182,8 +186,28 @@ function director() {    # director() launches the herdr director with inbound m
     fi
     local arg
     local -a mode=(--permission-mode auto)
+    local -a fleet=()
+    [[ -d "$DOTFILES_FLEET_PLUGIN" ]] && fleet=(--plugin-dir "$DOTFILES_FLEET_PLUGIN")
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done
-    claude --agent director --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${mode[@]}" "$@"
+    # In the dotfiles checkout the guard hooks are the product: allow rules
+    # let the director read and edit them without the auto-mode classifier.
+    # Workers keep the classifier and report blocked:; the director applies
+    # that edit under an allow-edit marker. The rules precede a fixed flag so
+    # the variadic allow list cannot swallow a prompt in "$@".
+    local -a guard=()
+    local dotfiles_root="${HOME}/Git/personal/dotfiles"
+    dotfiles_root="${dotfiles_root:A}"
+    if [[ "${PWD:A}" == "$dotfiles_root" || "${PWD:A}" == "$dotfiles_root"/* ]]; then
+        guard=(--allowedTools 'Read(/**)' 'Edit(/**)' 'Read(~/.herdr/worktrees/dotfiles/**)' 'Edit(~/.herdr/worktrees/dotfiles/**)')
+    fi
+    (
+        if (( $+commands[caffeinate] )); then
+            zmodload zsh/system
+            local launcher=$sysparams[pid]
+            caffeinate -i -w "$launcher" &!
+        fi
+        claude --agent director "${guard[@]}" --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "$@"
+    )
 }

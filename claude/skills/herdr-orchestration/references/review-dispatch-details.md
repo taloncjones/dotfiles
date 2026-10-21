@@ -25,14 +25,14 @@ runs allowlisted Bash (for example `python3`) when a hook or prompt tells it
 to, so only the bounded-child marker and the pane-bound emit guard keep a
 helper from publishing.
 
-## A worktree open during review (section 5 step 2)
+## A worktree open during review (section 5 step 1)
 
 (Should a `worktree open` ever be needed here despite the above,
 it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
 repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
 applies to every `worktree create`/`open`, no exceptions.)
 
-## Sized review deadline (section 5 step 3)
+## Sized review deadline (section 5 step 2)
 
 The active coordinator reads the review's `sized review deadline` from
 `review-deadlines`: `deadline_secs` is the floor (900 s) plus the pinned

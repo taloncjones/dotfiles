@@ -401,6 +401,8 @@ hook_case "AC4 mv onto tracked denied" deny Bash "mv $S/note.txt $TR" "$R" "$SID
 hook_case "AC4 mv tracked out of the repo denied (source)" deny Bash "mv $TR $S/saved.txt" "$R" "$SID_A"
 hook_case "AC4 rm of tracked denied (B4)" deny Bash "rm $TR" "$R" "$SID_A"
 hook_case "AC4 rm -rf of a tracked dir denied (B4)" deny Bash "rm -rf $R/dir" "$R" "$SID_A"
+hook_case "AC4 rm of tracked after a do keyword denied" deny Bash "for f in x; do rm $TR; done" "$R" "$SID_A"
+hook_case "AC4 sed -i tracked after a then keyword denied" deny Bash "if true; then sed -i s/a/b/ $TR; fi" "$R" "$SID_A"
 hook_case "AC4 rmdir of a tracked dir denied (B4)" deny Bash "rmdir $R/dir" "$R" "$SID_A"
 hook_case "AC4 sh -c redirect denied" deny Bash "sh -c 'echo x > $TR'" "$R" "$SID_A"
 hook_case "AC4 bash -ec redirect denied (combined flag cluster, B1)" deny Bash "bash -ec 'echo x > $TR'" "$R" "$SID_A"
@@ -569,6 +571,26 @@ PY
 then printf 'PASS  H3 canonical_target swallows RecursionError and skips only that target\n'; PASS=$((PASS + 1))
 else printf 'FAIL  H3 canonical_target swallows RecursionError and skips only that target\n' >&2; FAIL=$((FAIL + 1)); fi
 
+# --- G: git work-tree writes are writes ---------------------------------
+hook_case "G git commit in the repo denied" deny Bash "git commit -m x" "$R" "$SID_A"
+hook_case "G git -C repo merge denied" deny Bash "git -C $R merge main" "$N" "$SID_A"
+hook_case "G cd then git cherry-pick denied" deny Bash "cd $R && git cherry-pick abc123" "$N" "$SID_A"
+hook_case "G --work-tree reset --hard denied" deny Bash "git --work-tree=$R --git-dir=$R/.git reset --hard" "$N" "$SID_A"
+hook_case "G git push allowed" allow Bash "git push origin main" "$R" "$SID_A"
+hook_case "G git worktree remove allowed" allow Bash "git worktree remove $S/wt" "$R" "$SID_A"
+hook_case "G git stash list allowed" allow Bash "git stash list" "$R" "$SID_A"
+hook_case "G git log allowed" allow Bash "git log --oneline -3" "$R" "$SID_A"
+hook_case "G git -C repo pull --ff-only denied" deny Bash "git -C $R pull --ff-only" "$N" "$SID_A"
+hook_case "G owner python3 core sync-main allowed" allow Bash "python3 $HOME/.claude/hooks/herdr_orch_core.py sync-main --repo-slug s --repo-path $R --branch main" "$R" "$SID_A"
+hook_case "G git commit outside any work tree allowed" allow Bash "git commit -m x" "$N" "$SID_A"
+hook_case "G git -C variable target allowed (accepted gap)" allow Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
+hook_case "G git commit from .todos cwd denied" deny Bash "git commit -m x" "$R/.todos" "$SID_A"
+hook_case "G git -C .todos reset --hard denied" deny Bash "git -C $R/.todos reset --hard" "$N" "$SID_A"
+hook_case "G git reset --hard from gitignored cwd denied" deny Bash "git reset --hard" "$R/ignored" "$SID_A"
+hook_case "G git -C gitignored dir commit denied" deny Bash "git -C $R/ignored commit -m x" "$N" "$SID_A"
+hook_case "G cd .todos then git commit denied" deny Bash "cd $R/.todos && git commit -m x" "$N" "$SID_A"
+hook_case "G plain session git commit allowed" allow Bash "git commit -m x" "$R" "$SID_C"
+
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
 marker() {
@@ -590,6 +612,16 @@ second_line_has() {   # LABEL SUBSTRING: second stderr line of the last run
         printf 'FAIL  %s: %s\n' "$1" "$(sed -n 2p "$FIX/err")" >&2; FAIL=$((FAIL + 1))
     fi
 }
+
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+if run "$(payload Bash "$SID_A" "git commit -m x" "$R")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 0 ] && [ ! -s "$FIX/err" ] && [ "$(audit_count orch-edit-claim)" = 1 ] \
+        && [ "$(audit_count orch-edit-allowed)" = 1 ]; then
+    printf 'PASS  G git commit under a marker allowed and spends one write\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  G git commit under a marker allowed and spends one write (rc=%s claims=%s)\n' "$rc" "$(audit_count orch-edit-claim)" >&2; FAIL=$((FAIL + 1))
+fi
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
 
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 hook_case "AC5 valid marker allows Edit tracked" allow Edit "$R/tracked.txt" "$R" "$SID_A"
@@ -1267,6 +1299,8 @@ git -C "$R" worktree add -q -b leadbr2 "$LWS2" >/dev/null 2>&1
 lead_setup "$SID_C" "$LWS"
 hook_case "LG lead edit inside its workspace allowed" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
 hook_case "LG lead edit of the main checkout denied" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "G lead git commit inside its workspace allowed" allow Bash "git commit -m x" "$LWS" "$SID_C"
+hook_case "G lead git -C main checkout commit denied" deny Bash "git -C $R commit -m x" "$LWS" "$SID_C"
 hook_case "AC-G lead inside workspace: new nested file allowed" allow Write "$LWS/sub/deep/new.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead inside workspace: nested dir allowed" allow Write "$LWS/nested/x.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead outside: sibling workspace denied" deny Write "$LWS2/wsfile.txt" "$LWS2" "$SID_C"
@@ -1647,7 +1681,7 @@ import json, sys
 pre = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
 def cmds(matcher):
     return [h["command"] for e in pre if e.get("matcher") == matcher for h in e["hooks"]]
-ok = cmds("Bash")[-2:] == ["~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py"] \
+ok = cmds("Bash")[-3:] == ["~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py", "~/.claude/hooks/signer_guard.py"] \
     and cmds("Edit|Write") == ["~/.claude/hooks/protect_claude_md.py", "~/.claude/hooks/orch_edit_guard.py"] \
     and sum(c == "~/.claude/hooks/orch_edit_guard.py" for m in ("Bash", "Edit|Write") for c in cmds(m)) == 2
 sys.exit(0 if ok else 1)

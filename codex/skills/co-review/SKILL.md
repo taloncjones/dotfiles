@@ -82,12 +82,17 @@ CI payload as precondition artifacts:
 git -C "$REPO" -c core.quotePath=true diff --no-color --no-ext-diff --no-textconv --no-renames --binary \
   "$BASE" "$CODEX_TREE" >"$RUN_DIR/frozen.diff" || exit 2
 # A failed capture can leave a partial diff that classifies light; never use it.
-CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff") || exit 2
+CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff" \
+  --small-max-files "${SMALL_MAX_FILES:-3}" --small-max-lines "${SMALL_MAX_LINES:-40}") || exit 2
 # `co-review --full` sets CLASS=full here regardless of the classifier.
+# A herdr brief's `herdr-ship-small-sensitive:` prefixes add one
+# `--small-sensitive PREFIX` flag each; see "Small tier" below.
 ```
 
 Write `CLASS` into the expected identity's `class` field before resolving any
-route; set `report.class` to the same value.
+route; set `report.class` to the same value. A `small` class also writes
+`small: {max_files, max_lines, sensitive_paths}` there, with the exact values
+passed to `classify`.
 
 Use an empty helper-owned `SNAPSHOT_DIR` only for `review.py prepare` output and
 parse `MANIFEST` from that command's JSON result. Keep the expected identity,
@@ -107,7 +112,13 @@ required by scope/coverage changes stops for a new user decision.
 Load the canonical material into the active report directory, then resolve each
 seat before launch. A route that is unavailable or unsupported stops the gate.
 
+`PR_REPO` is the stored origin's `owner/repo`; write it as the expected
+identity's `repository` and pass it to every `gh` call with
+`--repo "$PR_REPO"`, since the scratch `RUN_DIR` is not a checkout.
+
 ```bash
+uv run --no-project python "$REVIEW_HELPER" github-repo --repo "$REPO" >"$RUN_DIR/github-repo.json" || exit 2
+PR_REPO=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["repository"])' "$RUN_DIR/github-repo.json") || exit 2
 POLICY=$(uv run --no-project python "$GATE_REPORT" policy --section POLICY) || exit 2
 uv run --no-project python "$GATE_REPORT" schema >"$RUN_DIR/gate-schema.json" || exit 2
 # Full tier:
@@ -123,11 +134,11 @@ uv run --no-project python "$RUNNER" route --runtime claude --role skeptic --ris
 
 `co-review --delta` asks for the delta round: the `claude` reviewer seat
 and the `verifier`, both on Claude routes, scoped to a small follow-up
-after a full APPROVE on this branch. The first round on a branch is always
-full. The prior report and expected identity come with their SHA-256
+after a full or small APPROVE on this branch, including one from an earlier
+head. The first round on a branch is full or small. The prior report and expected identity come with their SHA-256
 digests from exactly one source: the pinned `ship.json` a herdr ship brief
 names in `herdr-ship-prior-handoff:`, or this same uninterrupted workflow's
-own retained full gate. Caps default to `MAX_FILES=5` and `MAX_LINES=150`;
+own retained full or small gate. Caps default to `MAX_FILES=5` and `MAX_LINES=150`;
 a herdr brief's `herdr-ship-delta-caps: <files>/<lines>` replaces them.
 
 After the snapshot verifies and before the expected identity exists, ask
@@ -202,30 +213,68 @@ interactive workflow, start one fresh full gate (new `run_id`,
 A herdr ship launch runs exactly one gate: write `ship.json` with the delta
 verdict and stop, and the director dispatches the full gate.
 
+## Small tier
+
+The classifier returns `small` for a code or config diff of at most 3 files
+and 40 changed lines (added plus removed) that adds or deletes no file,
+touches at least one test, and touches no gate, CI, auth, hook, submodule,
+skill or agent-instruction text (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`), no
+path with a `security` segment and no configured sensitive prefix. The
+flags `--small-max-files` and `--small-max-lines` (at most 5 and 150) and one
+`--small-sensitive PREFIX` per prefix tune it; a herdr brief's
+`herdr-ship-small-caps: <files>/<lines>` and `herdr-ship-small-sensitive:`
+lines supply them as `SMALL_MAX_FILES`, `SMALL_MAX_LINES` and the prefixes.
+A diff outside any cap stays `full`, and `co-review --full` forces `full`.
+
+A small gate runs like the light tier: the native `codex` reviewer, then the
+`verifier` through the Claude runner, with the same Codex substitute rule.
+`ci.json` is its test evidence: no seat runs a suite or builds a disposable
+copy. Each seat has a 270-second bound (`SEAT_SECS`); the native child's
+deadline is 270 seconds. Every seat prompt appends the `## Small tier`
+section the Claude entrypoint's prompt loop writes: run no suite, cite the
+captured CI check that runs the suite owning the touched test in
+`functional_behavior` (a material gap when none does), list only read-only
+inspection commands in `tests`, and finish within 270 seconds.
+
+Any small result other than APPROVE carries `escalate: "full"`. In an
+interactive workflow, start one fresh full gate (new `run_id`,
+`CLASS=full`) on the same head; its verdict is final and never escalates.
+A herdr ship launch runs exactly one gate: write `ship.json` with the small
+verdict and stop, and the director dispatches the full gate. A small APPROVE
+posts a `tier=small` marker.
+
+In every tier, append `probes <epoch>` to `RUN_DIR/seat-timing.txt` before the
+probes and `collected <epoch>` after the verifier is collected (`date +%s`).
+The file only measures seat time; no decision reads it.
+
 ## Capture CI before seats
 
 A PR gate waits for the head's CI to finish and freezes it as `ci.json`
 before any probe or seat runs. A Codex shell call is bounded, so start the
 watch under `nohup` and check for `$RUN_DIR/ci-watch.done` in short calls;
-`ci-capture` reads the PR number and head from the expected identity
-and runs `gh` from `$REPO` itself; never write `ci.json` from your own `gh`
-output. A local no-PR review skips this
-section; a `lessons` class there falls back to `CLASS=light`.
+`ci-capture` is the only step that writes `ci.json`; never write it from
+your own `gh` output. It reads the PR number, head and repository from the
+expected identity, runs `gh pr view` with `--repo` from that identity, and
+refuses a frozen head (`--manifest`) that is not the expected head, before
+any `gh` call or seat. A local no-PR review skips this
+section; a `lessons` class there falls back to `CLASS=light` and a `small`
+class falls back to `CLASS=full`, removing `expected.small`.
 
 ```bash
-nohup sh -c 'gh pr checks "$1" --watch --interval 30 >"$2/ci-watch.txt" 2>&1; echo done >"$2/ci-watch.done"' \
-  sh "$PR" "$RUN_DIR" >/dev/null 2>&1 &
+nohup sh -c 'gh pr checks "$1" --repo "$3" --watch --interval 30 >"$2/ci-watch.txt" 2>&1; echo done >"$2/ci-watch.done"' \
+  sh "$PR" "$RUN_DIR" "$PR_REPO" >/dev/null 2>&1 &
 ```
 
 ```bash
 test -s "$RUN_DIR/ci-watch.done" || exit 3
-uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
+uv run --no-project python "$GATE_REPORT" ci-capture --repo "$REPO" --expected "$EXPECTED_IDENTITY" --manifest "$MANIFEST" --out "$RUN_DIR/ci.json" >"$RUN_DIR/ci-envelope.json"
 ```
 
 Exit 3 means the watch is still running; check again. The `ci-capture`
 exit rules match the Claude entrypoint: 0 continues; reasons exactly
-`["CI evidence is missing"]` take the no-CI path and a `lessons` class falls
-back to `CLASS=light`; any other nonzero exit stops `INCOMPLETE` before any
+`["CI evidence is missing"]` take the no-CI path, a `lessons` class falls
+back to `CLASS=light` and a `small` class to `CLASS=full` (rewrite the expected
+identity's `class` and remove its `small` block before any probe); any other nonzero exit stops `INCOMPLETE` before any
 probe. Then a `lessons` class runs
 `uv run --no-project python "$GATE_REPORT" lessons-check --file "$CODEX_ROOT/claude/rules/personal/agent-lessons.md"`;
 a nonzero exit stops `INCOMPLETE` before any probe.
@@ -240,7 +289,8 @@ skeptic after every finder artifact is complete.
 
 The light tier runs `codex` and `verifier`: first the native `codex` reviewer
 seat, then, after its artifact is complete, the verifier through the Claude
-runner, so the light gate keeps one seat per model:
+runner, so the light gate keeps one seat per model. The small tier runs the
+same two seats under the "Small tier" rules:
 
 Delta tier: the `claude` reviewer seat and the verifier both run through the
 Claude runner blocks below (the probe block already probes both roles for a
@@ -294,20 +344,24 @@ PY
 ```
 
 ```bash
+SEAT_SECS=1200
+[ "$CLASS" = "small" ] && SEAT_SECS=270
 nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs "$SEAT_SECS" \
   --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" 2>"$RUN_DIR/verifier.runtime.err" &
 echo $! >"$RUN_DIR/verifier.pid"
 ```
 
 Launch the Claude runner seat first (full tier: before spawning the native
 seats), then check `$RUN_DIR/<seat>.runtime.json` in short shell calls
-until it is non-empty or the 1200-second deadline passes; never hold one
+until it is non-empty or the `$SEAT_SECS` deadline (1200 seconds, 270 under the
+small tier) passes; never hold one
 shell call open in a blocking `wait`. `nohup` keeps the seat alive after the
 launching call ends, and the runner leaves an inherited ignored SIGHUP alone.
-At the deadline, only when the JSON is still empty and
-`kill -0 "$(cat "$RUN_DIR/<seat>.pid")"` succeeds, send it SIGTERM; the
+After the `$SEAT_SECS` deadline plus a 60-second grace, only when the JSON is
+still empty, `kill -0 "$(cat "$RUN_DIR/<seat>.pid")"` succeeds and
+`ps -o command= -p` for that pid still shows this seat's prompt file, send it SIGTERM; the
 runner reaps the seat and writes a `runner-interrupted` result. Remove the
 pid file once the seat is collected. An empty JSON is an incomplete seat.
 
@@ -320,7 +374,9 @@ section of the failure-class rubric, and
 declared threat model. Every prompt also names the frozen diff path
 (`$RUN_DIR/frozen.diff`) and the seat's own snapshot root as the frozen
 worktree for reading files outside the diff. The verifier also receives finder artifact
-paths/digests and known blockers. Every native packet and runner prompt also
+paths/digests and known blockers. Every native packet and runner prompt
+appends `claude/skills/co-review/references/seat-report.md` verbatim after the rubric.
+Every native packet and runner prompt also
 carries a `## CI evidence` section: the line
 `ci.json: $RUN_DIR/ci.json sha256=<sha256 from ci-envelope.json>` and the
 file's content; a local no-PR review, which has no CI files, writes
@@ -335,9 +391,10 @@ through the bounded runner and preserves its raw response as the `claude`
 artifact:
 
 ```bash
+SEAT_SECS=1200
 nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role reviewer --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs "$SEAT_SECS" \
   --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" 2>"$RUN_DIR/claude.runtime.err" &
 echo $! >"$RUN_DIR/claude.pid"
 ```
@@ -376,7 +433,7 @@ output. Keep the returned handles. The existing Claude seat uses the same
 full packet without either native report.
 
 Light tier: dispatch only the `codex` reviewer through native `spawn_agent`
-with the same packet rules.
+with the same packet rules. The small tier dispatches the same single seat.
 
 Full tier: wait for Claude, Codex, and breaker to complete and collect their
 actual native or runner results before continuing. The coordinator uses
@@ -420,9 +477,32 @@ into `findings` with `category: "structure"` and their `proposed_layout`, as
 
 Fill the seat entries from the actual runtime artifacts for `CLASS`; the
 light `verifier` entry records runtime `claude` and the `codex` entry records
-runtime `codex`, as the evaluator requires. Paths are report relative. Do not
+runtime `codex`, as the evaluator requires. Paths are report relative. Copy each seat's findings and
+coverage from its `co-review-seat` block. The coordinator never writes a `co-review-seat` block for a seat. Do not
 substitute coordinator prose for a missing or unsuccessful runtime
-completion. Then verify, evaluate, and clean up:
+completion. Then run one dry evaluate before the finalize block, which
+removes the snapshot:
+
+```bash
+cp "$RUN_DIR/report.json" "$RUN_DIR/report.pre-dry.json" || exit 2
+uv run --no-project python "$GATE_REPORT" evaluate --report "$RUN_DIR/report.json" --expected "$EXPECTED_IDENTITY" >"$RUN_DIR/evaluation-dry.json" || true
+```
+
+The dry result grants nothing. The dry evaluate runs once per gate, and the
+coordinator makes at most one correction after it, then runs the finalize
+block with no second dry run. A correction is allowed only for a
+transcription error: a `report.json` field that differs from the on-disk file
+it was copied from (the manifest, the expected identity, an artifact's path
+or SHA-256, or the `schema` example). Never edit a seat artifact, and
+never add, drop, or re-disposition a finding: `findings` and `prior_blockers` stay
+byte-equal to `report.pre-dry.json`. A mismatch between authoritative inputs
+(the manifest, the expected identity, `ci.json`, or a seat artifact
+disagreeing with another), or any `APPROVE` or `CHANGES` dry verdict, goes
+straight to the finalize block uncorrected. An interruption after the `cp`
+line and before the finalize block prints its output ends the gate; recovery
+is a fresh gate with a new `RUN_DIR` and `run_id`.
+
+Then verify, evaluate, and clean up:
 
 ```bash
 # co-review-finalize:start
@@ -528,13 +608,13 @@ Before posting, read the PR's comments once (the `gh api --paginate --slurp`
 call below, run before `gh pr comment`) and compute `round` from it.
 
 ```bash
-gh pr comment "$PR" --body-file "$RUN_DIR/marker.md" || exit 2
-gh api --paginate --slurp "repos/$OWNER/$REPO_NAME/issues/$PR/comments" >"$RUN_DIR/comments.json"
+gh pr comment "$PR" --repo "$PR_REPO" --body-file "$RUN_DIR/marker.md" || exit 2
+gh api --paginate --slurp "repos/$PR_REPO/issues/$PR/comments" >"$RUN_DIR/comments.json"
 ME=$(gh api user --jq .login)
 uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/pr_ready_gate.py" supersede \
   --comments "$RUN_DIR/comments.json" --author "$ME" --expect-marker "$MARKER_LINE"
 # Delete each printed id with its own call; no loop, no $(...):
-# gh api -X DELETE "repos/$OWNER/$REPO_NAME/issues/comments/<id>"
+# gh api -X DELETE "repos/$PR_REPO/issues/comments/<id>"
 ```
 
 Only on the comment's exit 0 does the supersede step run. If supersede did
@@ -547,12 +627,13 @@ A draft is the owner's view of one gated post. When the shim refuses a post
 not author), register it with the exact argv it names:
 
 ```bash
-python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-file "$RUN_DIR/marker.md"
+python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --repo "$PR_REPO" --body-file "$RUN_DIR/marker.md"
 ```
 
 Show the printed `draft <hash>` line and the body. Only a Claude session
-mints the go: its `AskUserQuestion` answer `Post draft <hash>` approves that
-one draft through a PostToolUse hook, and `Skip draft <hash>` dismisses it.
+mints the go: its `AskUserQuestion` answer to a post option starting `Post` plus a space and ending `(draft <hash>)`, with no negation, hedge or dash aside (refusal words in `references/posting.md`)
+approves that one draft through a PostToolUse hook, and a skip option
+ending `(skip draft <hash>)` dismisses it.
 A typed message never approves a post. A Codex session cannot mint one.
 Leave the draft in `RUN_DIR` and report it as ready, so the Claude director
 can ask the owner. Never ask the owner to type a phrase.

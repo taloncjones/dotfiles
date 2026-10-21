@@ -20,6 +20,10 @@ the repo's live decisions block from `herdr_orch_core.py decisions`; a failed
 read adds a one-line WARNING. adopt-rollover already prints the carried notes,
 so the decisions call then passes --no-carry.
 
+When the lease verb exits 0 (this session holds the fence), HOST_SLEEP_NOTE
+follows the lease block: a pointer to the host-sleep re-gate rule in
+herdr-orchestration, for gates a sleep cut off. No other output carries it.
+
 Always exits 0. A failure after the gates prints the WARNING block so the
 director re-runs its preflight instead of acting unfenced.
 """
@@ -40,6 +44,13 @@ WARNING = (
     "[WARNING] herdr director rollover: lease NOT re-established (error).\n"
     "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
     "and ask the human (takeover is a human decision)."
+)
+HOST_SLEEP_NOTE = (
+    "[INFO] host sleep: if the host slept while a ship gate ran, apply the\n"
+    "section 6a step 0 host-sleep re-gate rule in herdr-orchestration: an\n"
+    "eligible INCOMPLETE gate is re-gated at the same head without asking.\n"
+    "Compare the `sec` field of `sysctl -n kern.waketime` with the gate\n"
+    "launch's `started_ns` (Unix nanoseconds; divide by 1000000000)."
 )
 DECISIONS_WARNING = (
     "[WARNING] herdr decisions: not loaded; run python3 ~/.claude/hooks/"
@@ -99,8 +110,9 @@ def decisions_text(cwd, no_carry):
 
 
 def lease_text(verb, session, cwd, sock):
-    """(text, adopted): the lease block for verb, or "" when it has nothing to
-    say; adopted is True when adopt-rollover exited 0."""
+    """(text, adopted, leased): the lease block for verb, or "" when it has
+    nothing to say; adopted is True when adopt-rollover exited 0, leased when
+    either verb exited 0."""
     try:
         result = subprocess.run(
             [sys.executable, str(CORE), verb, "--repo-path", cwd,
@@ -108,12 +120,13 @@ def lease_text(verb, session, cwd, sock):
             capture_output=True, text=True, timeout=TIMEOUT_SECS, check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return WARNING, False
+        return WARNING, False, False
     if result.returncode == 3:
-        return "", False
+        return "", False, False
     text = result.stdout.strip()
     ok = result.returncode in (0, 1) and text
-    return (text if ok else WARNING), verb == "adopt-rollover" and result.returncode == 0
+    leased = result.returncode == 0 and bool(text)
+    return (text if ok else WARNING), verb == "adopt-rollover" and leased, leased
 
 
 def main() -> int:
@@ -145,9 +158,11 @@ def main() -> int:
     adopted = False
     if (verb is not None and isinstance(session, str) and SESSION_ID_RE.fullmatch(session)
             and sock and isinstance(cwd, str) and cwd):
-        text, adopted = lease_text(verb, session, cwd, sock)
+        text, adopted, leased = lease_text(verb, session, cwd, sock)
         if text:
             parts.append(text)
+            if leased:
+                parts.append(HOST_SLEEP_NOTE)
     if isinstance(cwd, str) and cwd:
         text = decisions_text(cwd, no_carry=adopted)
         if text:

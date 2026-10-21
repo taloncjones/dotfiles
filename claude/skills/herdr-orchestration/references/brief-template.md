@@ -196,7 +196,7 @@ untracked and git-ignored on disk, and the planning-artifact guard refuses
 `git add` of it. 1-32 commands, each `{"name", "run"[, "timeout_secs"
 1-3600]}`, that are falsifiable (a broken implementation must fail at least
 one), repo-local, deterministic, and worktree-safe (no STATE_ROOT writes,
-no machine-state mutation, no network, no secret echo). The PRD's
+no machine-state mutation, no network, no secret echo). `verify-contract` runs each command under `/bin/sh -c` with the system grep; check commands through `verify-contract`, not in your own shell. The PRD's
 acceptance mapping pairs each acceptance criterion with its contract
 command (or an explicit "human-verify" entry). Validate it --
 `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path> --contract claude/contracts/<task_id>-contract.json --allow-unpinned --validate-only`
@@ -337,7 +337,7 @@ Run the native `review-change` skill over this revision's relevant diff,
 intended behavior, and affected callers. You are a fresh agent in the task's
 own worktree. Report blocking findings, useful advisories, coverage gaps, and
 safe reproduction evidence. Do not edit the branch, invoke co-review or another
-reviewer, post externally (drafts go in the findings report), push, merge, or open a PR.
+reviewer, post externally (drafts go in the findings report), push, merge, or open a PR. To execute the contract, run `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`; never paste a contract `run` string into your own shell.
 <fast-path-line>
 ```
 ```brief:close-review
@@ -490,7 +490,7 @@ below. Each still carries `<lessons-step>`:
   through a temp file and rename: `task_id`, `launch_id`, `pr_number`,
   `pr_url`, `head_sha`, `base_ref`, `base_sha`, `tree_sha`, `report_path`,
   `report_sha256`, `expected_path`, `expected_sha256`, `verdict`,
-  `written_at`. `base_sha` is the expected identity's `base`, the live `git ls-remote` tip (not `baseRefOid`). A head behind that base is gated on its merge result and needs no merge. Only when `prepare` reports a conflict does the worker record INCOMPLETE naming the conflict; no worker merges main into the branch. A run that dies before a verdict writes none.
+  `written_at`. `report_path` is `run/report.json` inside the launch directory. `base_sha` is the expected identity's `base`, the live `git ls-remote` tip (not `baseRefOid`). A head behind that base is gated on its merge result and needs no merge. Only when `prepare` reports a conflict does the worker record INCOMPLETE naming the conflict; no worker merges main into the branch. A run that dies before a verdict writes none.
 - A ship or reviewer brief adds no architecture or lens addendum; co-review and review-change append the rubric in `claude/skills/co-review/references/failure-classes.md`.
 
 ```brief:intro-repair
@@ -516,6 +516,11 @@ below. You do not merge, push, post, or edit anything.
 
 ```brief:ship-tier-full
 herdr-ship-brief: tier=full
+```
+
+```brief:ship-tier-auto
+herdr-ship-brief: tier=auto
+herdr-ship-small-caps: <small_files>/<small_lines>
 ```
 
 ```brief:ship-tier-delta
@@ -547,13 +552,13 @@ Posting, editing the PR, pushing, committing, and merging are not authorized.
 ## Steps
 1. Confirm `git rev-parse HEAD` is <head_sha> and `git status --porcelain` is
    empty. Do not fetch into the branch, rebase, commit, or change the checkout.
-2. Wait for every CI check on this head to complete: a bounded foreground
-   until-loop (at most 30 minutes) on
-   `gh pr view <pr_number> --repo <pr_repo> --json headRefOid,statusCheckRollup`;
-   poll `gh run view` when `gh run watch` dies. A failed check or a wait that
-   runs out ends at step 5 with verdict INCOMPLETE.
-3. Create the launch directory, set co-review's `RUN_DIR` to
-   `<ship_launch_dir>run`, and write every artifact path absolute.
+2. Do not poll CI yourself. Co-review's "Capture CI before seats" step waits
+   for this head's checks and writes `<ship_launch_dir>run/ci.json` with
+   `gate_report.py ci-capture`. A pending, failed or moved-head result there
+   ends the gate INCOMPLETE. Never write `ci.json` from your own `gh` output.
+3. Create the launch directory, set co-review's `RUN_DIR` to `<ship_launch_dir>run`
+   and `EXPECTED_IDENTITY` to `<ship_launch_dir>run/expected.json`; write every
+   artifact path absolute.
 4. Run the `co-review` skill on PR #<pr_number> at <head_sha>. A head behind
    the live base is gated on its merge result, which co-review computes; it
    needs no merge. Only if `prepare` reports a merge conflict, do not touch
@@ -569,9 +574,9 @@ Posting, editing the PR, pushing, committing, and merging are not authorized.
    `task_id`, `launch_id`, `pr_number`, `pr_url`, `head_sha`, `base_ref`,
    `base_sha` (the expected identity's `base`), `tree_sha`, `report_path`,
    `report_sha256`, `expected_path`, `expected_sha256`, `verdict`,
-   `written_at`. `report_path` is the gate's `run/report.json` inside the
-   launch directory and `expected_path` its `run/expected.json`, never
-   `<ship_report>`. A run that dies before a verdict writes none.
+   `written_at`. `report_path` is `<ship_launch_dir>run/report.json` and
+   `expected_path` is `<ship_launch_dir>run/expected.json`, both absolute;
+   never `<ship_report>`. A run that dies before a verdict writes none.
 7. Then stop and go idle with one paragraph: PR URL, verdict, report path.
    Do not emit-done, post the audit comment, merge, run /post-merge, remove
    worktrees, or delete branches.

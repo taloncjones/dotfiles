@@ -550,13 +550,18 @@ native = [{
     "role": "review", "launch_id": "L1", "phase": "review", "runtime": "claude",
     "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40,
 }]
+pinned = [{**native[0], "review_base_sha": "a" * 40}]
+wrong_pin = [{**native[0], "review_base_sha": "b" * 40}]
+# A bound review row must carry a review_base_sha equal to the task base_sha.
 for rows_in, bound, ok in (
     (loose, False, False), (phased, False, True), (native, False, True),
-    (phased, True, False), (native, True, True), ([], True, True),
+    (phased, True, False), (native, True, False), (wrong_pin, True, False),
+    (pinned, True, True), ([], True, True),
     ("nope", False, False),
 ):
     try:
-        c.resolve_task_workers({"task_id": "T", "workers": rows_in}, ABSENT, bound)
+        c.resolve_task_workers(
+            {"task_id": "T", "base_sha": "a" * 40, "workers": rows_in}, ABSENT, bound)
         assert ok, (rows_in, bound)
     except SystemExit as exc:
         assert not ok, (rows_in, bound)
@@ -744,14 +749,16 @@ p2, m2 = c.wake_decision("not-a-dict", "stopped", {"/t/d.json": [5, 9]}, 9000.0)
 assert p2 is True, p2
 PY
 
-check "record_fingerprint: only the task's own two sidecars, absent paths omitted" <<PY
+check "record_fingerprint: only the task's own three sidecars, absent paths omitted" <<PY
 $LOAD
 rd = tempfile.mkdtemp()
 os.makedirs(os.path.join(rd, "tasks"))
 open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
 open(os.path.join(rd, "tasks", "PROJ-2.done.json"), "w").write("{}")
+open(os.path.join(rd, "tasks", "PROJ-1.ship.md"), "w").write("r")
+open(os.path.join(rd, "tasks", "PROJ-2.ship.md"), "w").write("r")
 fp = c.record_fingerprint(rd, "PROJ-1")
-assert list(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json")], fp
+assert sorted(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json"), os.path.join(rd, "tasks", "PROJ-1.ship.md")], fp
 assert all(isinstance(v, list) and len(v) == 2 for v in fp.values()), fp
 assert c.record_fingerprint(rd, "../escape") == {}, "unsafe task id must yield nothing"
 PY
@@ -2298,6 +2305,36 @@ assert c.run_contract_commands(cmds,root)==0 and os.path.exists(marker)  # cwd=w
 sys.exit(0)
 PY
 
+check "run_contract_commands: system grep survives a wrapped grep" <<PY
+$LOAD
+import subprocess
+root=tempfile.mkdtemp()
+open(os.path.join(root,"f"),"w").write('git tag --target "\$RESOLVED_COMMIT" v1\n')
+cmd="grep -q -- '--target \"\$RESOLVED_COMMIT\"' f"
+open(os.path.join(root,"check.sh"),"w").write(cmd+"\n")
+fakebin=tempfile.mkdtemp()
+fake=os.path.join(fakebin,"grep")
+open(fake,"w").write("#!/bin/sh\nexit 1\n");os.chmod(fake,0o755)
+benv=os.path.join(root,"fn.sh");open(benv,"w").write("grep() { return 1; }\n")
+ok=[{"name":"dollar","run":cmd}]
+miss=[{"name":"miss","run":"grep -q -- absent-token f"}]
+nested=[{"name":"nested","run":"bash check.sh"}]
+path=os.environ["PATH"]
+os.environ["PATH"]=fakebin+os.pathsep+path
+assert subprocess.call(["sh","-c",cmd],cwd=root)!=0           # fake is live
+assert c.run_contract_commands(ok,root)==0
+assert c.run_contract_commands(miss,root)==1
+os.environ["PATH"]=path
+os.environ["BASH_FUNC_grep%%"]="() {  return 1\n}"
+assert subprocess.call(["bash","check.sh"],cwd=root)!=0       # fake is live
+assert c.run_contract_commands(nested,root)==0
+del os.environ["BASH_FUNC_grep%%"]
+os.environ["BASH_ENV"]=benv
+assert subprocess.call(["bash","check.sh"],cwd=root)!=0       # fake is live
+assert c.run_contract_commands(nested,root)==0
+sys.exit(0)
+PY
+
 check "verify-contract: unpinned validate/run/missing/schema exits" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
@@ -3135,7 +3172,8 @@ expect("task-state", state="none", task_edit=lambda t: t.update(ship_launch_id=N
 expect("handoff", state="stale", task_edit=lambda t: t.update(ship_launch_id="old"))
 expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="never-launched"))
 expect("handoff", state="current", hand_edit=lambda h: h.update(verdict="CHANGES"))
-expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json")))
+out = expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json")))
+assert f"expected {ld / 'run' / 'report.json'}" in " ".join(r["detail"] for r in out["reasons"]), out
 expect("hash", file_edit=lambda: (ld / "report.json").write_text("{}"))
 expect("handoff", state="stale", task_edit=lambda t: t.update(review_head_sha="c" * 40))
 expect("head-moved", pr_edit=lambda p: p.update(headRefOid="c" * 40))
@@ -3166,6 +3204,22 @@ expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(status="IN_PROGR
 expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(conclusion="FAILURE"))
 expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "StatusContext", "context": "x", "state": "PENDING"}]))
 expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "Mystery"}]))
+old_fail = {"__typename": "CheckRun", "name": "tests", "workflowName": "tests", "status": "COMPLETED",
+            "conclusion": "FAILURE", "startedAt": "2026-10-21T10:00:00Z"}
+new_pass = {**old_fail, "conclusion": "SUCCESS", "startedAt": "2026-10-21T11:00:00Z"}
+rerun = copy.deepcopy(pr); rerun["statusCheckRollup"] = [old_fail, new_pass]
+rc, out = run(personal, slug, tid, rerun, rp)
+assert rc == 0 and out["ready"] is True, out
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[
+    {**new_pass, "startedAt": "2026-10-21T09:00:00Z"}, {**old_fail, "startedAt": "2026-10-21T12:00:00Z"}]))
+real_module = c._co_review_module
+class NoFilter:
+    pass
+c._co_review_module = lambda name: NoFilter() if name == "gate_report" else real_module(name)
+try:
+    expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[old_fail, new_pass]))
+finally:
+    c._co_review_module = real_module
 expect("gate", file_edit=lambda: (ld / "claude.txt").write_text("tampered\n"))
 out = expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="../../x"))
 assert any("invalid ship_launch_id" in r["detail"] for r in out["reasons"]), out
@@ -3403,7 +3457,7 @@ SH
 check "docs pin delta dispatch, forced full, and relaunch-is-full" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 L="claude/skills/herdr-orchestration/references/state-layout.md"
-grep -Fq 'the handoff report has `class` `delta`' "$S"
+grep -Fq 'the handoff report has `class` `delta` or `small`' "$S"
 grep -Fq '(section 6a step 0 owns it), except rule (c)' "$S"
 grep -Fq 'every such relaunch brief carries `herdr-ship-brief: tier=full`' "$S"
 grep -Fq '"$GATE_REPORT" delta-class --repo <worktree>' "$R/ship-carry-forward.md"
@@ -4507,7 +4561,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 HEAD40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-3 \
-   --json '{"task_id":"PROJ-3","base_sha":"'"$SHA40"'","review_head_sha":"'"$HEAD40"'","workers":[{"role":"mech","launch_id":"L1","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"PROJ-3","base_sha":"'"$SHA40"'","review_head_sha":"'"$HEAD40"'","workers":[{"role":"mech","launch_id":"L1","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w9","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-3 --workspace w9 \
    --agent rev-proj-3 --reviewed-head-sha "$HEAD40" --reviewed-base-sha "$SHA40" --outcome approved \
@@ -4696,7 +4750,7 @@ lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py clai
 SHA40=$(printf 'a%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-5 \
-   --json '{"task_id":"PROJ-5","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L1","phase":"review","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"PROJ-5","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L1","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
 # binding-scoped review emit WITHOUT --reviewer-session -> refused
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-5 --workspace w1 \
@@ -4751,7 +4805,7 @@ BASE40=$(printf 'b%.0s' $(seq 1 40))
 # task record: native implement + review attempts, dispatched review SHA
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -4794,7 +4848,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 BASE40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -4917,7 +4971,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 BASE40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -5022,10 +5076,10 @@ HA=$(printf 'd%.0s' $(seq 1 40))
 HB=$(printf 'e%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" --task-id td-a \
-   --json '{"task_id":"td-a","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$HA"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$HA"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$HA"'"}]}'
+   --json '{"task_id":"td-a","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$HA"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$HA"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$HA"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session SB --fence "$lfB" --binding "$bidB" --task-id td-b \
-   --json '{"task_id":"td-b","status":"completed","base_sha":"'"$MOVED40"'","review_head_sha":"'"$HB"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$HB"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$HB"'"}]}'
+   --json '{"task_id":"td-b","status":"completed","base_sha":"'"$MOVED40"'","review_head_sha":"'"$HB"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$HB"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$MOVED40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$HB"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bidA" --task-id td-a --workspace w2 \
    --agent rev-td-a --outcome approved --reviewed-head-sha "$HA" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -5084,7 +5138,7 @@ BASE40=$(printf 'b%.0s' $(seq 1 40))
 MOVED40=$(printf 'c%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -5428,7 +5482,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 BASE40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 # The review record names the LEAD session S1 as reviewer from its FIRST emit,
 # so the envelope's approval identity matches the record and only the
 # independence gate fires (no same-head verdict flip is needed).
@@ -5556,7 +5610,7 @@ lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py clai
 SHA40=$(printf 'a%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 # approved, blocking-count 1, findings F1 at head SHA40 (baseline record)
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -5625,7 +5679,7 @@ prov_fixture() {
     SHA40=$(printf 'a%.0s' $(seq 1 40))
     CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
        --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-       --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+       --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
     findings_ok "$root"
     LEAD_TASKS="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks"
     REVIEW_JSON="$LEAD_TASKS/td-x.review.json"
@@ -5651,7 +5705,7 @@ prov_impl_row() {
     # rows in order and append a current implement attempt.
     CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
        --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-       --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"},{"role":"impl","launch_id":"L3","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+       --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"},{"role":"impl","launch_id":"L3","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
 }
 HELPER
 
@@ -5920,7 +5974,7 @@ H2=$(printf 'c%.0s' $(seq 1 40))
 # task dispatched a review at head H
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$H"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$H"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$H"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 # a verdict naming H2 while the task still dispatches H -> refused (dispatched review head)
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -5932,7 +5986,7 @@ test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
 # substituted -- dispatch history is append-only); approved@H2 then succeeds
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$H"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$H"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$H"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$H"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H2" --reviewed-base-sha "$H" --blocking-count 0 \
@@ -6099,7 +6153,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 BASE40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -6189,7 +6243,7 @@ BASE=$(printf 'b%.0s' $(seq 1 40))
 # review dispatched at H; a changes-requested verdict lands in the journal
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome changes-requested --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 2 \
@@ -6199,7 +6253,7 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-revi
 # succeeds
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H2" --reviewed-base-sha "$BASE" --blocking-count 0 \
@@ -6210,7 +6264,7 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-revi
 # though the latest .review.json record is the H2 approval
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 0 \
@@ -6238,7 +6292,7 @@ H=$(printf 'a%.0s' $(seq 1 40))
 BASE=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 # one clean verdict creates the journal
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -6271,7 +6325,7 @@ H=$(printf 'a%.0s' $(seq 1 40))
 BASE=$(printf 'b%.0s' $(seq 1 40))
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}],"retired_review_launch_ids":["L2"]}' \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}],"retired_review_launch_ids":["L2"]}' \
    2>"$ERRFILE"; then exit 1; fi
 grep -q 'retired_review_launch_ids is launcher-scope only' "$ERRFILE"
 # launcher reset-task opens a record with no rows, so no retired launches.
@@ -6305,7 +6359,7 @@ H=$(printf 'a%.0s' $(seq 1 40))
 BASE=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 emit() {
   CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -6349,8 +6403,8 @@ lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py clai
 H=$(printf 'a%.0s' $(seq 1 40))
 H2=$(printf 'c%.0s' $(seq 1 40))
 BASE=$(printf 'b%.0s' $(seq 1 40))
-ROW_H='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}'
-ROW_H2='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}'
+ROW_H='{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}'
+ROW_H2='{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}'
 wt() {
   CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
@@ -6483,7 +6537,7 @@ B1=$(printf 'c%.0s' $(seq 1 40))
 # grounded at base B0: review approves at head SHA40, envelope seq 1 expects B0
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$B0"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$B0"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$B0"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$B0" --blocking-count 0 \
@@ -6495,7 +6549,7 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-enve
 # swap the task base to B1; the approval still records review_base_sha B0
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$B1"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$B1"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$B0"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 # a fresh envelope grounded at B1 is refused: the approval does not cover B1
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
@@ -6512,7 +6566,7 @@ assert json.load(open(sys.argv[1]))["status"] == "claimed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
 SH
 
-check "emit-review --binding: --reviewed-base-sha must match the currently dispatched base, not a rewritten one" <<'SH'
+check "emit-review --binding: a base rewritten after dispatch refuses every reviewed base (row pin and live base must agree)" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-reviewedbase.git
 root=$(mktemp -d)
 f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
@@ -6529,7 +6583,7 @@ B1=$(printf 'c%.0s' $(seq 1 40))
 # task dispatched at base B0, head H unchanged throughout
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$B0"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$B0"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$B0"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 # a binding-scoped emit-review WITHOUT --reviewed-base-sha is refused outright
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -6540,7 +6594,7 @@ test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
 # the lead flips base_sha to B1 mid-flight (same head H, review_head_sha unchanged)
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$B1"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$B1"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$B0"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 # the reviewer asserts the base it actually reviewed (B0, stale) -> refused
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -6548,16 +6602,58 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-r
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
-# the reviewer asserts the new dispatched base (B1) -> succeeds and is recorded verbatim
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+# the reviewer asserts the new base (B1): the row is still pinned to B0 -> refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$B1" --blocking-count 0 \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
-   --reviewer-session R1
+   --reviewer-session R1 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+SH
+
+check "bound review row: write-task refuses an unpinned or mismatched pin; emit-review refuses an unpinned row" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-reviewpin.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+B0=$(printf 'b%.0s' $(seq 1 40))
+B1=$(printf 'c%.0s' $(seq 1 40))
+ROW='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"'
+wt() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$B0"'","review_head_sha":"'"$H"'","workers":['"$1"']}'
+}
+# unpinned new review row refused
+if wt "$ROW}" 2>"$root/e1"; then exit 1; fi
+grep -q 'must pin the task base_sha' "$root/e1"
+# caller pin that differs from the task base refused
+if wt "$ROW"',"review_base_sha":"'"$B1"'"}' 2>"$root/e2"; then exit 1; fi
+grep -q 'must pin the task base_sha' "$root/e2"
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+# a pin equal to the task base is accepted
+wt "$ROW"',"review_base_sha":"'"$B0"'"}'
+# out-of-band: strip the pin from the stored row; emit-review must refuse
 python3 -c '
 import json, sys
-assert json.load(open(sys.argv[1]))["review_base_sha"] == sys.argv[2]
-' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json" "$B1"
+rec = json.load(open(sys.argv[1]))
+del rec["workers"][-1]["review_base_sha"]
+json.dump(rec, open(sys.argv[1], "w"))
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$B0" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
+   --reviewer-session R1 2>"$root/e3"; then exit 1; fi
+grep -q 'carries no pinned base' "$root/e3"
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
 SH
 
 check "emit-envelope null-attempt: unreadable or malformed task record refuses (not laundered to None)" <<'SH'
@@ -6709,7 +6805,7 @@ H=$(printf 'a%.0s' $(seq 1 40))
 BASE=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
 # one clean verdict creates the journal
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
@@ -6761,7 +6857,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 BASE40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -6865,7 +6961,7 @@ BASE=$(printf 'b%.0s' $(seq 1 40))
 LOOSE=$(printf 'h1%.0s' $(seq 1 19))  # 38 chars, not a 40hex sha
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$LOOSE"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$BASE"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$LOOSE"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$BASE"'"}]}'
 journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -6878,7 +6974,7 @@ test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
 H40=$(printf 'a%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$BASE"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$BASE"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H40" --reviewed-base-sha "$BASE" --blocking-count 0 \
@@ -6911,7 +7007,7 @@ SHA40=$(printf 'a%.0s' $(seq 1 40))
 BASE40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 # reviewer RVR is independent of the original launcher L1 and lead S1
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
@@ -7148,7 +7244,7 @@ lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --workspace-root "$LF_WS" --binding "$bid")
 CLAUDE_CONFIG_DIR="$root" $CLI write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -8348,7 +8444,7 @@ BASE40=$(printf 'b%.0s' $(seq 1 40))
 MOVED40=$(printf 'c%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" $CLI write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
@@ -9353,7 +9449,7 @@ CLAUDE_CONFIG_DIR="$root" $CLI write-task \
    --json '{"task_id":"PROJ-2","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" $CLI write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-3 \
-   --json '{"task_id":"PROJ-3","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"PROJ-3","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$BASE40"'","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
 # rewrite the registry entry's fence: the lease no longer matches the
 # durable occupancy, so publication is refused at the source
 KEY=$(python3 -c '
@@ -9956,9 +10052,123 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deacti
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
 SH
 
-check "there is no activation verb: the CLI rejects one and no handler writes an enabled gate" <<'SH'
-if python3 claude/hooks/herdr_orch_core.py activate-task-leads 2>/dev/null; then exit 1; fi
-if grep -qE '"enabled"[[:space:]]*:[[:space:]]*True' claude/hooks/herdr_orch_core.py; then exit 1; fi
+check "activate-task-leads writes an enabled record that task-lead-status reads as enabled" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ae.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+st=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO")
+python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as c
+d = json.load(open(os.path.join(sys.argv[1], "herdr-orch", sys.argv[2], "task-lead-gate.json")))
+assert sorted(d) == ["account_id", "enabled", "repo_id", "repo_slug", "schema_version"], d
+assert d["enabled"] is True and d["schema_version"] == 1 and d["repo_slug"] == sys.argv[2], d
+assert d["repo_id"] == c.repository_context(sys.argv[3])["repo_id"], d
+s = json.loads(sys.argv[4])
+assert s["gate_enabled"] is True and s["gate_reason"] == "task-lead dispatch is enabled", s
+' "$root" "$LF_SLUG" "$LF_REPO" "$st"
+SH
+
+check "activate-task-leads on one repo leaves a repo without a record refusing" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-aa.git
+repo_a="$LF_REPO"; slug_a="$LF_SLUG"
+lead_fixture https://example.com/repo-ab.git
+repo_b="$LF_REPO"; slug_b="$LF_SLUG"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$slug_a" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$slug_a" --repo-path "$repo_a" --session L1 --fence "$f"
+st=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$slug_b" --repo-path "$repo_b")
+test ! -f "$root/herdr-orch/$slug_b/task-lead-gate.json"
+python3 -c '
+import json, sys
+s = json.loads(sys.argv[1])
+assert s["gate_enabled"] is False and s["gate_reason"] == "gate record absent", s
+assert s["admit"] is False, s
+' "$st"
+SH
+
+check "activate-task-leads is idempotent and deactivate-task-leads turns it back off" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ai.git
+root=$(mktemp -d)
+g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+a=$(shasum "$g" | cut -d' ' -f1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+b=$(shasum "$g" | cut -d' ' -f1)
+test "$a" = "$b"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["enabled"] is False
+' "$g"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["enabled"] is True
+' "$g"
+SH
+
+check "activate-task-leads is refused for a wrong session or an invalid fence" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ar.git
+root=$(mktemp -d)
+g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session IMPOSTOR --fence "$f" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
+test ! -f "$g"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+before=$(shasum "$g" | cut -d' ' -f1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session IMPOSTOR --fence "$f" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py activate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
+test "$before" = "$(shasum "$g" | cut -d' ' -f1)"
+SH
+
+check "activate-task-leads is refused for a lead-tier owner" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-al.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d); ws=$(mktemp -d)
+g="$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+# A valid lead-tier slug owner record (tier and workspace_root edited together).
+# The owner fence check (OwnerTransaction.check) refuses it before the verb's own
+# launcher-tier guard runs, so that is the refusal asserted here.
+python3 -c '
+import json, os, sys
+reg = os.path.join(os.environ["HERDR_COORDINATION_ROOT"], sys.argv[3], "owner.json")
+rec = json.load(open(reg))
+rec["control_tier"] = "lead"; rec["workspace_root"] = sys.argv[1]
+json.dump(rec, open(reg, "w"))
+mirror = os.path.join(sys.argv[2], "herdr-orch", sys.argv[3], "owner.json")
+rec2 = json.load(open(mirror))
+rec2["control_tier"] = "lead"; rec2["workspace_root"] = sys.argv[1]
+json.dump(rec2, open(mirror, "w"))
+' "$ws" "$root" "$LF_SLUG"
+for verb in activate-task-leads deactivate-task-leads; do
+  if CLAUDE_CONFIG_DIR="$root" $CLI "$verb" \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>"$ERRFILE"; then exit 1; fi
+  grep -q "stale, foreign-account, or missing owner fence" "$ERRFILE" || { cat "$ERRFILE"; exit 1; }
+  test ! -f "$g"
+done
 SH
 
 check "reserve-dispatch: a settled identity cannot be reserved again; an unsettled one can" <<'SH'
@@ -9977,7 +10187,7 @@ H2=$(printf 'b%.0s' $(seq 1 40))
 TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-dup.json"
 CLAUDE_CONFIG_DIR="$root" $CLI write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
-   --json '{"task_id":"td-dup","workers":[]}'
+   --json '{"task_id":"td-dup","base_sha":"'"$H"'","workers":[]}'
 # A review detour: dispatch at H, advance to H2, then return to H. The
 # returning row repeats H's identity but nothing has settled it, so it is a
 # legitimate re-dispatch and must be appended (the :4405 shape).
@@ -10097,6 +10307,134 @@ rec = json.load(open(sys.argv[1]))
 panes = [w["pane_id"] for w in rec["workers"]]
 assert panes == ["pane1", "pane2", "pane2", "pane1"], rec
 ' "$TASK"
+SH
+
+check "reserve-dispatch: a review row pins the dispatched base and enrich-dispatch cannot rewrite it" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-pin.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-pin \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+B1=$(printf 'a%.0s' $(seq 1 40))
+B2=$(printf 'b%.0s' $(seq 1 40))
+H=$(printf 'c%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-pin.json"
+reserve() {
+  CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+     --launch-id "$1" --phase "$2" --runtime claude --workspace-id "$3" \
+     --pane-id "$4" --source-head-sha "$H"
+}
+# A review reservation without a valid base writes nothing.
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json '{"task_id":"td-pin","workers":[]}'
+if reserve L2 review w2 pane2 2>"$ERRFILE"; then exit 1; fi
+grep -q "a review reservation requires a 40-hex base_sha on the task record" "$ERRFILE"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json '{"task_id":"td-pin","base_sha":"'"${B1%?}"'","workers":[]}'
+if reserve L2 review w2 pane2 2>"$ERRFILE"; then exit 1; fi
+grep -q "a review reservation requires a 40-hex base_sha on the task record" "$ERRFILE"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["workers"] == []
+' "$TASK"
+# An implement row carries no pin; a review row pins the record base.
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json '{"task_id":"td-pin","base_sha":"'"$B1"'","workers":[]}'
+reserve L1 implement w1 pane1
+reserve L2 review w2 pane2
+python3 -c '
+import json, sys
+w = json.load(open(sys.argv[1]))["workers"]
+assert "review_base_sha" not in w[0], w
+assert w[1]["review_base_sha"] == sys.argv[2], w
+' "$TASK" "$B1"
+# A later base rewrite leaves the pin alone.
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["base_sha"] = sys.argv[2]
+print(json.dumps(rec))
+' "$TASK" "$B2" > "$root/rewrite.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --json "$(cat "$root/rewrite.json")"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["base_sha"] == sys.argv[2], rec
+assert rec["workers"][1]["review_base_sha"] == sys.argv[3], rec
+' "$TASK" "$B2" "$B1"
+# enrich-dispatch refuses the key and leaves the record byte-equal.
+before=$(shasum "$TASK")
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-pin \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H" \
+   --json '{"review_base_sha":"'"$B2"'"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "an enrichment may not name review_base_sha" "$ERRFILE"
+test "$before" = "$(shasum "$TASK")"
+SH
+
+check "emit-review: a bound verdict must name the review row's pinned base" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-pin-emit.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-pe \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+B1=$(printf 'a%.0s' $(seq 1 40))
+B2=$(printf 'b%.0s' $(seq 1 40))
+H=$(printf 'c%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-pe.json"
+REVIEW="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-pe.review.json"
+set_base() {
+  python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["base_sha"] = sys.argv[2]
+print(json.dumps(rec))
+' "$TASK" "$1" > "$root/rewrite.json"
+  CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pe \
+     --json "$(cat "$root/rewrite.json")"
+}
+emit() {
+  CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-pe --workspace w2 \
+     --agent rev-td-pe --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$1" --blocking-count 0 \
+     --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
+     --reviewer-session R1
+}
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-pe \
+   --json '{"task_id":"td-pe","base_sha":"'"$B1"'","review_head_sha":"'"$H"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-pe \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H"
+set_base "$B2"
+if emit "$B2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "reviewed base does not match the review row's pinned base" "$ERRFILE"
+test ! -e "$REVIEW"
+if emit "$B1" 2>"$ERRFILE"; then exit 1; fi
+grep -q "reviewed base does not match the dispatched base" "$ERRFILE"
+test ! -e "$REVIEW"
+set_base "$B1"
+emit "$B1"
+test -e "$REVIEW"
 SH
 
 check "reserve-dispatch: input and scope guards" <<'SH'
@@ -10243,6 +10581,215 @@ if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
    --pane-id pane2 --source-head-sha "$SHA40" --json '[]' 2>/dev/null; then exit 1; fi
 SH
 
+
+check "reserve-reprompt: appends a starting entry to the final bound row only" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rrp.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-rr \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+H64=$(printf 'b%.0s' $(seq 1 64))
+R1=$(printf '1%.0s' $(seq 1 32))
+R2=$(printf '2%.0s' $(seq 1 32))
+R3=$(printf '3%.0s' $(seq 1 32))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-rr.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+   --json '{"task_id":"td-rr","workers":[]}'
+rrp() { # launch pane expected-seq reservation [fence] [session]
+  _l=$1; _p=$2; _s=$3; _r=$4; _f=${5:-$lf}; _ses=${6:-S1}
+  CLAUDE_CONFIG_DIR="$root" $CLI reserve-reprompt \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session "$_ses" --fence "$_f" --binding "$bid" --task-id td-rr \
+    --launch-id "$_l" --phase implement --runtime claude --workspace-id w1 \
+    --pane-id "$_p" --source-head-sha "$SHA40" --prompt-sha256 "$H64" \
+    --expected-seq "$_s" --reservation-id "$_r"
+}
+reserve() {
+  CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+    --launch-id "$1" --phase implement --runtime claude --workspace-id w1 \
+    --pane-id "$2" --source-head-sha "$SHA40"
+}
+mark() { # reservation status
+  CLAUDE_CONFIG_DIR="$root" $CLI enrich-reprompt \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+    --launch-id "$3" --phase implement --runtime claude --workspace-id w1 \
+    --pane-id "$4" --source-head-sha "$SHA40" --reservation-id "$1" --status "$2"
+}
+reserve L1 pane1
+CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-rr \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"status":"launched"}'
+rrp L1 pane1 0 "$R1"
+python3 -c '
+import json, sys
+e = json.load(open(sys.argv[1]))["workers"][0]["reprompts"]
+assert len(e) == 1, e
+assert e[0]["status"] == "starting" and e[0]["seq"] == 0, e
+assert e[0]["reservation_id"] == sys.argv[2] and type(e[0]["started_ns"]) is int, e
+' "$TASK" "$R1"
+# Unresolved entry, stale expected-seq, reused reservation id, launcher fence.
+if rrp L1 pane1 1 "$R2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "unresolved" "$ERRFILE"
+mark "$R1" delivered L1 pane1
+if rrp L1 pane1 0 "$R2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "probe again" "$ERRFILE"
+if rrp L1 pane1 1 "$R1" 2>"$ERRFILE"; then exit 1; fi
+grep -q "already in use" "$ERRFILE"
+if rrp L1 pane1 1 "$R3" "$f" L1 2>"$ERRFILE"; then exit 1; fi
+grep -q "lead fence" "$ERRFILE"
+# Malformed reprompts and a non-launched status are refused.
+python3 - "$TASK" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["workers"][0]["reprompts"] = "oops"
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+if rrp L1 pane1 1 "$R3" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not a list of objects" "$ERRFILE"
+python3 - "$TASK" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["workers"][0]["reprompts"] = []
+rec["workers"][0]["status"] = "launch_failed"
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+if rrp L1 pane1 0 "$R3" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not a live launched" "$ERRFILE"
+python3 - "$TASK" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+rec["workers"][0]["status"] = "launched"
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+# A non-final identity is refused once a successor row exists.
+reserve L2 pane2
+if rrp L1 pane1 0 "$R3" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the final bound attempt" "$ERRFILE"
+SH
+
+check "enrich-reprompt: moves a starting entry once and replays idempotently" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-erp.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-er \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+H64=$(printf 'b%.0s' $(seq 1 64))
+R1=$(printf '1%.0s' $(seq 1 32))
+R9=$(printf '9%.0s' $(seq 1 32))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-er.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --json '{"task_id":"td-er","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"status":"launched"}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-reprompt \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --prompt-sha256 "$H64" \
+   --expected-seq 0 --reservation-id "$R1"
+erp() { # reservation status
+  CLAUDE_CONFIG_DIR="$root" $CLI enrich-reprompt \
+    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-er \
+    --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+    --pane-id pane1 --source-head-sha "$SHA40" --reservation-id "$1" --status "$2" ${3:+--prompt-state "$3"}
+}
+# A reservation id naming no entry is refused and nothing changes.
+cp "$TASK" "$TASK.before"
+if erp "$R9" delivered 2>"$ERRFILE"; then exit 1; fi
+grep -q "no reprompt entry" "$ERRFILE"
+cmp "$TASK" "$TASK.before"
+erp "$R1" delivered working
+python3 -c '
+import json, sys
+e = json.load(open(sys.argv[1]))["workers"][0]["reprompts"][0]
+assert e["status"] == "delivered" and e["prompt_state"] == "working", e
+' "$TASK"
+# Replaying the same outcome is a no-op; a different one is refused.
+cp "$TASK" "$TASK.before"
+erp "$R1" delivered working
+cmp "$TASK" "$TASK.before"
+if erp "$R1" uncertain 2>"$ERRFILE"; then exit 1; fi
+grep -q "not starting" "$ERRFILE"
+cmp "$TASK" "$TASK.before"
+if erp "$R1" bogus 2>"$ERRFILE"; then exit 1; fi
+SH
+
+check "enrich-dispatch: refuses the reprompts key" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-edr.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-dr \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-dr \
+   --json '{"task_id":"td-dr","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dr \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+for v in null '[]'; do
+  if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dr \
+     --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+     --pane-id pane1 --source-head-sha "$SHA40" --json "{\"reprompts\":$v}" 2>"$ERRFILE"; then exit 1; fi
+  grep -q "may not name reprompts" "$ERRFILE"
+done
+SH
+
+check "outstanding_descendants: a reprompt after the settlement keeps the pane outstanding" <<PY
+$LOAD
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = c.repo_dir("slug-rp"); base = rd / "leads" / "ldb-rp" / "tasks"
+base.mkdir(parents=True)
+ident = {"launch_id": "L1", "phase": "implement", "runtime": "claude",
+         "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40}
+def put(reprompts, ts="2026-01-01T00:00:10Z"):
+    row = dict(ident)
+    if reprompts is not None:
+        row["reprompts"] = reprompts
+    (base / "td-p.json").write_text(json.dumps({"task_id": "td-p", "workers": [row]}))
+    (base / "td-p.done.json").write_text(json.dumps({**ident, "ts": ts, "outcome": "completed"}))
+    return c.outstanding_descendants(rd, "ldb-rp")
+before = 1767225600 * 10**9   # 2026-01-01T00:00:00Z
+after = 1767225620 * 10**9    # 2026-01-01T00:00:20Z
+assert put(None) == [], "no reprompts key: unchanged"
+assert put([{"seq": 0, "started_ns": before, "status": "delivered"}]) == []
+assert put([{"seq": 0, "started_ns": after, "status": "delivered"}]) == ["p1"]
+assert put([{"seq": 0, "started_ns": before, "status": "starting"}]) == ["p1"]
+assert put([{"seq": 0, "started_ns": before, "status": "uncertain"}]) == ["p1"]
+assert put([{"seq": 0, "started_ns": after, "status": "failed"}]) == []
+assert put([{"seq": 0, "started_ns": before, "status": "delivered"}], ts="bad") == ["p1"]
+assert put([{"seq": 0, "started_ns": before, "status": "failed"}], ts="bad") == []
+assert put("oops") == [c.UNREADABLE_SENTINEL]
+assert put([1]) == [c.UNREADABLE_SENTINEL]
+sys.exit(0)
+PY
 
 check "teardown fail-open: settled I1, running I2, refused publication" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-failopen.git
@@ -11580,11 +12127,107 @@ printf '{"result":{"workspaces":[]}}' > "$root/w.json"
 printf '%s' '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"stopped","reason":"connect-failed","ts":1}}' > "$RD/workspaces/w1.wake.json"
 before=$(shasum "$RD/workspaces/w1.wake.json")
 $CLI checkin --repo-slug slug-x --session S --fence "$F" \
-    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=connect-failed'
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=connect-failed:stopped'
 [ "$before" = "$(shasum "$RD/workspaces/w1.wake.json")" ]
 rm "$RD/workspaces/w1.wake.json"
 $CLI checkin --repo-slug slug-x --session S --fence "$F" \
     --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=none'
+SH
+
+check "hook: a review-role Stop after a new ship report pushes one wake; a repeat Stop pushes none" <<'PY'
+import importlib.util as u, os, sys, io, json, tempfile
+root = os.path.realpath(tempfile.mkdtemp())
+os.environ.update({"CLAUDE_CONFIG_DIR": root, "HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1",
+                   "HERDR_COORDINATION_ROOT": os.path.realpath(tempfile.mkdtemp())})
+os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+s = u.spec_from_file_location("hook", "claude/hooks/herdr_worker_status.py")
+h = u.module_from_spec(s); s.loader.exec_module(h)
+rd = os.path.join(root, "herdr-orch", "slug-x")
+os.makedirs(rd + "/workspaces"); os.makedirs(rd + "/tasks")
+calls = []
+def fake_post(rd, ws, event, own_socket=""):
+    calls.append(event)
+    return "sent"
+h.core.post_wake = fake_post
+def stop():
+    sys.stdin = io.StringIO(json.dumps({"hook_event_name": "Stop"}))
+    assert h.main() == 0
+for ws, task, role, ev in (("w1", "PROJ-1", "review", "review-stopped"),
+                           ("w2", "PROJ-2", "impl", "stopped")):
+    os.environ["HERDR_WORKSPACE_ID"] = ws
+    json.dump({"task_id": task, "repo_slug": "slug-x", "role": role},
+              open(rd + "/workspaces/" + ws + ".json", "w"))
+    calls.clear()
+    stop(); assert calls == [], (role, calls)
+    open(rd + "/tasks/" + task + ".ship.md", "w").write("a")
+    stop(); assert calls == [ev], (role, calls)
+    stop(); assert calls == [ev], (role, calls)
+    open(rd + "/tasks/" + task + ".ship.md", "w").write("bb")
+    stop(); assert calls == [ev, ev], (role, calls)
+print("ok")
+PY
+
+check "backstop: an undelivered ship report signals; a delivered one does not" <<'PY'
+import importlib.util as u, os, sys, io, json, tempfile
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.realpath(tempfile.mkdtemp())
+s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = u.module_from_spec(s); s.loader.exec_module(c)
+rd = os.path.realpath(tempfile.mkdtemp())
+os.makedirs(rd + "/tasks"); os.makedirs(rd + "/workspaces")
+c.post_wake = lambda *a, **k: "sent"
+p = rd + "/tasks/PROJ-1.ship.md"
+open(p, "w").write("a")
+snap, _ = c.watch_scan(rd, {}, c.BACKSTOP_DIRS)
+assert p in snap, snap
+st = {"pending": {}}
+assert c.backstop_tick(st, {}, snap, c.delivered_records(rd), 1000.0, 120) is False
+assert c.backstop_tick(st, snap, snap, c.delivered_records(rd), 1120.0, 120) is True
+assert c.wake_for_event(rd, "w1", "PROJ-1", "review-stopped", now=2000.0) == "sent"
+st = {"pending": {}}
+assert c.backstop_tick(st, {}, snap, c.delivered_records(rd), 3000.0, 120) is False
+assert c.backstop_tick(st, snap, snap, c.delivered_records(rd), 9000.0, 120) is False
+print('ok')
+PY
+
+check "record sets: the hook, the backstop and the default watch share _RECORD_SUFFIXES" <<'PY'
+import importlib.util as u, os, sys, io, json, tempfile
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.realpath(tempfile.mkdtemp())
+s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = u.module_from_spec(s); s.loader.exec_module(c)
+rd = os.path.realpath(tempfile.mkdtemp())
+os.makedirs(rd + "/tasks"); os.makedirs(rd + "/workspaces")
+assert ".ship.md" in c._RECORD_SUFFIXES, c._RECORD_SUFFIXES
+back = {sfx for sfx, _ in c.BACKSTOP_DIRS["tasks"]}
+watch = {sfx for sfx, _ in c.WATCH_DIRS["tasks"]}
+assert back == set(c._RECORD_SUFFIXES), (back, c._RECORD_SUFFIXES)
+assert set(c._RECORD_SUFFIXES) <= watch and ".spend.jsonl" in watch, watch
+for name in ("PROJ-1.done.json", "PROJ-1.ship.md", "PROJ-2.ship.md"):
+    open(rd + "/tasks/" + name, "w").write("{}")
+fp = c.record_fingerprint(rd, "PROJ-1")
+assert sorted(fp) == [rd + "/tasks/PROJ-1.done.json", rd + "/tasks/PROJ-1.ship.md"], fp
+print('ok')
+PY
+
+check "checkin: wake= names an unsent record over an older delivery" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/workspaces" "$RD/tasks"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"in-progress","base_sha":"'"$BASE"'","workers":[{"phase":"implement","workspace_id":"w1"}]}'
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf 'report\n' > "$RD/tasks/PROJ-1.ship.md"
+printf '%s' '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"review-stopped","reason":"sent","ts":1}}' > "$RD/workspaces/w1.wake.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json" || true)
+printf '%s\n' "$out" | grep '^PROJ-1 ' | grep -q ' wake=unsent:ship.md'
+if printf '%s\n' "$out" | grep '^PROJ-1 ' | grep -q ' wake=sent'; then echo "stale sent shown"; exit 1; fi
+pair=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print("[%d,%d]" % (s.st_mtime_ns, s.st_size))' "$RD/tasks/PROJ-1.ship.md")
+printf '{"v":2,"records":{"%s":%s},"last_push":{},"last_delivery":{"event":"review-stopped","reason":"sent","ts":1}}' "$RD/tasks/PROJ-1.ship.md" "$pair" > "$RD/workspaces/w1.wake.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json" || true)
+printf '%s\n' "$out" | grep '^PROJ-1 ' | grep -q ' wake=sent:review-stopped'
+echo ok
 SH
 
 check "checkin: unverifiable review findings are reported, then clear on byte-identical restore" <<'SH'
@@ -12028,7 +12671,7 @@ for phrase in ("post all", "post <hash>", "typed go", "the go is a typed"):
 for name, text in (("herdr", herdr), ("director", director)):
     assert "prose ask" not in text and "asks once in prose" not in text, name
 for name, text in (("herdr", herdr), ("co-review", cc), ("codex co-review", cx)):
-    assert "Post draft <hash>" in text and "Skip draft <hash>" in text, name
+    assert "(draft <hash>)" in text and "(skip draft <hash>)" in text, name
 assert "AskUserQuestion" in director
 for token in ("Answers are not stored", "post gate:", "update --ai"):
     assert token in herdr, token
@@ -12039,7 +12682,7 @@ assert "Resolved by <PR URL>" in section(pm, "## Step 4", "## Step 5")
 assert "<owner>/<repo>/pull/<n>" in section(pm, "## Step 4", "## Step 5")
 assert "AskUserQuestion" in section(voice, "3. Ask", "4. Apply")
 assert "AskUserQuestion" in ops
-assert "Post draft <hash>" in layout
+assert "(draft <hash>)" in layout and "(skip draft <hash>)" in layout
 PY
 
 check "brief template keeps the turn alive on long runs" <<'PY'
@@ -12055,7 +12698,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 586
+assert t.count("\n") <= 591
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -12094,14 +12737,14 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 586
+assert t.count("\n") <= 591
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
 $LOAD
 t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
 blocks = c.brief_blocks(t)
-need = {"lessons", "opt-in-granted", "opt-in-withheld", "ship-tier-full", "ship-tier-delta"}
+need = {"lessons", "opt-in-granted", "opt-in-withheld", "ship-tier-full", "ship-tier-auto", "ship-tier-delta"}
 for spec in c.BRIEF_PHASES.values():
     need.update(spec["blocks"])
     need.add(spec["lessons"])
@@ -12265,7 +12908,17 @@ out, brief = rendered("--phase", "ship", "--focus-file", focus)
 common("ship", out, brief)
 assert out["agent"] not in brief and c.valid_task_id(out["agent"])
 assert re.search(r"Live base: origin/main @ " + C, brief) and re.search(r"Task base: origin/main @ " + A, brief)
-assert "herdr-ship-brief: stop-after-gate" in brief and "herdr-ship-brief: tier=full" in brief
+assert "herdr-ship-brief: stop-after-gate" in brief and "herdr-ship-brief: tier=auto" in brief
+assert "herdr-ship-small-caps: 3/40" in brief and "tier=full" not in brief
+out, forced = rendered("--phase", "ship", "--focus-file", focus, "--tier", "full")
+assert "herdr-ship-brief: tier=full" in forced and "tier=auto" not in forced
+cfg = os.path.join(rd, "config.json")
+open(cfg, "w").write('{"v":1,"ship":{"small":{"max_files":2,"max_lines":20,"sensitive_paths":["infra/"]}}}')
+out, tuned = rendered("--phase", "ship", "--focus-file", focus)
+assert "herdr-ship-small-caps: 2/20" in tuned and "herdr-ship-small-sensitive: infra/" in tuned
+open(cfg, "w").write('{"v":1,"ship":{"small":{"max_files":9}}}')
+assert render("--phase", "ship", "--focus-file", focus).returncode == 2
+os.remove(cfg)
 assert "#77" in brief and "acme/widget" in brief and "ship.json" in brief
 assert os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") in brief
 assert "[td-render-x ship]" in brief and focus_text in brief
@@ -12284,8 +12937,10 @@ flat = " ".join(brief.split())
 launch_dir = os.path.join(rd, "artifacts", "td-render-x", "ship-<launch_id>") + "/"
 ship_report = os.path.join(rd, "tasks", "td-render-x.ship.md")
 assert f"set co-review's `RUN_DIR` to `{launch_dir}run`" in flat, flat
-assert ("`report_path` is the gate's `run/report.json` inside the launch directory and "
-        f"`expected_path` its `run/expected.json`, never `{ship_report}`.") in flat, flat
+assert (f"`report_path` is `{launch_dir}run/report.json` and `expected_path` is "
+        f"`{launch_dir}run/expected.json`, both absolute; never `{ship_report}`.") in flat, flat
+assert f"set co-review's `RUN_DIR` to `{launch_dir}run` and `EXPECTED_IDENTITY` to `{launch_dir}run/expected.json`" in flat, flat
+assert "gate_report.py ci-capture" in flat and "--json headRefOid,statusCheckRollup" not in flat, flat
 PY
 
 check "render-brief: ship refuses without a PR, on a moved head, or delta without a handoff" <<'PY'
@@ -12314,7 +12969,7 @@ header_fixture() {
     f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session S --host h --pid 1)
     SHA40=$(printf 'a%.0s' $(seq 1 40))
     CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug "$LF_SLUG" --session S --fence "$f" --task-id td-h \
-      --json '{"task_id":"td-h","base_sha":"'"$SHA40"'","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'"}]}'
+      --json '{"task_id":"td-h","base_sha":"'"$SHA40"'","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'"}]}'
     FR="$root/herdr-orch/$LF_SLUG/artifacts/td-h/review-L2/findings.md"
     mkdir -p "$(dirname "$FR")"
     REVIEW_JSON="$root/herdr-orch/$LF_SLUG/tasks/td-h.review.json"
@@ -12694,7 +13349,11 @@ assert c.next_line({}, facts, ctx) == ("  next: ask Review at abcdef0 requested 
 facts.update(action="paused", head=None)
 assert c.next_line({}, facts, ctx) == "  next: ask Attempt paused at unknown: relaunch, re-brief, or stop?"
 facts["action"] = "dispatch-review"
-assert c.next_line({}, facts, ctx) == "  next: read SKILL.md section 5"
+assert c.next_line({}, facts, ctx) == ("  next: read SKILL.md section 5: write the focus file, "
+                                       "then dispatch-gate --phase review"), c.next_line({}, facts, ctx)
+facts["action"] = "ship"
+assert c.next_line({}, facts, ctx) == ("  next: read SKILL.md section 6 ship step: merge-ready, "
+                                       "then dispatch-gate --phase ship"), c.next_line({}, facts, ctx)
 PY
 
 check "next: output is checkin output plus next lines" <<'PY'

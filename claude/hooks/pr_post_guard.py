@@ -23,11 +23,15 @@ a `draft` CLI:
   hash of its argv, the bytes it reads and where it lands, with the text
   it prints.
 - PostToolUse AskUserQuestion approves a pending draft when the chosen
-  option is `Post draft <hash>` and the draft's text is in that question;
-  `Skip draft <hash>` dismisses it or withdraws its
-  unspent approval. Typed prompts never approve.
+  option reads as a post and names `draft <hash>`, and the draft's text is
+  in that question; an option that reads as a skip (`skip draft <hash>`)
+  dismisses it or withdraws its unspent approval. Typed prompts never
+  approve.
 - UserPromptSubmit records which session this Claude process is on for the
   shim, removes legacy files and prunes old state.
+- PreToolUse AskUserQuestion refuses a prompt whose post option names an
+  unregistered draft or one whose text is not in the question, or whose
+  decision label is ambiguous, before the owner answers it.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
   shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv,
   reads the PR author, decides the audience and spends one approved draft
@@ -58,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -67,9 +72,22 @@ from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
-# The owner's answer to a post prompt (spec R2): `Post draft <hash>` approves
-# that draft, `Skip draft <hash>` dismisses it; the tool may add the suffix.
-DECISION_RE = re.compile(r"(Post|Skip) draft ([0-9a-f]{8})( \(Recommended\))?")
+# The owner's answer to a post prompt: a label naming `draft <hash>` decides
+# that draft. A post label starts with `Post` plus whitespace, or `(` then
+# `Post`; any other leading word ("Hold off on post draft h") is not a post.
+# A skip is the leading `Skip` or `skip draft h` ("Leave it (skip draft h)").
+DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
+LEAD_VERB_RE = re.compile(r"\s*\(?(post|skip)(?=\s)", re.IGNORECASE)
+LEAD_PUNCT_POST_RE = re.compile(r"\s*\(?post(?=[^\w\s])", re.IGNORECASE)
+# A negation makes the verb unreliable ("Post nothing (draft h)"): fail closed.
+NEGATION_RE = re.compile(r"\b(?:not|never|no|none|nothing|nobody|neither|nor|zero|without|cannot)\b|n't\b", re.IGNORECASE)
+# A conditional, deferred or hedged post ("Post after CI passes") is no go: fail closed.
+HEDGE_RE = re.compile(
+    r"(?<![\w-])(?:if|unless|after|until|later|wait|hold|or|maybe|but|only|again|for now)(?![\w-])"
+    r"|\?|--|[\u2010-\u2015\u2212]|\s-\s",
+    re.IGNORECASE,
+)
+HASH_WORD_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{8}(?![0-9A-Za-z])", re.IGNORECASE)
 
 # GitHub sends no notification for a mention inside code.
 FENCED_CODE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
@@ -385,7 +403,11 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
-    "`Post draft <hash>` and `Skip draft <hash>`, the full draft text in the question "
+    "that read as the action: a post starts with `Post` plus a space and ends with `(draft <hash>)` "
+    "(or is `Post draft <hash>`), with exactly one hash and none of "
+    "not/no/never/nothing/without/n't or if/unless/after/until/later/wait/hold/or/maybe/but/only/again/for now, "
+    "a `?` or a dash aside, and a skip ends with "
+    "`(skip draft <hash>)`, the full draft text in the question "
     "(an option preview is clipped by the terminal and never counts). "
     "Post only after the answer approves it.\n"
     "An answer that printed no `post gate:` line means the answer hook is not active "
@@ -943,17 +965,19 @@ def shown(text, question: str) -> bool:
     return len(question) <= SHOWN_LIMIT and " ".join(text.split()) in " ".join(question.split())
 
 
-def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
-    """Approve a pending draft the owner chose to post (spec R3 step 5);
-    returns the context line."""
-    pending = draft_path(directory, sid, digest, "pending")
-    if not pending.exists():
+def approval_problem(directory: Path, sid: str, digest: str, question: str) -> str | None:
+    """Why choosing the post option for `draft <digest>` on `question` cannot approve the
+    draft now; None when it can. Shared by the answer and the pre-check."""
+    if not draft_path(directory, sid, digest, "pending").exists():
         if draft_path(directory, sid, digest, "approved").exists():
             return f"draft {digest} already approved; post it"
         if draft_path(directory, sid, digest, "spent").exists():
             return f"draft {digest} already posted once; read the PR, then register it again to post again"
-        return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
-    record = read_json(pending)
+        return (
+            f"draft {digest} not approved: no pending draft in this session; "
+            f"register it first with `{DRAFT_COMMAND} <args>`, then ask again"
+        )
+    record = read_json(draft_path(directory, sid, digest, "pending"))
     if (
         not isinstance(record, dict) or record.get("v") != 3 or "text" not in record
         or not (record["text"] is None or isinstance(record["text"], str))
@@ -970,9 +994,25 @@ def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
                 f"draft {digest} not approved: the question is over {SHOWN_LIMIT} characters, "
                 "more than a prompt displays; shorten it"
             )
-        return f"draft {digest} not approved: its text was not in the question"
+        return (
+            f"draft {digest} not approved: its text was not in the question; "
+            "put the full draft text in the question body, not the option preview"
+        )
+    return None
+
+
+def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
+    """Approve a pending draft the owner chose to post (spec R3 step 5);
+    returns the context line."""
+    problem = approval_problem(directory, sid, digest, question)
+    if problem:
+        return problem
+    pending = draft_path(directory, sid, digest, "pending")
     if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):
-        return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
+        return (
+            f"draft {digest} not approved: no pending draft in this session; "
+            f"register it first with `{DRAFT_COMMAND} <args>`, then ask again"
+        )
     return f"approved draft {digest}"
 
 
@@ -987,6 +1027,48 @@ def dismiss_draft(directory: Path, sid: str, digest: str) -> str:
     if draft_path(directory, sid, digest, "spent").exists():
         return f"draft {digest} not skipped: already posted; read the PR"
     return f"draft {digest} skipped (nothing to withdraw)"
+
+
+APOSTROPHES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
+
+
+def normalize_label(label: str) -> str:
+    """NFKC-fold a label and map typographic apostrophes to ASCII."""
+    return unicodedata.normalize("NFKC", label).translate(APOSTROPHES)
+
+
+def label_decision(label: str) -> tuple[str | None, list[str]] | None:
+    """(verb, digests) for a label naming a draft, None for any other label;
+    verb is "Post" or "Skip", or None when the label is ambiguous."""
+    label = normalize_label(label)
+    tokens = list(DRAFT_TOKEN_RE.finditer(label))
+    if not tokens:
+        return None
+    digests = list(dict.fromkeys(hit.group(2) for hit in tokens))
+    hashes = {hit.lower() for hit in HASH_WORD_RE.findall(label)}
+    signals = {hit.group(1).lower() for hit in tokens if hit.group(1)}
+    lead = LEAD_VERB_RE.match(label)
+    lead_verb = lead.group(1).lower() if lead else None
+    if lead_verb:
+        signals.add(lead_verb)
+    if "post" in signals and lead_verb != "post":
+        return None, digests
+    if len(digests) != 1 or len(hashes) != 1 or len(signals) != 1 or NEGATION_RE.search(label):
+        return None, digests
+    if lead_verb == "post" and HEDGE_RE.search(label):
+        return None, digests
+    return signals.pop().capitalize(), digests
+
+
+def decision_labels(options: list) -> list[tuple[dict, str | None, list[str]]]:
+    """(option, verb, digests) for each option label naming a draft."""
+    named = []
+    for option in options:
+        label = option.get("label") if isinstance(option, dict) else None
+        decision = label_decision(label) if isinstance(label, str) else None
+        if decision:
+            named.append((option, *decision))
+    return named
 
 
 def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
@@ -1008,26 +1090,23 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
             continue
         text = question.get("question") if isinstance(question.get("question"), str) else ""
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        named = []
-        for option in options:
-            label = option.get("label") if isinstance(option, dict) else None
-            hit = DECISION_RE.fullmatch(label) if isinstance(label, str) else None
-            if hit:
-                named.append((option, hit))
+        named = decision_labels(options)
         if not named:
             continue
         why = stale
-        if not why and len({hit.group(2) for _option, hit in named}) > 1:
+        if not why and len({digest for _option, _verb, digests in named for digest in digests}) > 1:
             why = "the question names more than one draft"
         if not why and question.get("multiSelect"):
             why = "a multi-select question cannot approve"
-        chosen = next((pair for pair in named if pair[0]["label"] == answers.get(text)), None)
+        chosen = next((entry for entry in named if entry[0]["label"] == answers.get(text)), None)
+        if chosen and not why and chosen[1] is None:
+            why = "the chosen option label is ambiguous"
         if chosen and not why:
-            _option, hit = chosen
-            found.append((hit.group(1), hit.group(2), text, None))
+            _option, verb, digests = chosen
+            found.append((verb, digests[0], text, None))
             continue
         why = why or "no Post or Skip option was chosen"
-        for digest in dict.fromkeys(hit.group(2) for _option, hit in named):
+        for digest in dict.fromkeys(d for _option, _verb, digests in named for d in digests):
             found.append(("", digest, text, why))
     return found
 
@@ -1189,6 +1268,62 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
     return check_replies(kinds, sid, directory)
 
 
+def handle_ask(payload: dict, directory: Path) -> str | None:
+    """Refuse an AskUserQuestion whose post option could not approve its
+    draft, or whose decision label is ambiguous, before the owner spends an
+    answer on it. Read-only."""
+    sid = payload.get("session_id")
+    tool_input = payload.get("tool_input")
+    if not isinstance(sid, str) or not SID_RE.fullmatch(sid) or not isinstance(tool_input, dict):
+        return None
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list):
+        return None
+    problems = {}
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        text = question.get("question") if isinstance(question.get("question"), str) else ""
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        for option, verb, digests in decision_labels(options):
+            if verb is None:
+                if NEGATION_RE.search(normalize_label(option["label"])):
+                    fix = "avoid not/no/none/never/nothing/nobody/neither/nor/zero/without/cannot/n't anywhere in the label"
+                elif LEAD_VERB_RE.match(normalize_label(option["label"])) and HEDGE_RE.search(normalize_label(option["label"])):
+                    fix = (
+                        "a post label must be a plain statement: avoid if/unless/after/until/later/wait/"
+                        "hold/or/maybe/but/only/again/for now, a question mark, and a dash-separated aside"
+                    )
+                elif LEAD_PUNCT_POST_RE.match(normalize_label(option["label"])):
+                    fix = (
+                        "`Post` must be followed by a space, not punctuation or a dash "
+                        "(`Post the reply (draft <hash>)`)"
+                    )
+                else:
+                    fix = (
+                        "a post option must start with `Post` plus a space, or `(Post`; "
+                        "any other leading word is a refusal. Write `(skip draft <hash>)` "
+                        "in a skip option, and name exactly one draft hash"
+                    )
+                problems[("ambiguous", option["label"], text)] = (
+                    f"option `{option['label']}` is ambiguous: {fix}"
+                )
+                continue
+            digest = digests[0]
+            if verb != "Post" or draft_path(directory, sid, digest, "approved").exists():
+                continue
+            problem = approval_problem(directory, sid, digest, text)
+            if problem:
+                problems[(digest, text)] = problem
+    if not problems:
+        return None
+    return (
+        "Blocked: this prompt cannot approve its post, so it was not shown.\n"
+        + "\n".join(problems.values())
+        + "\nFix the prompt and ask again."
+    )
+
+
 def main() -> int:
     if os.environ.get("HERDR_ENV") != "1":
         return 0
@@ -1205,7 +1340,10 @@ def main() -> int:
         handle_prompt(payload, directory, now)
         return 0
     if event == "PreToolUse":
-        reason = handle_pretooluse(payload, directory, now)
+        if payload.get("tool_name") == "AskUserQuestion":
+            reason = handle_ask(payload, directory)
+        else:
+            reason = handle_pretooluse(payload, directory, now)
         if reason:
             print(reason, file=sys.stderr)
             return 2

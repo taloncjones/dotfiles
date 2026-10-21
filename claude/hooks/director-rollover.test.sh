@@ -1126,6 +1126,216 @@ assert c.rollover_launch("work") == "director 'resume director'"
 PY
 SH
 
+check "rollover_launch: adds quoted --model and --effort after the account flag" <<'SH'
+python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+r = c.rollover_launch
+assert r("work", "claude-opus-5-5", "high") == "director --model claude-opus-5-5 --effort high 'resume director'"
+assert r("personal", "fable[1m]", "max") == "director --personal --model 'fable[1m]' --effort max 'resume director'"
+assert r("work", "opus", None) == "director --model opus 'resume director'"
+assert r("work", None, "low") == "director --effort low 'resume director'"
+assert r("work") == "director 'resume director'"
+PY
+SH
+
+check "recorded_launch_profile: returns valid recorded values and refuses unsafe or foreign ones" <<'SH'
+python3 - <<'PY'
+import json, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+sid = "11111111-1111-4111-8111-111111111111"
+d = c.context_dir()
+d.mkdir(parents=True, exist_ok=True)
+def put(rec):
+    (d / f"{sid}.json").write_text(json.dumps(rec))
+base = {"v": 1, "session_id": sid, "used_pct": 10, "ts": 1}
+put({**base, "model": "claude-opus-5-5", "effort": "high"})
+assert c.recorded_launch_profile(sid) == ("claude-opus-5-5", "high")
+put({**base, "model": "claude-fable-5-1[1m]", "effort": "xhigh"})
+assert c.recorded_launch_profile(sid) == ("claude-fable-5-1[1m]", "xhigh")
+put({**base, "model": "opus; rm -rf /", "effort": "turbo"})
+assert c.recorded_launch_profile(sid) == (None, None)
+put({**base, "model": "gpt-5", "effort": 3})
+assert c.recorded_launch_profile(sid) == (None, None)
+put({**base, "session_id": "other", "model": "opus", "effort": "low"})
+assert c.recorded_launch_profile(sid) == (None, None)
+put({**base, "model": "opus"})
+assert c.recorded_launch_profile(sid) == ("opus", None)
+(d / f"{sid}.json").write_text("x" * 5000)
+assert c.recorded_launch_profile(sid) == (None, None)
+(d / f"{sid}.json").unlink()
+(d / f"{sid}.json.99.tmp").write_text(json.dumps({**base, "model": "haiku", "effort": "low"}))
+assert c.recorded_launch_profile(sid) == (None, None)
+assert c.recorded_launch_profile("../x") == (None, None)
+PY
+SH
+
+check "rollover: types the recorded model and effort into the new pane" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+mkdir -p "$CLAUDE_CONFIG_DIR/herdr-orch/context"
+printf '{"v":1,"session_id":"11111111-1111-4111-8111-111111111111","used_pct":50,"ts":1,"model":"claude-opus-5-5","effort":"high"}\n' \
+    > "$CLAUDE_CONFIG_DIR/herdr-orch/context/11111111-1111-4111-8111-111111111111.json"
+sleep 60 & NEW=$!
+cat > "$FX/on-run" <<EOF
+HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=\$(cat "$FX/token") $CORE adopt-rollover --repo-path "$FX_REPO" \
+    --session 22222222-2222-4222-8222-222222222222 --messaging-socket /tmp/cc-socks/$NEW.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" \
+    --ack-secs 20 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+kill $NEW
+test "$rc" = 0
+grep -qxF "pane run w9:p2 director --model claude-opus-5-5 --effort high 'resume director'" "$FX/herdr.log"
+! grep -q 'WARNING. rollover: no recorded' "$FX/o"
+SH
+
+check "rollover: with no recorded model or effort, launches as before and warns" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+sleep 60 & NEW=$!
+cat > "$FX/on-run" <<EOF
+HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=\$(cat "$FX/token") $CORE adopt-rollover --repo-path "$FX_REPO" \
+    --session 22222222-2222-4222-8222-222222222222 --messaging-socket /tmp/cc-socks/$NEW.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" \
+    --ack-secs 20 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+kill $NEW
+test "$rc" = 0
+grep -qxF "pane run w9:p2 director 'resume director'" "$FX/herdr.log"
+grep -qxF '[WARNING] rollover: no recorded model for this session; the new director starts on the account default model' "$FX/o"
+grep -qxF '[WARNING] rollover: no recorded effort for this session; the new director starts on the account default effort' "$FX/o"
+SH
+
+check "rollover: an unsafe recorded model is dropped with the model warning" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+mkdir -p "$CLAUDE_CONFIG_DIR/herdr-orch/context"
+printf '{"v":1,"session_id":"11111111-1111-4111-8111-111111111111","used_pct":50,"ts":1,"model":"opus;touch x","effort":"high"}\n' \
+    > "$CLAUDE_CONFIG_DIR/herdr-orch/context/11111111-1111-4111-8111-111111111111.json"
+sleep 60 & NEW=$!
+cat > "$FX/on-run" <<EOF
+HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=\$(cat "$FX/token") $CORE adopt-rollover --repo-path "$FX_REPO" \
+    --session 22222222-2222-4222-8222-222222222222 --messaging-socket /tmp/cc-socks/$NEW.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" \
+    --ack-secs 20 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+kill $NEW
+test "$rc" = 0
+grep -qxF "pane run w9:p2 director --effort high 'resume director'" "$FX/herdr.log"
+grep -qxF '[WARNING] rollover: no recorded model for this session; the new director starts on the account default model' "$FX/o"
+! grep -q 'no recorded effort' "$FX/o"
+SH
+
+check "statusline: records the host model and effort beside the context fill" <<'SH'
+node - <<'JS'
+const fs = require("fs"), path = require("path");
+const sl = require(process.env.REPO_ROOT + "/claude/statusline.js");
+const dir = process.env.FX + "/cfg2";
+const sid = "11111111-1111-4111-8111-111111111111";
+const env = { HERDR_ENV: "1", CLAUDE_CONFIG_DIR: dir };
+const read = () => JSON.parse(fs.readFileSync(path.join(dir, "herdr-orch/context", sid + ".json"), "utf8"));
+const cw = (size) => ({ remaining_percentage: 60, context_window_size: size });
+sl.recordContext({ session_id: sid, model: { id: "claude-opus-5-5" }, effort: { level: "high" }, context_window: cw(200000) }, env, 1);
+let r = read();
+if (r.model !== "claude-opus-5-5" || r.effort !== "high" || r.v !== 1 || r.used_pct === undefined) throw new Error(JSON.stringify(r));
+sl.recordContext({ session_id: sid, model: { id: "claude-fable-5-1" }, effort: { level: "max" }, context_window: cw(1000000) }, env, 1);
+if (read().model !== "claude-fable-5-1[1m]") throw new Error("1m suffix missing: " + read().model);
+sl.recordContext({ session_id: sid, model: { id: "claude-fable-5-1[1m]" }, context_window: cw(1000000) }, env, 1);
+r = read();
+if (r.model !== "claude-fable-5-1[1m]" || "effort" in r) throw new Error(JSON.stringify(r));
+sl.recordContext({ session_id: sid, model: { id: "x".repeat(65) }, effort: { level: "y".repeat(17) }, context_window: cw(200000) }, env, 1);
+r = read();
+if ("model" in r || "effort" in r) throw new Error(JSON.stringify(r));
+JS
+SH
+
+# The host-sleep note cases run the hook copy against a fake core whose exit
+# code (FAKE_RC) and decisions output (FAKE_DEC) the case sets.
+HOOK_FAKE_CORE='import os, sys
+if sys.argv[1] == "decisions":
+    if os.environ.get("FAKE_DEC"):
+        print("[INFO] herdr decisions: fake")
+    sys.exit(0 if os.environ.get("FAKE_DEC") else 3)
+rc = int(os.environ["FAKE_RC"])
+if rc == 0:
+    print("[INFO] herdr director rollover: fake")
+if rc == 1:
+    print("[WARNING] herdr director rollover: fake BUSY")
+sys.exit(rc)'
+export HOOK_FAKE_CORE
+
+check "hook: host-sleep note follows the lease block on clear and compact, before decisions" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+mkdir -p "$FX/h"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/h/"
+printf '%s\n' "$HOOK_FAKE_CORE" > "$FX/h/herdr_orch_core.py"
+p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$1" "$FX_REPO"; }
+h() { HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock python3 "$FX/h/director_rollover.py"; }
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+for src in clear compact; do
+    p $src | FAKE_RC=0 FAKE_DEC=1 h | ctx > "$FX/c.$src"
+    a=$(grep -n 'herdr director rollover: fake' "$FX/c.$src" | cut -d: -f1)
+    b=$(grep -n '^\[INFO\] host sleep:' "$FX/c.$src" | cut -d: -f1)
+    c=$(grep -n 'herdr decisions: fake' "$FX/c.$src" | cut -d: -f1)
+    test "$a" -lt "$b"
+    test "$b" -lt "$c"
+    grep -q 'kern.waketime' "$FX/c.$src"
+    grep -q 'started_ns' "$FX/c.$src"
+    grep -q 'section 6a step 0' "$FX/c.$src"
+done
+SH
+
+check "hook: host-sleep note follows adopt-rollover exit 0 on a token startup" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+mkdir -p "$FX/h"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/h/"
+printf '%s\n' "$HOOK_FAKE_CORE" > "$FX/h/herdr_orch_core.py"
+p() { printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO"; }
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+p | HERDR_ROLLOVER_TOKEN=tok FAKE_RC=0 HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock \
+    python3 "$FX/h/director_rollover.py" | ctx > "$FX/c"
+grep -q '^\[INFO\] host sleep:' "$FX/c"
+SH
+
+check "hook: no host-sleep note without a lease exit 0" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
+mkdir -p "$FX/h"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/h/"
+printf '%s\n' "$HOOK_FAKE_CORE" > "$FX/h/herdr_orch_core.py"
+p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"%s","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$1" "$2" "$FX_REPO"; }
+h() { HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock python3 "$FX/h/director_rollover.py"; }
+ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+absent() { if grep -q 'host sleep' "$1"; then echo "unexpected note in $1"; exit 1; fi; }
+p clear director | FAKE_RC=1 FAKE_DEC=1 h | ctx > "$FX/busy"
+grep -q 'fake BUSY' "$FX/busy"
+grep -q 'herdr decisions: fake' "$FX/busy"
+absent "$FX/busy"
+p clear director | FAKE_RC=2 h | ctx > "$FX/err"
+grep -q 'lease NOT re-established' "$FX/err"
+absent "$FX/err"
+test -z "$(p clear director | FAKE_RC=3 h)"
+p startup director | HERDR_ROLLOVER_TOKEN=tok FAKE_RC=1 h | ctx > "$FX/rb"
+grep -q 'fake BUSY' "$FX/rb"
+absent "$FX/rb"
+for src in startup resume; do
+    p $src director | FAKE_RC=0 FAKE_DEC=1 h | ctx > "$FX/n.$src"
+    grep -q 'herdr decisions: fake' "$FX/n.$src"
+    absent "$FX/n.$src"
+done
+test -z "$(p compact worker | FAKE_RC=0 h)"
+SH
+
 check "hook: silent on every gate failure" <<'SH'
 export PATH="$ARMED_GH_BIN:$PATH"
 H="python3 $REPO_ROOT/claude/hooks/director_rollover.py"
@@ -1423,6 +1633,57 @@ test -z "$(find "$FX" -name decisions.jsonl -type f)"
 $CORE note-decision $A --repo-wide --text "$(python3 -c 'print("x" * 500)')" >/dev/null
 $CORE note-decision $A --task never-recorded --text ok >/dev/null
 test "$(wc -l < "$(find "$FX" -name decisions.jsonl -type f)")" -eq 2
+SH
+
+check "queue: set-queue writes the ordered todos and an empty call clears them" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+mkdir -p "$FX_REPO/.todos/pending"
+printf -- '---\ntitle: one\n---\n' > "$FX_REPO/.todos/pending/2026-10-21-one.md"
+printf -- '---\ntitle: two\n---\n' > "$FX_REPO/.todos/pending/2026-10-21-two.md"
+out=$($CORE set-queue $A --todo 2026-10-21-two --todo 2026-10-21-one)
+test "$out" = "queue: 2 todos"
+Q=$(find "$FX" -name queue.json -type f)
+test -n "$Q"
+python3 - "$Q" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert set(rec) == {"v", "todos", "ts", "session", "fence"}, rec
+assert rec["v"] == 1 and rec["todos"] == ["2026-10-21-two", "2026-10-21-one"], rec
+PY
+test "$($CORE set-queue $A)" = "queue: 0 todos"
+python3 - "$Q" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["todos"] == []
+PY
+SH
+
+check "queue: set-queue refuses a stale fence, a duplicate, a non-pending todo and an eleventh todo" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1"
+mkdir -p "$FX_REPO/.todos/pending"
+for i in 1 2 3 4 5 6 7 8 9 10 11; do
+    printf -- '---\ntitle: t\n---\n' > "$FX_REPO/.todos/pending/todo-$i.md"
+done
+$CORE set-queue $A --fence "$F" --todo todo-1 >/dev/null
+Q=$(find "$FX" -name queue.json -type f)
+cp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence $((F + 7)) --todo todo-2 >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --session 33333333-3333-4333-8333-333333333333 --fence "$F" --todo todo-2 >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence "$F" --todo todo-2 --todo todo-2 >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence "$F" --todo ../x >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence "$F" --todo no-such-todo >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+eleven=""
+for i in 1 2 3 4 5 6 7 8 9 10 11; do eleven="$eleven --todo todo-$i"; done
+if $CORE set-queue $A --fence "$F" $eleven >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
 SH
 
 check "decisions: retire-decision hides the entry, repeats are no-ops, unknown id refused" <<'SH'

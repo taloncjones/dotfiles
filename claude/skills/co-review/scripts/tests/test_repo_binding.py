@@ -221,6 +221,20 @@ class SshHost(unittest.TestCase):
         self.assertEqual(seen["cmd"][seen["cmd"].index("-p") + 1], "2222")
         self.assertEqual(seen["cmd"][-1], "github.com")
 
+    def test_passes_timeout(self):
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(kw["timeout"])
+            class R:
+                returncode = 0
+                stdout = "hostname github.com\n"
+            return R()
+
+        rb.ssh_host("X", runner=fake_run)
+        rb.ssh_host("X", runner=fake_run, timeout=5)
+        self.assertEqual(seen, [10, 5])
+
 
 class ResolverParams(unittest.TestCase):
     def test_ssh_resolver_receives_user_and_port(self):

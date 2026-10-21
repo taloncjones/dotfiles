@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -18,12 +19,13 @@ LIGHT_SEATS = ("codex", "verifier")
 FULL_SEATS = ("claude", "codex", "breaker", "verifier")
 DELTA_SEATS = ("claude", "verifier")
 LESSONS_SEATS = ("verifier",)
+SMALL_SEATS = ("codex", "verifier")
 _TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS, "delta": DELTA_SEATS,
-               "lessons": LESSONS_SEATS}
+               "lessons": LESSONS_SEATS, "small": SMALL_SEATS}
 _CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker"), "delta": (),
-                "lessons": ()}
+                "lessons": (), "small": ("codex",)}
 # A light gate may review a lessons-only diff; it is the stronger gate.
-_DIFF_CLASSES = {"light": ("light", "lessons"), "lessons": ("lessons",)}
+_DIFF_CLASSES = {"light": ("light", "lessons"), "lessons": ("lessons",), "small": ("small",)}
 DELTA_MAX_FILES = 5
 DELTA_MAX_LINES = 150
 _BLAST_RADIUS = ("bounded", "unbounded")
@@ -57,6 +59,12 @@ _CHECKLIST = (
 )
 _SEVERITIES = {"critical", "high", "major", "minor", "low", "nit", "advisory"}
 _MATERIAL = {"critical", "high", "major"}
+_DISPOSITIONS = {"confirmed", "refuted", "unresolved"}
+_SEAT_VERDICTS = {"APPROVE", "CHANGES", "INCOMPLETE"}
+SEAT_REPORT_FENCE = "co-review-seat"
+SEAT_REPORT_KEYS = ("seat", "verdict", "findings", "coverage", "tests")
+_SEAT_BLOCK_RE = re.compile(
+    r"^```" + SEAT_REPORT_FENCE + r"[ \t]*\n(.*?)\n```[ \t]*$", re.M | re.S)
 
 
 def _load_sibling(name: str):
@@ -93,30 +101,102 @@ def _sha(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA_RE.fullmatch(value))
 
 
-def _seat_content_ok(content: bytes, artifact: str, name: str, reasons: list[str]) -> None:
-    """Refuse a failed runner result or a usage-limit refusal; .json means runner JSON."""
+def _seat_content_ok(content: bytes, artifact: str, name: str, reasons: list[str]) -> str | None:
+    """Refuse a failed runner result or a usage-limit refusal; .json means runner JSON.
+
+    Returns the seat's report text (runner result, or the file) for the block parse.
+    """
     refusal = _load_runner().usage_limit_refusal
     if not artifact.endswith(".json"):
-        if refusal(content.decode("utf-8", errors="replace")):
+        text = content.decode("utf-8", errors="replace")
+        if refusal(text):
             reasons.append(f"seat {name} result is a usage-limit refusal")
-        return
+        return text
     try:
         payload = json.loads(content.decode("utf-8"))
     except ValueError:
         payload = None
     if not isinstance(payload, dict) or not {"runtime", "status"} <= payload.keys():
         reasons.append(f"seat {name} artifact is not runner JSON")
-        return
+        return None
     if payload["status"] != "success":
         reasons.append(f"seat {name} runner status is not success")
     if refusal(payload.get("result")):
         reasons.append(f"seat {name} result is a usage-limit refusal")
+    result = payload.get("result")
+    return result if isinstance(result, str) else ""
 
 
-def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> None:
+def _finding_item_ok(finding: object) -> bool:
+    """True for a finding object with the required nonempty fields and enum values."""
+    return (
+        isinstance(finding, dict)
+        and all(_nonempty(finding.get(key))
+                for key in ("id", "severity", "disposition", "scenario", "evidence"))
+        and finding["severity"] in _SEVERITIES
+        and finding["disposition"] in _DISPOSITIONS
+    )
+
+
+def _seat_body_invalid(body: object, name: str) -> str | None:
+    """The first failing key of a seat block body, else None."""
+    if not isinstance(body, dict) or set(body) != set(SEAT_REPORT_KEYS):
+        return "body"
+    if body["seat"] != name:
+        return "seat"
+    if body["verdict"] not in _SEAT_VERDICTS:
+        return "verdict"
+    findings = body["findings"]
+    if (not isinstance(findings, list) or not all(_finding_item_ok(f) for f in findings)
+            or len({f["id"] for f in findings}) != len(findings)):
+        return "findings"
+    coverage = body["coverage"]
+    if not isinstance(coverage, dict) or set(coverage) != {"architecture", "checklist"}:
+        return "coverage"
+    for group, required in (("architecture", _AXES), ("checklist", _CHECKLIST)):
+        entries = coverage[group]
+        if (not isinstance(entries, dict) or set(entries) != set(required)
+                or not all(_nonempty(value) for value in entries.values())):
+            return "coverage"
+    tests = body["tests"]
+    if not isinstance(tests, list) or not all(
+        isinstance(test, dict)
+        and set(test) == {"command", "exit_code", "result"}
+        and _nonempty(test["command"])
+        and isinstance(test["exit_code"], int) and not isinstance(test["exit_code"], bool)
+        and _nonempty(test["result"])
+        for test in tests
+    ):
+        return "tests"
+    return None
+
+
+def _seat_report(text: str, name: str, reasons: list[str]) -> dict | None:
+    """The validated co-review-seat block in a seat's report text, else a reason and None."""
+    blocks = _SEAT_BLOCK_RE.findall(text)
+    if not blocks:
+        reasons.append(f"seat {name} structured report is missing")
+        return None
+    if len(blocks) > 1:
+        reasons.append(f"seat {name} structured report is ambiguous")
+        return None
+    try:
+        body = json.loads(blocks[0])
+    except ValueError:
+        body = None
+    bad = _seat_body_invalid(body, name)
+    if bad is not None:
+        reasons.append(f"seat {name} structured report is invalid: {bad}")
+        return None
+    return body
+
+
+def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> dict | None:
+    """Check a seat artifact; return its parsed block when every existing check passed."""
+    before = len(reasons)
     if not isinstance(entry, dict):
         reasons.append(f"seat {name} is invalid")
-        return
+        return None
     if entry.get("status") != "complete":
         reasons.append(f"seat {name} is not complete")
     for field in ("artifact", "sha256", "runtime", "model", "effort"):
@@ -124,19 +204,22 @@ def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> No
             reasons.append(f"seat {name} {field} is invalid")
     artifact, expected = entry.get("artifact"), entry.get("sha256")
     if not isinstance(artifact, str) or not isinstance(expected, str):
-        return
+        return None
     try:
         path = (root / artifact).resolve()
         path.relative_to(root.resolve())
         content = path.read_bytes()
     except (OSError, ValueError):
         reasons.append(f"seat {name} artifact cannot be read")
-        return
+        return None
     if not content.strip():
         reasons.append(f"seat {name} artifact is empty")
     if hashlib.sha256(content).hexdigest() != expected:
         reasons.append(f"seat {name} artifact digest does not match")
-    _seat_content_ok(content, artifact, name, reasons)
+    text = _seat_content_ok(content, artifact, name, reasons)
+    if len(reasons) != before or text is None:
+        return None
+    return _seat_report(text, name, reasons)
 
 
 def _substitute_cause(seat: dict, root: Path) -> tuple[str | None, Path | None]:
@@ -221,7 +304,7 @@ def _substitutes(
     return substituted
 
 
-def _diff_class_ok(preconditions: object, root: Path, tier: str) -> bool:
+def _diff_class_ok(preconditions: object, root: Path, tier: str, small: dict | None = None) -> bool:
     """True when the digest-bound frozen diff classifies as one the tier may gate."""
     entry = preconditions.get("diff") if isinstance(preconditions, dict) else None
     if not isinstance(entry, dict):
@@ -235,13 +318,16 @@ def _diff_class_ok(preconditions: object, root: Path, tier: str) -> bool:
     if hashlib.sha256(content).hexdigest() != entry.get("sha256"):
         return False
     change_class = _load_change_class()
-    paths = change_class.paths_from_diff(content.decode("utf-8", "replace"))
+    text = content.decode("utf-8", "replace")
+    if tier == "small":
+        return change_class.tier_of(text, small) == "small"
+    paths = change_class.paths_from_diff(text)
     return paths is not None and change_class.classify(paths) in _DIFF_CLASSES[tier]
 
 
-def _lessons_ci_ok(preconditions: object, root: Path) -> bool:
-    """True when the digest-bound CI artifact holds at least one check; CI is
-    where the lessons contract check runs."""
+def _ci_has_checks(preconditions: object, root: Path) -> bool:
+    """True when the digest-bound CI artifact holds at least one check; the lessons
+    and small tiers take CI as their test evidence."""
     entry = preconditions.get("ci") if isinstance(preconditions, dict) else None
     path, errors = _load_preconditions()._artifact(entry, root, "CI")
     if errors:
@@ -259,6 +345,56 @@ _ROLLUP_FIELDS = {"CheckRun": ("name", "status", "conclusion"),
                   "StatusContext": ("context", "state")}
 
 
+def _started(node: dict):
+    """The node's startedAt as an aware datetime, or None when unknown."""
+    value = node.get("startedAt")
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None and moment.year > 1 else None
+
+
+def _check_key(node):
+    """(workflowName or "", name) for a complete CheckRun node, else None."""
+    if (not isinstance(node, dict) or node.get("__typename") != "CheckRun"
+            or not all(field in node for field in _ROLLUP_FIELDS["CheckRun"])):
+        return None
+    name = node.get("name")
+    if not isinstance(name, str):
+        return None
+    workflow = node.get("workflowName")
+    return (workflow if isinstance(workflow, str) else "", name)
+
+
+def _newest(rollup: list) -> dict:
+    """check key -> (newest known start, its raw startedAt string)."""
+    newest = {}
+    for node in rollup:
+        key = _check_key(node)
+        start = _started(node) if key is not None else None
+        if start is not None and (key not in newest or start > newest[key][0]):
+            newest[key] = (start, node["startedAt"])
+    return newest
+
+
+def latest_check_runs(rollup: list) -> tuple[list, list]:
+    """(kept, superseded) rollup nodes: a CheckRun is superseded only by a strictly
+    later known start of the same check key; everything else is kept."""
+    newest = _newest(rollup)
+    kept, superseded = [], []
+    for node in rollup:
+        key = _check_key(node)
+        start = _started(node) if key is not None else None
+        if start is not None and start < newest[key][0]:
+            superseded.append(node)
+        else:
+            kept.append(node)
+    return kept, superseded
+
+
 def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
     """(envelope, reasons) from `gh pr view --json headRefOid,statusCheckRollup` (ci-capture);
     envelope is None when the input is unusable."""
@@ -267,7 +403,8 @@ def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
         return None, ["PR JSON needs a headRefOid SHA and a statusCheckRollup list"]
     envelope = {"head": pr["headRefOid"], "check_runs": [], "status_contexts": []}
     reasons = []
-    for node in pr["statusCheckRollup"]:
+    kept, superseded = latest_check_runs(pr["statusCheckRollup"])
+    for node in kept:
         kind = node.get("__typename") if isinstance(node, dict) else None
         fields = _ROLLUP_FIELDS.get(kind)
         if fields is None:
@@ -278,6 +415,15 @@ def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
             continue
         target = "check_runs" if kind == "CheckRun" else "status_contexts"
         envelope[target].append({key: node[key] for key in fields})
+    if superseded:
+        newest = _newest(pr["statusCheckRollup"])
+        envelope["superseded_check_runs"] = [
+            {"name": node["name"], "workflow_name": _check_key(node)[0],
+             "status": node["status"], "conclusion": node["conclusion"],
+             "started_at": node["startedAt"],
+             "latest_started_at": newest[_check_key(node)][1],
+             "details_url": node["detailsUrl"] if isinstance(node.get("detailsUrl"), str) else None}
+            for node in superseded]
     reasons.extend(_load_preconditions()._ci_reasons(envelope, None))
     if envelope["head"] != head:
         reasons.append(f"PR head moved: {envelope['head']} is not {head}")
@@ -315,6 +461,19 @@ def _coverage(report: dict, reasons: list[str], visible: list[str]) -> None:
                 visible.append(f"coverage {label} has an accepted nonmaterial gap")
 
 
+def _test_evidence(report: dict, blocks: dict, required: tuple, reasons: list[str]) -> None:
+    """A string functional_behavior entry needs a test from every seat; a gap object is
+    judged by _coverage."""
+    coverage = report.get("coverage")
+    checklist = coverage.get("checklist") if isinstance(coverage, dict) else None
+    if not isinstance(checklist, dict) or not _nonempty(checklist.get("functional_behavior")):
+        return
+    for name in required:
+        block = blocks.get(name)
+        if block is not None and not block["tests"]:
+            reasons.append(f"coverage functional_behavior lacks test evidence from seat {name}")
+
+
 def _findings(report: dict, expected: dict, reasons: list[str]) -> bool:
     changes = False
     findings = report.get("findings")
@@ -323,17 +482,10 @@ def _findings(report: dict, expected: dict, reasons: list[str]) -> bool:
         return changes
     ids = set()
     for finding in findings:
-        if not isinstance(finding, dict) or not all(
-            _nonempty(finding.get(key))
-            for key in ("id", "severity", "disposition", "scenario", "evidence")
-        ):
+        if not _finding_item_ok(finding):
             reasons.append("finding is invalid")
             continue
-        if (
-            finding["id"] in ids
-            or finding["severity"] not in _SEVERITIES
-            or finding["disposition"] not in {"confirmed", "refuted", "unresolved"}
-        ):
+        if finding["id"] in ids:
             reasons.append(f"finding {finding['id']} is invalid")
             continue
         ids.add(finding["id"])
@@ -404,8 +556,8 @@ def _delta_prior(block: dict, wanted: dict, expected: dict, root: Path, reasons:
     prior_expected, _ = _json_artifact(block.get("prior_expected"), root, "delta prior expected", reasons)
     if prior is None or prior_expected is None:
         return
-    if prior.get("class") != "full":
-        reasons.append("delta prior run is not a full round")
+    if prior.get("class") not in ("full", "small"):
+        reasons.append("delta prior run is not a full or small round")
         return
     verdict = evaluate(prior, prior_expected, prior_path.parent)["verdict"]
     if verdict != "APPROVE":
@@ -501,13 +653,16 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     if required is None:
         reasons.append("report class is invalid")
     seats = report.get("seats")
+    blocks: dict[str, dict] = {}
     if required is None or not isinstance(seats, dict) or set(seats) != set(required):
         reasons.append("required seats are missing")
     else:
         for name in required:
-            _artifact_ok(seats[name], artifact_root, name, reasons)
+            block = _artifact_ok(seats[name], artifact_root, name, reasons)
+            if block is not None:
+                blocks[name] = block
         substituted = _substitutes(tier, seats, artifact_root, reasons, visible)
-        if tier == "light":
+        if tier in ("light", "small"):
             runtimes = set()
             for name in required:
                 seat = seats[name]
@@ -518,7 +673,7 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
                 elif isinstance(seat.get("runtime"), str):
                     runtimes.add(seat.get("runtime"))
             if runtimes != {"claude", "codex"}:
-                reasons.append("light seats must be one claude and one codex runtime")
+                reasons.append(f"{tier} seats must be one claude and one codex runtime")
         if tier == "delta":
             for name in required:
                 if isinstance(seats[name], dict) and seats[name].get("runtime") != "claude":
@@ -526,16 +681,25 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
         if (tier == "lessons" and isinstance(seats["verifier"], dict)
                 and seats["verifier"].get("runtime") != "claude"):
             reasons.append("lessons seat verifier must run on claude")
-    if (isinstance(tier, str) and tier in _DIFF_CLASSES
-            and not _diff_class_ok(report.get("preconditions"), artifact_root, tier)):
+    small = expected.get("small")
+    small_valid = tier == "small" and _load_change_class().small_caps_error(small) is None
+    if tier == "small" and not small_valid:
+        reasons.append("small caps are invalid")
+    elif "small" in report or (tier != "small" and "small" in expected):
+        reasons.append("small block on a non-small class" if tier != "small"
+                       else "small report carries a small block")
+    if (isinstance(tier, str) and tier in _DIFF_CLASSES and (tier != "small" or small_valid)
+            and not _diff_class_ok(report.get("preconditions"), artifact_root, tier, small)):
         reasons.append(f"class {tier} does not match the frozen diff")
-    if tier == "lessons" and not _lessons_ci_ok(report.get("preconditions"), artifact_root):
-        reasons.append("class lessons needs CI check evidence")
+    if tier in ("lessons", "small") and not _ci_has_checks(report.get("preconditions"), artifact_root):
+        reasons.append(f"class {tier} needs CI check evidence")
     if tier == "delta":
         _delta(report, expected, artifact_root, reasons)
     elif "delta" in report or "delta" in expected:
         reasons.append("delta block on a non-delta class")
     _coverage(report, reasons, visible)
+    if tier != "small":
+        _test_evidence(report, blocks, required or (), reasons)
     changes = _findings(report, expected, reasons)
     source = report.get("preconditions")
     if (
@@ -557,9 +721,9 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
         }
     else:
         result = {"verdict": "APPROVE", "approve_allowed": True, "reasons": visible}
-    # A delta never ends short of APPROVE: the next gate on this head is full
-    # (spec [D7], R21).
-    if tier == "delta" and result["verdict"] != "APPROVE":
+    # A delta or small gate never ends short of APPROVE: the next gate on this
+    # head is full.
+    if tier in ("delta", "small") and result["verdict"] != "APPROVE":
         result["escalate"] = "full"
     return result
 
@@ -694,8 +858,8 @@ def _full_prior(report_path: Path, expected_path: Path, report_sha256: str | Non
         if gate is None:
             return None
         report, expected = gate
-    if report.get("class") != "full":
-        reasons.append("first round on a branch is always full: no prior full APPROVE")
+    if report.get("class") not in ("full", "small"):
+        reasons.append("first round on a branch is always full or small: no prior full or small APPROVE")
         return None
     return (expected, report_path.resolve(), expected_path.resolve(),
             report_sha256, expected_sha256)
@@ -826,6 +990,15 @@ def schema() -> dict:
         "full_seats": list(FULL_SEATS),
         "delta_seats": list(DELTA_SEATS),
         "lessons_seats": list(LESSONS_SEATS),
+        "small_seats": list(SMALL_SEATS),
+        "small": {
+            "expected_fields": {
+                "max_files": "positive int cap, at most 5 (default 3)",
+                "max_lines": "positive int cap on added plus removed lines, at most 150 (default 40)",
+                "sensitive_paths": "list of path prefixes that force full (default empty)",
+            },
+            "report_fields": "none; a small report has no small block",
+        },
         "delta": {
             "expected_fields": {
                 "prior_run": "run_id of the full APPROVE this delta builds on",
@@ -849,9 +1022,9 @@ def schema() -> dict:
             "verdict": "APPROVE, CHANGES, or INCOMPLETE",
             "approve_allowed": "true only for APPROVE",
             "reasons": "list of strings",
-            "escalate": "present as full only on a non-APPROVE delta result",
+            "escalate": "present as full only on a non-APPROVE delta or small result",
         },
-        "class": "light, full, delta or lessons; the evaluator recomputes light and lessons from the frozen diff",
+        "class": "light, full, delta, small or lessons; the evaluator recomputes light, small and lessons from the frozen diff",
         "finding_fields": {
             "id": "nonempty unique identifier",
             "severity": "critical, high, major, minor, low, nit, or advisory",
@@ -912,8 +1085,26 @@ def schema() -> dict:
         "seat_artifact_must_show": (
             "a .json seat artifact is runner JSON with runtime and status keys "
             "and status success; no seat artifact, runner result or native "
-            "text, may open with a usage-limit refusal notice"
+            "text, may open with a usage-limit refusal notice; the seat's "
+            "report text holds exactly one co-review-seat block"
         ),
+        "seat_report": {
+            "fence": SEAT_REPORT_FENCE,
+            "keys": list(SEAT_REPORT_KEYS),
+            "seat": "the seat's name in the report",
+            "verdict": sorted(_SEAT_VERDICTS),
+            "findings": "list of finding_fields objects, unique ids",
+            "coverage": {"architecture": list(_AXES), "checklist": list(_CHECKLIST)},
+            "tests": {
+                "command": "nonempty string",
+                "exit_code": "int",
+                "result": "nonempty string",
+            },
+            "functional_behavior": (
+                "a report string entry needs a nonempty tests list from every seat; "
+                "otherwise record an accepted gap"
+            ),
+        },
         "codex_substitute": {
             "seats": {k: list(v) for k, v in _CODEX_SEATS.items()},
             "reasons": list(_SUBSTITUTE_REASONS),
@@ -957,11 +1148,15 @@ def main(argv: list[str] | None = None) -> int:
     policy_parser.add_argument("--section", required=True)
     classify_parser = sub.add_parser("classify")
     classify_parser.add_argument("--diff", required=True)
+    classify_parser.add_argument("--small-max-files", type=int)
+    classify_parser.add_argument("--small-max-lines", type=int)
+    classify_parser.add_argument("--small-sensitive", action="append", default=[])
     lessons_parser = sub.add_parser("lessons-check")
     lessons_parser.add_argument("--file", required=True)
     capture_parser = sub.add_parser("ci-capture")
     for flag in ("--repo", "--expected", "--out"):
         capture_parser.add_argument(flag, required=True)
+    capture_parser.add_argument("--manifest")
     audit_parser = sub.add_parser("audit-comment")
     audit_parser.add_argument("--report", required=True)
     audit_parser.add_argument("--expected", required=True)
@@ -1036,19 +1231,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"pass": not reasons, "reasons": reasons}, sort_keys=True))
         return 0 if not reasons else 1
     if args.command == "ci-capture":
-        # gh runs from the checkout so a non-github.com host resolves from its remote.
+        # cwd is the checkout so gh finds its host config; --repo names the target.
         try:
             expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
             number, head = expected.get("pr_number"), expected.get("head")
             if isinstance(number, bool) or not isinstance(number, int) or number <= 0 or not _sha(head):
                 raise ValueError("expected identity needs a positive int pr_number and a SHA head")
+            repository = expected.get("repository")
+            if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+                raise ValueError("expected identity needs a repository of the form owner/repo")
+            if args.manifest:
+                frozen = json.loads(Path(args.manifest).read_text(encoding="utf-8"))["source"]["head"]
+                if not _sha(frozen) or frozen != head:
+                    raise ValueError(f"frozen head {frozen} is not the expected head {head}")
             proc = subprocess.run(
-                ["gh", "pr", "view", str(number), "--json", "headRefOid,statusCheckRollup"],
+                ["gh", "pr", "view", str(number), "--repo", repository, "--json", "headRefOid,statusCheckRollup"],
                 cwd=args.repo, capture_output=True, text=True, timeout=120, check=False)
             if proc.returncode != 0:
                 raise ValueError(f"gh pr view exited {proc.returncode}: {proc.stderr.strip()[-300:]}")
             pr = json.loads(proc.stdout)
-        except (OSError, UnicodeError, ValueError, AttributeError, subprocess.TimeoutExpired) as error:
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError,
+                subprocess.TimeoutExpired) as error:
             print(json.dumps({"error": str(error)}))
             return 1
         envelope, reasons = ci_envelope(pr, head)
@@ -1063,13 +1266,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if not reasons else 1
     if args.command == "classify":
         try:
-            text = Path(args.diff).read_text(encoding="utf-8", errors="replace")
+            text = Path(args.diff).read_bytes().decode("utf-8", "replace")
         except OSError as error:
             print(json.dumps({"error": str(error)}))
             return 1
         change_class = _load_change_class()
-        paths = change_class.paths_from_diff(text)
-        print(change_class.classify(paths or []))
+        small = dict(change_class.SMALL_DEFAULTS)
+        if args.small_max_files is not None:
+            small["max_files"] = args.small_max_files
+        if args.small_max_lines is not None:
+            small["max_lines"] = args.small_max_lines
+        small["sensitive_paths"] = args.small_sensitive
+        error = change_class.small_caps_error(small)
+        if error:
+            print(json.dumps({"error": error}))
+            return 1
+        print(change_class.tier_of(text, small))
         return 0
     if args.command == "policy":
         try:

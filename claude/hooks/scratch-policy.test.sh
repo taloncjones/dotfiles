@@ -491,6 +491,44 @@ class AuditRouting(unittest.TestCase):
         self.allow(repo)
         self.assertFalse((external / "td-current.policy.jsonl").exists())
 
+    def bound_fixture(self, repo, rd, task):
+        bid = "ldb-" + "a" * 32
+        row = {**task["workers"][0], "pane_id": "pane-bound", "launch_id": "bound-1"}
+        (rd / "bindings").mkdir()
+        (rd / "bindings" / f"{bid}.json").write_text(json.dumps({
+            "schema_version": 1, "binding_id": bid, "tier": "lead",
+            "parent": {"tier": "launcher", "task_id": "parent", "session_id": "s-1"},
+            "task_id": "td-current", "repo_slug": task["repo_slug"],
+            "workspace_root": str(repo), "account_id": row["account_id"],
+            "account_kind": "personal", "runtime": "claude",
+            "expected_session_id": "lead-session", "created_fence": 1,
+            "status": "claimed", "created_ts": "2026-09-07T12:00:00Z",
+            "updated_ts": "2026-09-07T12:00:00Z"}))
+        base = rd / "leads" / bid
+        (base / "tasks").mkdir(parents=True)
+        (base / "tasks/td-current.json").write_text(json.dumps({**task, "workers": [row]}))
+        return base
+
+    def test_bound_worker_audit_lands_in_lead_subtree(self):
+        repo, rd, task = self.fixture()
+        base = self.bound_fixture(repo, rd, task)
+        self.env["HERDR_PANE_ID"] = "pane-bound"
+        self.allow(repo)
+        self.assertEqual(len((base / "tasks/td-current.policy.jsonl").read_text().splitlines()), 1)
+        self.assertFalse((rd / "tasks/td-current.policy.jsonl").exists())
+        self.env["HERDR_PANE_ID"] = "pane1"
+        self.allow(repo)
+        self.assertEqual(len((rd / "tasks/td-current.policy.jsonl").read_text().splitlines()), 1)
+        self.assertEqual(len((base / "tasks/td-current.policy.jsonl").read_text().splitlines()), 1)
+
+    def test_unbound_pane_keeps_launcher_audit_target(self):
+        repo, rd, task = self.fixture()
+        base = self.bound_fixture(repo, rd, task)
+        self.env["HERDR_PANE_ID"] = "pane-unrelated"
+        self.allow(repo)
+        self.assertEqual(len((rd / "tasks/td-current.policy.jsonl").read_text().splitlines()), 1)
+        self.assertFalse((base / "tasks/td-current.policy.jsonl").exists())
+
 unittest.main(argv=["scratch-audit"])
 PY
 then
@@ -520,8 +558,10 @@ want = [{"matcher": "Bash", "hooks": [{"type": "command", "command": "~/.claude/
 pre = [x["command"] for e in h["PreToolUse"] if e.get("matcher") == "Bash" for x in e["hooks"]]
 want_pre = ["~/.claude/hooks/commit_guard.py", "~/.claude/hooks/no_ai_attribution_bash.py",
             "~/.claude/hooks/push_guard.py", "~/.claude/hooks/herdr_worktree_guard.py",
-            "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/pr_post_guard.py",
-            "~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py"]
+            "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/shell_hint.py",
+            "~/.claude/hooks/pr_post_guard.py",
+            "~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py",
+            "~/.claude/hooks/signer_guard.py"]
 sys.exit(0 if pr == want and pre == want_pre else 1)
 PY
     then

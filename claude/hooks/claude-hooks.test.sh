@@ -414,17 +414,19 @@ want = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/shell_hint.py",
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
+    "~/.claude/hooks/signer_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template lists the Bash guards in order, planning_artifact_guard last\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, signer_guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template lists the Bash guards in order, planning_artifact_guard last\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, signer_guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -436,8 +438,13 @@ import sys
 
 hooks = json.load(open("claude/settings.json.tmpl"))["hooks"]
 gate = [{"type": "command", "command": "~/.claude/hooks/pr_post_guard.py"}]
+pre_gate = [{"type": "command", "command": "~/.claude/hooks/opaque_label_hint.py"}] + gate
 post = [e for e in hooks["PostToolUse"] if e.get("matcher") == "AskUserQuestion"]
-ok = len(post) == 1 and post[0]["hooks"] == gate and hooks["UserPromptSubmit"] == [{"hooks": gate}]
+pre = [e for e in hooks["PreToolUse"] if e.get("matcher") == "AskUserQuestion"]
+ok = (
+    len(post) == 1 and post[0]["hooks"] == gate and hooks["UserPromptSubmit"] == [{"hooks": gate}]
+    and len(pre) == 1 and pre[0]["hooks"] == pre_gate
+)
 sys.exit(0 if ok else 1)
 PY
 then
@@ -630,6 +637,26 @@ rmg_allows "allows rm -rf ~/proj/build" 'rm -rf ~/proj/build'
 rmg_allows 'allows rm -rf $HOME/.cache/x' 'rm -rf $HOME/.cache/x'
 rmg_allows "allows rm -rf .git/index.lock" 'rm -rf .git/index.lock'
 rmg_allows "allows non-rm command" 'echo rm -rf /'
+# Leading shell keywords: the rm after do/then/else/elif/if/while/until/{/! is inspected.
+rmg_blocks "blocks rm -rf /* after a do keyword" 'for x in 1; do rm -rf /*; done'
+rmg_blocks "blocks rm -rf /* after a then keyword" 'if true; then rm -rf /*; fi'
+rmg_blocks "blocks rm -rf /* after an else keyword" 'if false; then :; else rm -rf /*; fi'
+rmg_blocks "blocks rm -rf /* after an elif keyword" 'if false; then :; elif rm -rf /*; then :; fi'
+rmg_blocks "blocks rm -rf /* after an if keyword" 'if rm -rf /*; then :; fi'
+rmg_blocks "blocks rm -rf /* after a while keyword" 'while rm -rf /*; do :; done'
+rmg_blocks "blocks rm -rf /* after an until keyword" 'until rm -rf /*; do :; done'
+rmg_blocks "blocks rm -rf /* after a { keyword" '{ rm -rf /*; }'
+rmg_blocks "blocks rm -rf /* after a ! keyword" '! rm -rf /*'
+rmg_blocks "blocks sudo rm -rf /etc after a do keyword" 'for x in 1; do sudo rm -rf /etc; done'
+rmg_blocks "blocks rm -rf /* after time and a ! keyword" 'time ! rm -rf /*'
+rmg_blocks "blocks bash -c rm after a do keyword" "for x in 1; do bash -c 'rm -rf /*'; done"
+rmg_blocks "blocks cd / then rm -rf * after a { keyword" '{ cd / && rm -rf *; }'
+rmg_allows "allows literal rm -rf build after a do keyword" 'for f in a; do rm -rf build; done'
+rmg_allows "allows literal rm -rf build after a then keyword" 'if [ -d build ]; then rm -rf build; fi'
+rmg_allows "allows literal rm -rf ./dist after a { keyword" '{ rm -rf ./dist; }'
+rmg_allows "allows a keyword word as a later argument" 'echo do rm -rf /*'
+rmg_blocks_at "blocks rm -rf * after a conditional cd that may not run" 'if [ -d build ]; then cd build; fi; rm -rf *' "$RMG_HOME"
+rmg_allows_at "allows rm -rf build after a conditional cd that may not run" 'if false; then cd /etc; fi; rm -rf build' "$RMG_HOME"
 if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}' \
         | HOME="$RMG_HOME" "$RMG"; then
     printf 'PASS  rmg: allows non-Bash tool\n'
@@ -702,6 +729,172 @@ trap 'rm -rf "$RMG_GITROOT" "$RMG_PLAIN"' EXIT
 rmg_allows_at "allows rm -rf . in a plain (non-git, non-home) scratch dir" 'rm -rf .' "$RMG_PLAIN"
 rm -rf "$RMG_GITROOT" "$RMG_PLAIN"
 trap - EXIT
+
+# Deny text names the fix: exact one-line stderr, exit 2, empty stdout.
+rmg_denies_with() {
+    label="$1"
+    payload="$2"
+    expected="$3"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/tmp/claude-hook-test.err) || rc=$?
+    err=$(cat /tmp/claude-hook-test.err)
+    if [ "$rc" -eq 2 ] && [ -z "$out" ] && [ "$err" = "$expected" ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s stderr=%s)\n' "$label" "$rc" "$out" "$err" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+RMG_D1='Blocked: rm -r/-f target holds a shell variable or command substitution, which this guard cannot check. Fix: write the literal path (for example paste the mktemp output) or skip the rm.'
+rmg_denies_with "deny text D1 variable" "$(rmg_payload 'rm -rf $X')" "$RMG_D1"
+rmg_denies_with "deny text D1 command substitution" "$(rmg_payload 'rm -rf $(mktemp -d)')" "$RMG_D1"
+rmg_denies_with "deny text D2 root glob" "$(rmg_payload 'rm -rf /*')" \
+    'Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
+rmg_denies_with "deny text D3 home glob" "$(rmg_payload 'rm -rf ~/*')" \
+    'Blocked: rm target is the home directory or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
+rmg_denies_with "deny text D4 .git" "$(rmg_payload 'rm -rf .git')" \
+    'Blocked: rm target is a .git directory or a glob directly under it. Fix: name the one file inside .git to remove (for example .git/index.lock), or skip the rm.'
+rmg_denies_with "deny text D5 system path" "$(rmg_payload 'rm -rf /etc')" \
+    'Blocked: rm target is a system path (/etc). Fix: remove only scratch paths under /tmp or $TMPDIR, or ask the user to run this removal.'
+rmg_denies_with "deny text D6 parent of cwd" "$(rmg_payload_at "rm -rf $RMG_HOME/proj" "$RMG_HOME/proj/sub/deep")" \
+    'Blocked: rm target is a parent of the current working directory. Fix: name the specific file or subdirectory inside it, or skip the rm.'
+RMG_D7DIR=$(mktemp -d)
+: > "$RMG_D7DIR/.git"
+rmg_denies_with "deny text D7 cwd at git root" "$(rmg_payload_at 'rm -rf .' "$RMG_D7DIR")" \
+    'Blocked: rm target is the current directory, which is a git worktree root or the home directory. Fix: name the specific files or subdirectories to remove, or skip the rm.'
+rm -rf "$RMG_D7DIR"
+rmg_denies_with "deny text D2 after a do keyword" "$(rmg_payload 'for x in 1; do rm -rf /*; done')" \
+    'Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
+rmg_denies_with "deny text D1 via Codex payload shape" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"rm -f \"$RUN_DIR/seat.pid\"","workdir":"/Users/rmg-test-user/proj"}}' "$RMG_D1"
+
+# Warn-only zsh pitfall checks: one additionalContext JSON on stdout, exit 0.
+rmg_json_payload() {
+    python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}, "cwd": sys.argv[2]}))' "$1" "$RMG_CWD"
+}
+rmg_warns() {
+    label="$1"
+    payload="$2"
+    expected="$3"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": sys.argv[2]}} else 1)' "$out" "$expected"; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_silent() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_w1() { printf '[WARNING] rm_guard: $%s holds several words, but zsh does not word-split an unquoted variable, so it runs as one command name; write the command and its flags literally.' "$1"; }
+rmg_w2() { printf '[WARNING] rm_guard: zsh reads $%s:%s as the :%s modifier on $%s, not as a literal colon; write ${%s}:%s to keep the colon.' "$1" "$2" "$2" "$1" "$1" "$2"; }
+RMG_W3='[WARNING] rm_guard: zsh ties the variable path to PATH, so a loop variable named path replaces PATH and later commands are not found; rename it (for example p or file).'
+
+rmg_warns "warn W1 stored prefix" "$(rmg_json_payload 'E="env -u A -u B"; $E python3 x.py')" "$(rmg_w1 E)"
+rmg_warns "warn W1 stored prefix as env argument" "$(rmg_json_payload 'ENVU="-u A -u B"; env $ENVU python3 x.py')" "$(rmg_w1 ENVU)"
+rmg_warns "warn W1 stored prefix in loop body" "$(rmg_json_payload 'E="env -u A"; for f in a b; do $E echo $f; done')" "$(rmg_w1 E)"
+rmg_warns "warn W2 modifier unquoted" "$(rmg_json_payload 'git show $sha:tests/x.py')" "$(rmg_w2 sha t)"
+rmg_warns "warn W2 modifier double-quoted" "$(rmg_json_payload 'cd "$dir:h"')" "$(rmg_w2 dir h)"
+rmg_warns "warn W3 for path" "$(rmg_json_payload 'for path in a b; do echo $path; done')" "$RMG_W3"
+rmg_warns "warn W3 read path" "$(rmg_json_payload 'ls | while read -r path; do echo $path; done')" "$RMG_W3"
+rmg_warns "warn combined order W1 W2 W3" "$(rmg_json_payload 'E="env -u A"; $E true; $E false; for path in a; do $E echo $path:t $path:t; done')" \
+    "$(rmg_w1 E)
+$(rmg_w2 path t)
+$RMG_W3"
+rmg_warns "warn W3 via Codex payload shape" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"for path in a; do echo $path; done","workdir":"/Users/rmg-test-user/proj"}}' "$RMG_W3"
+
+rmg_silent "silent rm of mktemp-style literal" "$(rmg_json_payload 'rm -rf /tmp/tmp.abc123')"
+rmg_silent "silent rm of private tmp literal" "$(rmg_json_payload 'rm -f /private/tmp/claude-502/scratch/out.txt')"
+rmg_silent "silent git show HEAD:path" "$(rmg_json_payload 'git show HEAD:claude/hooks/rm_guard.py')"
+rmg_silent 'silent git show $sha:path' "$(rmg_json_payload 'git show $sha:path/to/file')"
+rmg_silent 'silent braced ${dir}:h' "$(rmg_json_payload 'echo ${dir}:h')"
+rmg_silent "silent single-quoted modifier" "$(rmg_json_payload "echo '\$dir:h'")"
+rmg_silent "silent backslash-escaped modifier" "$(rmg_json_payload 'echo \$dir:h')"
+rmg_silent "silent literal env prefix" "$(rmg_json_payload 'env -u A -u B python3 x.py')"
+rmg_silent 'silent $EDITOR notes.md' "$(rmg_json_payload '$EDITOR notes.md')"
+rmg_silent "silent single-word stored prefix" "$(rmg_json_payload 'E=env; $E true')"
+rmg_silent "silent PATH assignment prefix" "$(rmg_json_payload 'PATH="$HOME/bin:$PATH" make')"
+rmg_silent "silent scp host:path" "$(rmg_json_payload 'scp notes.md host:/tmp/notes.md')"
+rmg_silent "silent loop variable p over path literals" "$(rmg_json_payload 'for p in path/a path/b; do cat $p; done')"
+rmg_silent "silent path as plain word" "$(rmg_json_payload 'cat path; ls ./path/to')"
+rmg_silent "silent for path inside quoted text" "$(rmg_json_payload 'git commit -m "for path in x"')"
+rmg_silent "silent stored prefix inside bash -c" "$(rmg_json_payload "bash -c 'E=\"env -u A\"; \$E true'")"
+rmg_silent 'silent $HOME:/x' "$(rmg_json_payload 'echo $HOME:/x')"
+
+# shell_hint.py: warn-only advisory for a bare background `&`.
+SHH=claude/hooks/shell_hint.py
+SHH_W='[WARNING] shell_hint: a bare & leaves a background job running after this tool call returns, so a later call can start a duplicate; use run_in_background on the Bash tool (in Codex, keep a running exec_command session) instead.'
+shh_payload() {
+    python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))' "$1"
+}
+shh_warns() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | "$SHH" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": sys.argv[2]}} else 1)' "$out" "$SHH_W"; then
+        printf 'PASS  shh: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  shh: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+shh_silent() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | "$SHH" 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        printf 'PASS  shh: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  shh: %s (rc=%s output=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+shh_warns "warn trailing &" "$(shh_payload 'sleep 30 &')"
+shh_warns "warn mid-command &" "$(shh_payload 'make & echo started')"
+shh_warns "warn redirect then &" "$(shh_payload 'nohup srv > log 2>&1 &')"
+shh_warns "warn & inside subshell" "$(shh_payload '(cd x && make &)')"
+shh_warns "warn when wait precedes the last &" "$(shh_payload 'make & wait; sleep 30 &')"
+shh_warns "warn Codex exec_command cmd payload" '{"tool_name":"exec_command","tool_input":{"cmd":"sleep 30 &","workdir":"/tmp"}}'
+shh_warns "warn Codex unified_exec nested args.cmd payload" '{"tool_name":"unified_exec","tool_input":{"args":{"cmd":"sleep 30 &"}}}'
+shh_warns "warn & after an apostrophe comment" "$(shh_payload "# don't start a duplicate
+sleep 30 &")"
+shh_warns "warn when the subshell closes before wait" "$(shh_payload '(sleep 30 &); wait')"
+shh_warns "warn when wait runs in a child subshell" "$(shh_payload 'make & (wait)')"
+
+shh_silent "silent &&" "$(shh_payload 'git fetch && git status')"
+shh_silent "silent single-quoted &" "$(shh_payload "echo 'a & b'")"
+shh_silent "silent quoted and escaped &" "$(shh_payload "echo '&' \"&\" \\&")"
+shh_silent "silent 2>&1 redirect" "$(shh_payload 'make >/dev/null 2>&1')"
+shh_silent "silent &> redirect" "$(shh_payload 'make &>/dev/null')"
+shh_silent "silent <&, N>&M and |& forms" "$(shh_payload 'exec 3>&1; read x <&3; make |& tee log')"
+shh_silent "silent jobs reaped by wait" "$(shh_payload 'make & lint & wait')"
+shh_silent "silent non-shell tool" '{"tool_name":"Edit","tool_input":{"command":"sleep 30 &"}}'
+shh_silent "silent malformed stdin" 'not json'
+shh_silent "silent wait inside the same subshell" "$(shh_payload '(make & wait)')"
+shh_silent "silent wait after a closed child subshell" "$(shh_payload 'make & (cd x; ls); wait')"
+shh_silent "silent wait after a closing paren" "$(shh_payload '(make)& wait')"
+
+rmg_denies_with "deny wins over warnings, stdout empty" "$(rmg_json_payload 'E="env -u A"; $E true; rm -rf $X')" "$RMG_D1"
 
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
@@ -1230,7 +1423,8 @@ fi
 
 # git_remote_guard.py registration: the template carries exactly one
 # PreToolUse entry with matcher Bash|Edit|Write, listing only the git
-# metadata guard, appended last, and the Bash guard group ends with the
+# metadata guard, followed only by the AskUserQuestion hint entry, and the
+# Bash guard group ends with the
 # orchestrator edit guard followed by the planning-artifact guard,
 # both registered by their dedicated suites.
 # Independent of live machine state; the live drift check above is
@@ -1248,11 +1442,14 @@ want_bash = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/shell_hint.py",
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
+    "~/.claude/hooks/signer_guard.py",
 ]
-ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
+ok = (len(ours) == 1 and pre[-2] is ours[0] and pre[-1].get("matcher") == "AskUserQuestion"
+      and bash == want_bash
       and ours[0]["hooks"] == [{"type": "command",
                                 "command": "~/.claude/hooks/git_remote_guard.py"}])
 sys.exit(0 if ok else 1)
@@ -1280,6 +1477,145 @@ if [ ! -f claude/rules/personal/team-roles.md ]; then
     printf 'FAIL  rules: team-roles.md missing\n' >&2
     FAIL=$((FAIL + 1))
 fi
+if [ ! -f claude/rules/personal/writing-style.md ]; then
+    printf 'FAIL  rules: writing-style.md missing\n' >&2
+    FAIL=$((FAIL + 1))
+elif [ "$(wc -l < claude/rules/personal/writing-style.md)" -gt 16 ]; then
+    printf 'FAIL  rules: writing-style.md exceeds 16 lines\n' >&2
+    FAIL=$((FAIL + 1))
+else
+    printf 'PASS  rules: writing-style.md present within 16 lines\n'
+    PASS=$((PASS + 1))
+fi
+
+# format_files.py formats only files the repo already formats with prettier.
+# The stub "formats" by turning every ' into ".
+FMT_HOOK="$PWD/claude/hooks/format_files.py"
+FMT_TMP=$(mktemp -d)
+mkdir -p "$FMT_TMP/stub"
+cat >"$FMT_TMP/stub/prettier" <<'STUB'
+#!/bin/sh
+case "$1" in
+--write) tr "'" '"' <"$3" >"$3.fmt" && mv "$3.fmt" "$3"; echo "$3" ;;
+--stdin-filepath) tr "'" '"' ;;
+--find-config-path) [ -f "$(dirname "$2")/.prettierrc" ] ;;
+*) exit 2 ;;
+esac
+STUB
+chmod +x "$FMT_TMP/stub/prettier"
+FMT_BASEPATH="$PATH"
+
+fmt_repo() {
+    rm -rf "$FMT_TMP/repo"
+    mkdir "$FMT_TMP/repo"
+    git -C "$FMT_TMP/repo" init -q
+}
+fmt_commit() {
+    GIT_CONFIG_GLOBAL=/dev/null git -C "$FMT_TMP/repo" add -A
+    GIT_CONFIG_GLOBAL=/dev/null git -C "$FMT_TMP/repo" \
+        -c user.name=t -c user.email=t@example.com commit -q -m init
+}
+# fmt_run <path> [PATH override]; prints hook stdout, exit status in FMT_RC
+fmt_run() {
+    FMT_OUT=$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$1" \
+        | (cd "$FMT_TMP" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+            GIT_CONFIG_GLOBAL=/dev/null PATH="${2:-$FMT_TMP/stub:$FMT_BASEPATH}" \
+            python3 "$FMT_HOOK") 2>/dev/null) && FMT_RC=0 || FMT_RC=$?
+}
+fmt_check() {
+    label="$1"
+    shift
+    if "$@"; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+fmt_same() { [ "$(cat "$1")" = "$2" ]; }
+SQ="const a = 'x'
+const b = 'z'"
+
+mkdir "$FMT_TMP/norepo"
+printf "%s\n" "$SQ" >"$FMT_TMP/norepo/a.ts"
+fmt_run "$FMT_TMP/norepo/a.ts"
+fmt_check "fmt: skips a file outside every git work tree" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$(cat "$3")" = "$4" ]' _ "$FMT_RC" "$FMT_OUT" "$FMT_TMP/norepo/a.ts" "$SQ"
+
+fmt_repo
+printf "const a = 'x'\nconst b = 'y'\n" >"$FMT_TMP/repo/a.ts"
+fmt_commit
+printf "%s\n" "$SQ" >"$FMT_TMP/repo/a.ts"
+fmt_run "$FMT_TMP/repo/a.ts"
+fmt_check "fmt: leaves untouched lines of a non-prettier tracked file byte-identical" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$(cat "$3")" = "$4" ]' _ "$FMT_RC" "$FMT_OUT" "$FMT_TMP/repo/a.ts" "$SQ"
+
+fmt_repo
+printf 'const a = "x"\n' >"$FMT_TMP/repo/b.md"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/b.md"
+fmt_run "$FMT_TMP/repo/b.md"
+fmt_check "fmt: still formats a tracked file already in prettier style" \
+    fmt_same "$FMT_TMP/repo/b.md" 'const a = "x"'
+
+fmt_repo
+: >"$FMT_TMP/repo/.prettierrc"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/c.ts"
+fmt_run "$FMT_TMP/repo/c.ts"
+fmt_check "fmt: formats an untracked file when a prettier config covers it" \
+    fmt_same "$FMT_TMP/repo/c.ts" 'const a = "x"'
+
+fmt_repo
+printf 'seed\n' >"$FMT_TMP/repo/seed.txt"
+fmt_commit
+printf "%s\n" "$SQ" >"$FMT_TMP/repo/d.ts"
+fmt_run "$FMT_TMP/repo/d.ts"
+fmt_check "fmt: skips an untracked file in a repo without a prettier config" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$(cat "$3")" = "$4" ]' _ "$FMT_RC" "$FMT_OUT" "$FMT_TMP/repo/d.ts" "$SQ"
+
+fmt_repo
+printf 'const a = "x"\n' >"$FMT_TMP/repo/b.md"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/b.md"
+mkdir "$FMT_TMP/elsewhere"
+ln -s "$FMT_TMP/repo/b.md" "$FMT_TMP/elsewhere/link.md"
+fmt_run "$FMT_TMP/elsewhere/link.md"
+fmt_check "fmt: formats an owned file edited through a symlink" \
+    fmt_same "$FMT_TMP/repo/b.md" 'const a = "x"'
+
+fmt_repo
+printf 'const a = "x"\n' >"$FMT_TMP/repo/b.md"
+fmt_commit
+printf "const a = 'x'\n" >"$FMT_TMP/repo/b.md"
+NOPRETTIER="$FMT_TMP/nopretty"
+mkdir -p "$NOPRETTIER"
+for tool in git python3 sh env tr mv cat dirname; do
+    ln -sf "$(command -v "$tool")" "$NOPRETTIER/$tool"
+done
+fmt_run "$FMT_TMP/repo/b.md" "$NOPRETTIER"
+fmt_rc1=$FMT_RC
+fmt_out1=$FMT_OUT
+bad_rc=0
+printf 'not json' | python3 "$FMT_HOOK" >/dev/null 2>&1 || bad_rc=$?
+fmt_check "fmt: fails open when prettier is missing" \
+    sh -c '[ "$1" = 0 ] && [ -z "$2" ] && [ "$3" = 0 ] && [ "$(cat "$4")" = "const a = '"'"'x'"'"'" ]' _ \
+    "$fmt_rc1" "$fmt_out1" "$bad_rc" "$FMT_TMP/repo/b.md"
+
+if command -v prettier >/dev/null 2>&1; then
+    fmt_repo
+    printf "const a = 'x'\nconst b = 'y'\n" >"$FMT_TMP/repo/fleet.test.ts"
+    fmt_commit
+    printf "const a = 'x'\nconst b = 'z'\n" >"$FMT_TMP/repo/fleet.test.ts"
+    fmt_run "$FMT_TMP/repo/fleet.test.ts" "$FMT_BASEPATH"
+    fmt_check "fmt: live prettier leaves a non-prettier ts file byte-identical" \
+        fmt_same "$FMT_TMP/repo/fleet.test.ts" "const a = 'x'
+const b = 'z'"
+else
+    printf 'SKIP  fmt: live prettier leaves a non-prettier ts file byte-identical\n'
+fi
+rm -rf "$FMT_TMP"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

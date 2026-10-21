@@ -18,11 +18,13 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -222,29 +224,38 @@ def contract_sha256(path) -> str:
 
 
 def run_contract_commands(commands, worktree) -> int:
-    """Run each contract command via sh -c in the worktree, streaming output.
-    Own process group per command; on timeout the whole group is SIGKILLed
-    (best-effort -- a double-forked daemon can escape). First failure stops
-    the run. Returns 0 iff every command exited 0."""
-    for cmd in commands:
-        t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
-        proc = subprocess.Popen(
-            ["sh", "-c", cmd["run"]], cwd=worktree, start_new_session=True
-        )
-        try:
-            rc = proc.wait(timeout=t)
-        except subprocess.TimeoutExpired:
+    """Run each contract command via /bin/sh -c with the system grep in the
+    worktree, streaming output. Own process group per command; on timeout the
+    whole group is SIGKILLed (best-effort -- a double-forked daemon can
+    escape). First failure stops the run. Returns 0 iff every command exited
+    0."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "BASH_ENV" and not k.startswith("BASH_FUNC_")}
+    system_grep = shutil.which("grep", path="/usr/bin:/bin")
+    with tempfile.TemporaryDirectory() as shim:
+        if system_grep:
+            os.symlink(system_grep, os.path.join(shim, "grep"))
+            env["PATH"] = shim + os.pathsep + env.get("PATH", os.defpath)
+        for cmd in commands:
+            t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", cmd["run"]], cwd=worktree,
+                start_new_session=True, env=env
+            )
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()
-            print(f"FAIL {cmd['name']} exit=timeout", flush=True)
-            return 1
-        if rc != 0:
-            print(f"FAIL {cmd['name']} exit={rc}", flush=True)
-            return 1
-        print(f"ok {cmd['name']} exit=0", flush=True)
+                rc = proc.wait(timeout=t)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait()
+                print(f"FAIL {cmd['name']} exit=timeout", flush=True)
+                return 1
+            if rc != 0:
+                print(f"FAIL {cmd['name']} exit={rc}", flush=True)
+                return 1
+            print(f"ok {cmd['name']} exit=0", flush=True)
     print(f"PASS {len(commands)} commands", flush=True)
     return 0
 
@@ -347,6 +358,9 @@ MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
                 "needs_design", "blocked_on_human", "other")
 
 SHELL_SAFE_RE = re.compile(r"[A-Za-z0-9_./+:@-]+\Z")
+HEX32_RE = re.compile(r"[0-9a-f]{32}\Z")
+HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+REPROMPT_OUTCOMES = ("failed", "delivered", "uncertain", "delivered-unrecorded")
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 _CAP_SUBTYPES = {"error_max_turns": "max_turns", "error_max_budget_usd": "max_budget"}
 _ERRORS_MAX, _ERROR_LEN = 5, 500
@@ -755,6 +769,23 @@ def _todo_body(repo_root, todo_id):
 
 GITHUB_REMOTE_RE = re.compile(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
                               r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+GITHUB_ALIAS_REMOTE_RE = re.compile(r"(?:git@([A-Za-z0-9_][A-Za-z0-9_.-]*):|ssh://git@([A-Za-z0-9_][A-Za-z0-9_.-]*)/)"
+                                    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+
+
+def github_owner_repo(url):
+    """(owner, repo) for a GitHub origin URL, or None. SSH aliases must resolve to github.com."""
+    match = GITHUB_REMOTE_RE.match(url)
+    if match:
+        return match.group(1), match.group(2)
+    alias = GITHUB_ALIAS_REMOTE_RE.match(url)
+    if not alias:
+        return None
+    host = alias.group(1) or alias.group(2)
+    resolved = _co_review_module("repo_binding").ssh_host(host, user="git", timeout=5)
+    if resolved and resolved.lower() == "github.com":
+        return alias.group(3), alias.group(4)
+    return None
 
 
 def _brief_ship_values(rd, record, ns, head, blocks, config):
@@ -763,8 +794,8 @@ def _brief_ship_values(rd, record, ns, head, blocks, config):
     _require(str(pr).isdigit() and int(pr) > 0, "ship needs pr_number on the task record")
     _require(record.get("review_head_sha") == head, "ship needs review_head_sha equal to the worktree HEAD")
     remote = _brief_git(record["worktree"], "config", "--get", "remote.origin.url")
-    match = GITHUB_REMOTE_RE.match(remote)
-    _require(match is not None, "ship needs a GitHub origin remote")
+    owner_repo = github_owner_repo(remote)
+    _require(owner_repo is not None, "ship needs a GitHub origin remote")
     base_ref = record["base_ref"]
     _require(base_ref.startswith("origin/"), "ship needs base_ref of the form origin/<branch>")
     out = _brief_git(record["worktree"], "ls-remote", "origin", f"refs/heads/{base_ref[len('origin/'):]}")
@@ -780,11 +811,22 @@ def _brief_ship_values(rd, record, ns, head, blocks, config):
         tier = _brief_fill(blocks["ship-tier-delta"], {
             "prior_handoff": ns.prior_handoff, "head_sha": head,
             "delta_files": str(delta.get("max_files", 5)), "delta_lines": str(delta.get("max_lines", 150))})
-    else:
+    elif ns.tier == "full":
         _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
         tier = blocks["ship-tier-full"]
+    else:
+        _require(ns.prior_handoff is None, "--prior-handoff applies only to --tier delta")
+        small = {**_co_review_module("change_class").SMALL_DEFAULTS,
+                 **((config.get("ship") or {}).get("small") or {})}
+        error = _co_review_module("change_class").small_caps_error(small)
+        _require(error is None, f"config ship.small is invalid: {error}")
+        prefixes = " ".join(small["sensitive_paths"])
+        tier = _brief_fill(blocks["ship-tier-auto"], {
+            "small_files": str(small["max_files"]), "small_lines": str(small["max_lines"])})
+        if prefixes:
+            tier += f"\nherdr-ship-small-sensitive: {prefixes}"
     task_id = record["task_id"]
-    return {"pr_number": str(int(pr)), "pr_repo": f"{match.group(1)}/{match.group(2)}",
+    return {"pr_number": str(int(pr)), "pr_repo": f"{owner_repo[0]}/{owner_repo[1]}",
             "live_base_sha": live, "tier-lines": tier,
             "ship_launch_dir": str(rd / "artifacts" / task_id / "ship-<launch_id>") + "/",
             "ship_report": str(rd / "tasks" / f"{task_id}.ship.md")}
@@ -806,7 +848,7 @@ def render_brief(rd, record, ns, repo_root):
     blocks = brief_blocks(BRIEF_TEMPLATE_PATH.read_text(encoding="utf-8"))
     needed = (*spec["blocks"], spec["lessons"], "lessons", "opt-in-granted", "opt-in-withheld")
     if ns.phase == "ship":
-        needed += ("ship-tier-full", "ship-tier-delta")
+        needed += ("ship-tier-full", "ship-tier-auto", "ship-tier-delta")
     missing = [name for name in needed if name not in blocks]
     _require(not missing, f"brief template lacks blocks: {', '.join(missing)}")
     worktree, task_id = record["worktree"], record["task_id"]
@@ -1135,10 +1177,9 @@ def context_record_path(session):
     return context_dir() / f"{session}.json"
 
 
-def rollover_due(rd, session, now=None):
-    """(used_pct, threshold) when this session's fresh context record has
-    reached config rollover_pct, else None. A stale, foreign, oversized or
-    malformed record never triggers; the model never writes the record."""
+def _read_context_record(session):
+    """This session's parsed context record, or None when the id is invalid
+    and the record is missing, oversized, malformed or foreign."""
     if not isinstance(session, str) or not _CONTEXT_SESSION_RE.fullmatch(session):
         return None
     try:
@@ -1147,6 +1188,28 @@ def rollover_due(rd, session, now=None):
     except (OSError, ValueError):
         return None
     if not isinstance(rec, dict) or rec.get("session_id") != session:
+        return None
+    return rec
+
+
+def recorded_launch_profile(session):
+    """(model, effort) the host last reported for this session, each None
+    unless it passes the allowlist. Age is not checked."""
+    rec = _read_context_record(session) or {}
+    model, effort = rec.get("model"), rec.get("effort")
+    if not (isinstance(model, str) and ROLLOVER_MODEL_RE.fullmatch(model)):
+        model = None
+    if effort not in EFFORT_LEVELS:
+        effort = None
+    return model, effort
+
+
+def rollover_due(rd, session, now=None):
+    """(used_pct, threshold) when this session's fresh context record has
+    reached config rollover_pct, else None. A stale, foreign, oversized or
+    malformed record never triggers; the model never writes the record."""
+    rec = _read_context_record(session)
+    if rec is None:
         return None
     used, ts = rec.get("used_pct"), rec.get("ts")
     if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= 100:
@@ -1370,7 +1433,7 @@ def wake_for_event(rd, ws, task_id, event, own_socket="", now=None):
     return reason
 
 
-_RECORD_SUFFIXES = (".done.json", ".review.json")
+_RECORD_SUFFIXES = (".done.json", ".review.json", ".ship.md")
 
 
 def wake_marker_path(rd, ws) -> Path:
@@ -1431,7 +1494,7 @@ def write_wake_marker(rd, ws, marker) -> bool:
 
 
 def record_fingerprint(rd, task_id) -> dict:
-    """{path: [mtime_ns, size]} for the task's own two completion sidecars.
+    """{path: [mtime_ns, size]} for the task's own three completion sidecars.
     An absent path is OMITTED, never recorded as None -- the one-directional
     predicate in wake_decision matches watch_changed only under that shape."""
     out = {}
@@ -2107,16 +2170,16 @@ def fold_spend(lines, task_id):
     return out
 
 
-# The default watch and the worker-status hook share one completion-record
-# predicate; the default watch also covers think answers and the legacy
+# The default watch, the backstop and the worker-status hook share one
+# completion-record set (ship reports included); the default watch also covers think answers and the legacy
 # mech ledger. workspaces/*.events.jsonl is deliberately absent -- watching
 # it would re-admit a signal per worker turn end through the fallback.
 WATCH_DIRS = {
-    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
-              (".spend.jsonl", valid_task_id)),
+    "tasks": tuple((s, valid_task_id) for s in _RECORD_SUFFIXES)
+    + ((".spend.jsonl", valid_task_id),),
     "think": ((".answer.json", valid_think_id),),
 }
-BACKSTOP_DIRS = {"tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id))}
+BACKSTOP_DIRS = {"tasks": tuple((s, valid_task_id) for s in _RECORD_SUFFIXES)}
 BACKSTOP_GRACE_SECS = 120
 # Kept well under WAKE_HEARTBEAT_STALE_SECS (900) so a director idle for the
 # whole backstop window still wakes in time to refresh its own heartbeat --
@@ -2278,6 +2341,11 @@ def delivered_records(rd) -> dict:
     return out
 
 
+def record_delivered(delivered, path, value) -> bool:
+    """True iff a sent push covered this (mtime_ns, size) of the record."""
+    return tuple(value) in delivered.get(Path(path).name, ())
+
+
 def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
     """One backstop pass (pure; clock injected). st: {"pending": {path: first_seen}}.
 
@@ -2288,7 +2356,7 @@ def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
             pending[key] = now
     for key in list(pending):
         value = snap.get(key)
-        if value is None or tuple(value) in delivered.get(Path(key).name, ()):
+        if value is None or record_delivered(delivered, key, value):
             del pending[key]
     return any(now - first >= grace_secs for first in pending.values())
 
@@ -2811,7 +2879,9 @@ def watch_state(root_pid, slug):
 ROLLOVER_PENDING_FILE = "rollover-pending.json"
 ROLLOVER_ACK_SECS = 120
 ROLLOVER_POLL_SECS = 1.0
-ROLLOVER_LAUNCH = "director 'resume director'"
+ROLLOVER_MODEL_RE = re.compile(
+    r"(?:(?:%s)|claude-(?:%s)-[0-9][a-z0-9-]{0,40})(?:\[1m\])?\Z"
+    % ("|".join(CAP_MODELS), "|".join(CAP_MODELS)))
 ROLLOVER_TOKEN_RE = re.compile(r"[0-9a-f]{32}\Z")
 ROLLOVER_CARRY_MAX = 4000
 
@@ -3320,6 +3390,18 @@ def resolve_task_workers(rec, prior, bound):
         "new task workers must be native dispatch rows" if bound
         else "new task workers rows must be objects carrying a phase",
     )
+    if bound:
+        base = rec.get("base_sha")
+        if base is None and isinstance(prior, dict):
+            base = prior.get("base_sha")
+        for row in workers[inherited:]:
+            if row.get("phase") != "review":
+                continue
+            pin = row.get("review_base_sha")
+            _require(isinstance(pin, str) and bool(SHA40_RE.fullmatch(pin))
+                     and pin == base,
+                     "a bound review row must pin the task base_sha as "
+                     "review_base_sha")
     return workers
 
 
@@ -3660,11 +3742,13 @@ NEXT_ACTIONS = {
     "confirm-review": ("run", "accept-review"),
     "exit-idle-worker": ("run", "settle"),
     "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
-    "dispatch-review": ("read", "SKILL.md section 5"),
+    "dispatch-review": ("read", "SKILL.md section 5: write the focus file, then "
+                                "dispatch-gate --phase review"),
     "stale-review-reset": ("read", "SKILL.md section 4 (stale-review-reset)"),
     "unblocked": ("read", "SKILL.md section 9 (blocked -> in-progress)"),
     "mech-ledger": ("read", "SKILL.md section 4 (run-mech worker)"),
-    "ship": ("read", "SKILL.md section 6 (ship step)"),
+    "ship": ("read", "SKILL.md section 6 ship step: merge-ready, then "
+                     "dispatch-gate --phase ship"),
     "unknown": ("read", "SKILL.md section 4 (full reconciliation)"),
     "changes-requested": ("ask", "Review at {head7} requested changes: render a repair brief "
                                  "(SKILL.md section 5 step 6), or return the task to design?"),
@@ -3993,7 +4077,17 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
             and not plan_completed):
         unverifiable.append("plan")
     last = read_wake_marker(rd, ws).get("last_delivery") if valid_workspace_id(ws) else None
-    wake = last.get("reason") if isinstance(last, dict) and isinstance(last.get("reason"), str) else "none"
+    delivered = delivered_records(rd)
+    unsent = sorted(Path(p).name[len(tid) + 1:]
+                    for p, v in record_fingerprint(rd, tid).items()
+                    if not record_delivered(delivered, p, v))
+    if unsent:
+        wake = "unsent:" + ",".join(unsent)
+    elif (isinstance(last, dict) and isinstance(last.get("reason"), str)
+          and isinstance(last.get("event"), str)):
+        wake = f"{last['reason']}:{last['event']}"
+    else:
+        wake = "none"
 
     events = []
     for row in workers:
@@ -4222,7 +4316,7 @@ def _label_pr_number(task):
 
 
 def task_state_token(task, ship_handoff=None):
-    """Short human state for a task's Herdr workspace label; display only."""
+    """Short human state; a trailing `?` marks an owner wait. Display only."""
     status = task.get("status")
     if status == "in-progress":
         return LABEL_PHASE_TOKENS[_label_phase(task)]
@@ -4253,17 +4347,16 @@ def _label_title(task):
 
 
 def task_label(task, ship_handoff=None):
-    """`<token>: <title>`, at most LABEL_MAX chars, with no ticket key or PR ref."""
+    """The readable title in at most LABEL_MAX chars, `? `-led for an owner wait."""
     token = task_state_token(task, ship_handoff)
+    mark = "? " if token.endswith("?") else ""
     title = _label_title(task)
-    budget = LABEL_MAX - len(token) - 2
-    if budget <= 0 or not title:
-        return token[:LABEL_MAX]
+    budget = LABEL_MAX - len(mark)
     if len(title) > budget:
         cut = title.rfind(" ", 0, budget + 1)
         title = title[:cut] if 2 * cut >= budget else title[:budget]
         title = title.rstrip(_LABEL_TRIM)
-    return f"{token}: {title}" if title else token
+    return f"{mark}{title}" if title else token[:LABEL_MAX]
 
 
 def label_target(task):
@@ -4526,7 +4619,7 @@ def archive_task(rd, task_id, poll, now=None):
     claimed = claimed_workspaces(rd, task_id)
     spaces = set(claimed) | {w["workspace_id"] for w in workers if w.get("workspace_id")}
     if spaces & poll["known"]:
-        return "refused", "workspace-listed", None
+        return "refused", "workspace-listed", sorted(spaces & poll["known"])
     moves = archive_moves(rd, task_id, claimed)
     dest = rd / "archive" / month
     if any(_entry_kind(dest / rel) for rel in moves):
@@ -4564,16 +4657,27 @@ def _attempt_stopped(row, done, reprompts):
     if not _attempt_settled(row, done):
         return False
     try:
-        stopped = calendar.timegm(time.strptime(done.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
+        calendar.timegm(time.strptime(done.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
         return False
+    return not _resumed_after(done, reprompts)
+
+
+def _resumed_after(settle, reprompts):
+    """A non-failed reprompt started at or after the settlement record's
+    second-granular ts, or the ts or an entry cannot be read: the worker may
+    have resumed. Errs toward True, the fail-closed direction."""
+    try:
+        settled = calendar.timegm(time.strptime(settle.get("ts"), "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        settled = None
     for entry in reprompts:
         if not isinstance(entry, dict) or entry.get("status") == "failed":
             continue
         started = entry.get("started_ns")
-        if type(started) is not int or started // 1_000_000_000 >= stopped:
-            return False
-    return True
+        if settled is None or type(started) is not int or started // 1_000_000_000 >= settled:
+            return True
+    return False
 
 
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
@@ -4729,7 +4833,16 @@ def outstanding_descendants(rd, binding_id):
             settle = None
         except (OSError, ValueError, RecursionError):
             return [UNREADABLE_SENTINEL]
+        raw = att.get("reprompts")
+        if raw is not None and not (isinstance(raw, list)
+                                    and all(isinstance(e, dict) for e in raw)):
+            return [UNREADABLE_SENTINEL]
         if not _attempt_settled(att, settle):
+            panes.add(att["pane_id"])
+        elif raw and (
+            any(e.get("status") in ("starting", "uncertain") for e in raw)
+            or _resumed_after(settle, raw)
+        ):
             panes.add(att["pane_id"])
     return sorted(panes)
 
@@ -4789,6 +4902,114 @@ def _require(cond, msg) -> None:
     if not cond:
         sys.stderr.write(f"[X] {msg}\n")
         raise SystemExit(2)
+
+
+def _close_listed_workspaces(ns, rd, listed):
+    """Close a merged task's emptied workspaces under the held fence.
+    -> None when no close applies, "" when all closed, else " workspace=<ws> kept=<why>"."""
+    if ns.agents_json or ns.workspaces_json:
+        return None
+    try:
+        task = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(task, dict) or task.get("status") != "merged":
+        return None
+    import shutil
+    from herdr_dispatch import close_emptied_workspace
+    for workspace_id in listed:
+        result = close_emptied_workspace(shutil.which("herdr"), task, workspace_id,
+                                         dict(os.environ))
+        if result != "closed":
+            return f" workspace={workspace_id} kept={result}"
+    return ""
+
+
+def _bound_final_row(ns, base, rec_b):
+    """-> (task record, final row) for a bound reprompt verb, after the shared
+    checks: task pinned to the binding, record well formed, full identity equal
+    to workers[-1]."""
+    _require(valid_task_id(ns.task_id), "invalid task-id")
+    _require(ns.task_id == rec_b["task_id"], "reprompt task does not match the binding")
+    dest = base / "tasks" / f"{ns.task_id}.json"
+    prior = read_prior_task(dest)
+    _require(prior is not PRIOR_ABSENT, "no task record to reprompt against")
+    _require(prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+             f"bound task record is malformed; {ns.cmd} cannot repair it")
+    _require(prior.get("task_id") == ns.task_id,
+             "task record task_id does not match --task-id")
+    workers = prior["workers"]
+    _require(bool(workers), "task record has no dispatch row to reprompt")
+    _require(
+        _attempt_tuple(workers[-1]) == (
+            ns.launch_id, ns.phase, ns.runtime, ns.workspace_id,
+            ns.pane_id, ns.source_head_sha,
+        ),
+        "attempt identity is not the final bound attempt",
+    )
+    return prior, workers[-1], dest
+
+
+def _bound_reprompt_verb(ns):
+    """reserve-reprompt and enrich-reprompt: the only writers of a bound
+    row's `reprompts`. Neither holds the lock across a delivery."""
+    _require(ns.runtime is not None, f"{ns.cmd} requires --runtime")
+    _require(bool(HEX32_RE.fullmatch(ns.reservation_id or "")),
+             "reservation-id must be 32 lowercase hex characters")
+    if ns.cmd == "reserve-reprompt":
+        _require(bool(HEX64_RE.fullmatch(ns.prompt_sha256 or "")),
+                 "prompt-sha256 must be 64 lowercase hex characters")
+        _require(ns.expected_seq >= 0, "expected-seq must not be negative")
+    else:
+        _require(ns.status in REPROMPT_OUTCOMES,
+                 f"status must be one of {'|'.join(REPROMPT_OUTCOMES)}")
+        _require(ns.prompt_state is None or bool(SHELL_SAFE_RE.fullmatch(ns.prompt_state)),
+                 "prompt-state must be shell-safe")
+    with _fenced_scoped(ns) as (rd, base):
+        require_not_consumed(rd, ns.binding)
+        rec_b = bindings.read_binding(rd, ns.binding)
+        _require(rec_b is not None, "unknown dispatch binding")
+        prior, row, dest = _bound_final_row(ns, base, rec_b)
+        raw = row.get("reprompts", [])
+        _require(isinstance(raw, list) and all(isinstance(e, dict) for e in raw),
+                 "reprompts is present but is not a list of objects")
+        entries = list(raw)
+        if ns.cmd == "reserve-reprompt":
+            _require(row.get("status") == "launched" and not row.get("exit_requested"),
+                     "the final bound attempt is not a live launched attempt")
+            _require(not any(e.get("status") in ("starting", "uncertain") for e in entries),
+                     "a prior reprompt on this launch is unresolved")
+            _require(len(entries) == ns.expected_seq,
+                     "reprompt history changed since the readiness probe; probe again")
+            _require(not any(e.get("reservation_id") == ns.reservation_id for e in entries),
+                     "reservation-id is already in use")
+            entries.append({
+                "seq": len(entries), "started_ns": time.time_ns(),
+                "prompt_sha256": ns.prompt_sha256,
+                "reservation_id": ns.reservation_id, "status": "starting",
+            })
+        else:
+            index = next((i for i, e in enumerate(entries)
+                          if e.get("reservation_id") == ns.reservation_id), None)
+            _require(index is not None, "no reprompt entry carries that reservation-id")
+            entry = entries[index]
+            _require(ns.seq is None or entry.get("seq") == ns.seq,
+                     "reprompt entry seq does not match --seq")
+            if (entry.get("status") == ns.status
+                    and entry.get("prompt_state") == ns.prompt_state):
+                return 0
+            _require(entry.get("status") == "starting",
+                     "reprompt entry is not starting; its outcome is already recorded")
+            entry = {**entry, "status": ns.status}
+            if ns.prompt_state is not None:
+                entry["prompt_state"] = ns.prompt_state
+            entries[index] = entry
+        updated = {**row, "reprompts": entries}
+        workers = prior["workers"]
+        written = {**prior, "workers": [*workers[:-1], updated]}
+        _require_record_within_reader_limit(written)
+        write_json_atomic(dest, written)
+        return 0
 
 
 @contextlib.contextmanager
@@ -4898,9 +5119,17 @@ def _adopt_rollover(ns) -> int:
     return 0
 
 
-def rollover_launch(scope_kind):
+def rollover_launch(scope_kind, model=None, effort=None):
     """The shell line that starts the successor on this director's account."""
-    return "director --personal 'resume director'" if scope_kind == "personal" else ROLLOVER_LAUNCH
+    parts = ["director"]
+    if scope_kind == "personal":
+        parts.append("--personal")
+    if model is not None:
+        parts += ["--model", shlex.quote(model)]
+    if effort is not None:
+        parts += ["--effort", shlex.quote(effort)]
+    parts.append("'resume director'")
+    return " ".join(parts)
 
 
 def marker_live(marker, session, fence):
@@ -5039,8 +5268,13 @@ def _rollover(ns) -> int:
         print("rollover: carry notes not saved; this session keeps the lease")
         return failed("carry-unsaved", hid, new_pane, close_pane=True)
     scope_kind = ((_PAYLOAD_SELECTION.get() or {}).get("scope") or {}).get("kind")
+    model, effort = recorded_launch_profile(ns.session)
+    for name, value in (("model", model), ("effort", effort)):
+        if value is None:
+            print(f"[WARNING] rollover: no recorded {name} for this session; "
+                  f"the new director starts on the account default {name}")
     try:
-        run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
+        run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind, model, effort)],
                   env=env, json_result=False)
     except Exception:  # noqa: BLE001
         # herdr may have delivered the command before failing; the lease decides.
@@ -5278,6 +5512,27 @@ def _note_decision(ns) -> int:
     return 0
 
 
+QUEUE_FILE = "queue.json"
+QUEUE_MAX = 10
+
+
+def _set_queue(ns) -> int:
+    """Write the director's queued-next todo ids; the fleet panel's Queue tab reads them."""
+    _require(ns.repo_path, "--repo-path is required")
+    ids = ns.todo
+    _require(len(ids) <= QUEUE_MAX, f"at most {QUEUE_MAX} todos")
+    _require(len(set(ids)) == len(ids), "duplicate todo id")
+    for todo_id in ids:
+        _require(valid_task_id(todo_id), f"invalid todo id: {todo_id}")
+        _require((Path(ns.repo_path) / ".todos" / "pending" / f"{todo_id}.md").is_file(),
+                 f"not a pending todo: {todo_id}")
+    with _fenced(ns) as rd:
+        write_json_atomic(Path(rd) / QUEUE_FILE, {"v": 1, "todos": ids, "ts": now_iso(),
+                                                  "session": ns.session, "fence": ns.fence})
+    print(f"queue: {len(ids)} todos")
+    return 0
+
+
 def _retire_decision(ns) -> int:
     with _fenced(ns) as rd:
         entries = read_decisions(rd)
@@ -5340,9 +5595,9 @@ def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
 SHIP_CI_OK = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 
 
-def _gate_report_module():
-    path = Path(__file__).resolve().parents[1] / "skills" / "co-review" / "scripts" / "gate_report.py"
-    spec = importlib.util.spec_from_file_location("dotfiles_gate_report", path)
+def _co_review_module(name):
+    path = Path(__file__).resolve().parents[1] / "skills" / "co-review" / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"dotfiles_{name}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -5425,9 +5680,11 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
                         f"verdict={out['handoff_verdict']}")
         return out
     report_path, expected_path = handoff.get("report_path"), handoff.get("expected_path")
-    for path in (report_path, expected_path):
+    for label, path, name in (("report_path", report_path, "report.json"),
+                              ("expected_path", expected_path, "expected.json")):
         if not path or not contained(path, launch_dir):
-            fail("handoff", f"{path} is outside {launch_dir}")
+            fail("handoff", f"{label} {path} is outside {launch_dir}; "
+                            f"expected {Path(launch_dir) / 'run' / name}")
             return out
     out["report_path"], out["expected_path"] = report_path, expected_path
     try:
@@ -5464,7 +5721,7 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
         # The reviewed tree is the head merged with the gated base; a base that
         # moved since only has to merge cleanly (co-review Freeze).
         try:
-            check = _gate_report_module()._load_sibling("branch_delta").base_check(
+            check = _co_review_module("gate_report")._load_sibling("branch_delta").base_check(
                 Path(worktree), live_head, gated_base, base_tip,
                 str(pr.get("baseRefName")), tree)
         except Exception as exc:  # the gate fails closed
@@ -5483,16 +5740,23 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
         fail("pr-state", f"state={pr.get('state')} isDraft={pr.get('isDraft')}")
     if pr.get("mergeable") != "MERGEABLE":
         fail("not-mergeable", f"mergeable={pr.get('mergeable')}")
-    ci = _ci_reasons(pr.get("statusCheckRollup"))
-    if ci:
-        fail("ci", "; ".join(ci))
+    rollup = pr.get("statusCheckRollup")
+    try:
+        if isinstance(rollup, list):
+            rollup = _co_review_module("gate_report").latest_check_runs(rollup)[0]
+    except Exception as exc:  # the gate fails closed
+        fail("ci", f"latest-run filter failed: {exc}")
+    else:
+        ci = _ci_reasons(rollup)
+        if ci:
+            fail("ci", "; ".join(ci))
     refused = task.get("merge_check")
     if (isinstance(refused, dict) and refused.get("result") == "fail"
             and refused.get("branch_head_sha") == live_head
             and refused.get("base_main_sha") == base_tip):
         fail("merge-refused", str(refused.get("reason")))
     try:
-        verdict = _gate_report_module().evaluate(report, expected, Path(report_path).resolve().parent)
+        verdict = _co_review_module("gate_report").evaluate(report, expected, Path(report_path).resolve().parent)
     except Exception as exc:  # the gate fails closed
         verdict = {"verdict": "INCOMPLETE", "approve_allowed": False, "reasons": [str(exc)]}
     if verdict.get("verdict") != "APPROVE" or verdict.get("approve_allowed") is not True:
@@ -5582,6 +5846,17 @@ def _main(argv=None) -> int:
               "--workspace-id", "--pane-id", "--source-head-sha", "--json",
               fenced=True)
     enr.add_argument("--binding", required=True)
+    rrp = add("reserve-reprompt", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha",
+              "--prompt-sha256", "--reservation-id", fenced=True)
+    rrp.add_argument("--binding", required=True)
+    rrp.add_argument("--expected-seq", type=int, required=True)
+    erp = add("enrich-reprompt", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha",
+              "--reservation-id", "--status", fenced=True)
+    erp.add_argument("--binding", required=True)
+    erp.add_argument("--prompt-state", default=None)
+    erp.add_argument("--seq", type=int, default=None)
     wi = add("write-index", "--workspace", "--json", fenced=True)
     wi.add_argument("--binding", default=None)
     add("write-capabilities", "--json", fenced=True)
@@ -5685,6 +5960,7 @@ def _main(argv=None) -> int:
     add("review-deadlines")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
+    add("activate-task-leads", fenced=True)
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
@@ -5713,6 +5989,7 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     add("merge-authority")
     add("merge-ready", "--task-id", "--pr-json", "--repo-json")
+    add("sync-main", "--branch")
     pt = add("present-task")
     pt.add_argument("--task-id", default=None)
     pt.add_argument("--all", action="store_true")
@@ -5726,6 +6003,8 @@ def _main(argv=None) -> int:
     scope_group.add_argument("--task", default=None)
     scope_group.add_argument("--repo-wide", action="store_true")
     add("retire-decision", "--id", fenced=True)
+    sq = add("set-queue", fenced=True)
+    sq.add_argument("--todo", action="append", default=[])
     ak = add("archive-task", "--task-id", fenced=True)
     ak.add_argument("--agents-json", default=None)
     ak.add_argument("--workspaces-json", default=None)
@@ -5833,6 +6112,8 @@ def _main(argv=None) -> int:
         return _note_decision(ns)
     if ns.cmd == "retire-decision":
         return _retire_decision(ns)
+    if ns.cmd == "set-queue":
+        return _set_queue(ns)
     if ns.cmd == "write-task":
         _require(not (ns.present and ns.binding is not None),
                  "--present is launcher scope only; drop it with --binding")
@@ -5963,6 +6244,15 @@ def _main(argv=None) -> int:
                     row[name] = value
             _require(_native_worker_row(row),
                      "reservation is not a native dispatch row")
+            if ns.phase == "review":
+                # Pin the base the reviewer is dispatched against; bound
+                # write-task keeps rows append-only, so the pin outlives a
+                # later base_sha rewrite.
+                pin = prior.get("base_sha")
+                _require(isinstance(pin, str) and bool(SHA40_RE.fullmatch(pin)),
+                         "a review reservation requires a 40-hex base_sha "
+                         "on the task record")
+                row["review_base_sha"] = pin
             workers = prior["workers"]
             identity = _attempt_tuple(row)
             if any(_attempt_tuple(worker) == identity for worker in workers):
@@ -6015,11 +6305,16 @@ def _main(argv=None) -> int:
         # the update, so every gate reading ATTEMPT_FIELDS observes an
         # unchanged value without any comparison having to be right.
         #
-        # The cost: every OTHER field of a bound workers[-1] is mutable, so no
-        # gate may key on one. Nothing does today -- the readers that use
-        # `status` or `reprompts` read launcher-scope rd/tasks/ -- and a new
-        # bound-path fact belongs in the identity tuple or a settlement
-        # record, never here.
+        # The cost: every OTHER field of a bound workers[-1] is mutable, so a
+        # gate keying on one trusts the lead's own fence. The bound stop gate
+        # and audit read role, account_id, pane_id and status (a lead that
+        # mislabels its row loses only the nudge), and outstanding_descendants
+        # reads reprompts, which only reserve-reprompt and enrich-reprompt
+        # write. A new bound-path fact belongs in the identity tuple or a
+        # settlement record, never here.
+        _require("reprompts" not in updates, "an enrichment may not name reprompts")
+        _require("review_base_sha" not in updates,
+                 "an enrichment may not name review_base_sha")
         _require(not set(updates) & set(ATTEMPT_FIELDS),
                  "an enrichment may not name an attempt identity field")
         # Record-level keys belong to the task, not to one attempt. A row
@@ -6066,6 +6361,8 @@ def _main(argv=None) -> int:
             _require_record_within_reader_limit(enriched)
             write_json_atomic(dest, enriched)
             return 0
+    if ns.cmd in ("reserve-reprompt", "enrich-reprompt"):
+        return _bound_reprompt_verb(ns)
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):
             if ns.binding is not None:
@@ -6471,6 +6768,18 @@ def _main(argv=None) -> int:
                                  "a binding-scoped review emit requires "
                                  "--reviewed-base-sha (the base the reviewer "
                                  "reviewed)")
+                        review_rows = [
+                            w for w in task.get("workers", [])
+                            if isinstance(w, dict) and w.get("phase") == "review"
+                        ]
+                        row_pin = (review_rows[-1].get("review_base_sha")
+                                   if review_rows else None)
+                        _require(isinstance(row_pin, str)
+                                 and bool(SHA40_RE.fullmatch(row_pin)),
+                                 "the review row carries no pinned base")
+                        _require(ns.reviewed_base_sha == row_pin,
+                                 "reviewed base does not match the review "
+                                 "row's pinned base")
                         _require(ns.reviewed_base_sha == task.get("base_sha"),
                                  "reviewed base does not match the dispatched base")
                         done["review_base_sha"] = ns.reviewed_base_sha
@@ -7798,28 +8107,9 @@ def _main(argv=None) -> int:
         }, sort_keys=True))
         return 0
     if ns.cmd == "deactivate-task-leads":
-        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
-        # Selection BEFORE rd, for the same reason as task-lead-status, and
-        # because owner_transaction only fills expected_slug from a pinned
-        # selection. Without it this verb -- the documented off switch, and
-        # step 2 of the rollback runbook -- exited 2 on its default args.
-        select_payload(ns)
-        selection = _PAYLOAD_SELECTION.get()
-        context, scope = selection["context"], selection["scope"]
-        rd = repo_dir(ns.repo_slug)
-        with owner_transaction(rd, ns.session, ns.fence, context=context, scope=scope) as tx:
-            _require(
-                tx.current.get("control_tier", "launcher") == "launcher",
-                "only a launcher owner may deactivate task leads",
-            )
-            write_json_atomic(herdr_caps.gate_path(rd), {
-                "schema_version": herdr_caps.GATE_SCHEMA_VERSION,
-                "repo_slug": ns.repo_slug,
-                "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
-                "account_id": tx.account_id,
-                "enabled": False,
-            })
-        return 0
+        return _publish_task_lead_gate(ns, False)
+    if ns.cmd == "activate-task-leads":
+        return _publish_task_lead_gate(ns, True)
     if ns.cmd == "should-dispatch-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -7866,15 +8156,34 @@ def _main(argv=None) -> int:
             return 0
     if ns.cmd == "archive-task":
         _require(valid_task_id(ns.task_id), "invalid task-id")
-        # Poll first: no herdr subprocess runs under the owner lock.
+        # The polls run outside the owner lock; the close runs under it, as settle's does.
         poll, _ = _checkin_poll(ns)
         with _fenced(ns) as rd:
             outcome, detail, count = archive_task(rd, ns.task_id, poll)
+            if outcome == "refused" and detail == "workspace-listed":
+                kept = _close_listed_workspaces(ns, rd, count)
+                if kept:
+                    print(f"refused {ns.task_id} reason=workspace-listed{kept}")
+                    return 1
+                if kept == "":
+                    outcome = "closed"
+        if outcome == "closed":
+            poll, _ = _checkin_poll(ns)
+            with _fenced(ns) as rd:
+                outcome, detail, count = archive_task(rd, ns.task_id, poll)
         if outcome == "refused":
             print(f"refused {ns.task_id} reason={detail}")
             return 1
         print(f"archived {ns.task_id} archive/{detail} files={count}")
         return 0
+    if ns.cmd == "sync-main":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(ns.repo_path is not None, "sync-main needs --repo-path")
+        _require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ns.branch) is not None,
+                 "invalid branch")
+        result, code = sync_main(ns.repo_path, ns.branch)
+        print(json.dumps(result, sort_keys=True))
+        return code
     if ns.cmd == "merge-ready":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -8273,6 +8582,33 @@ def select_payload(ns):
     _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
 
 
+def _publish_task_lead_gate(ns, enabled):
+    """Write the task-lead gate record for one repo under the launcher fence."""
+    verb = "activate" if enabled else "deactivate"
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    # Selection BEFORE rd, for the same reason as task-lead-status, and
+    # because owner_transaction only fills expected_slug from a pinned
+    # selection. Without it the off switch (step 2 of the rollback runbook)
+    # exited 2 on its default args.
+    select_payload(ns)
+    selection = _PAYLOAD_SELECTION.get()
+    context, scope = selection["context"], selection["scope"]
+    rd = repo_dir(ns.repo_slug)
+    with owner_transaction(rd, ns.session, ns.fence, context=context, scope=scope) as tx:
+        _require(
+            tx.current.get("control_tier", "launcher") == "launcher",
+            f"only a launcher owner may {verb} task leads",
+        )
+        write_json_atomic(herdr_caps.gate_path(rd), {
+            "schema_version": herdr_caps.GATE_SCHEMA_VERSION,
+            "repo_slug": ns.repo_slug,
+            "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
+            "account_id": tx.account_id,
+            "enabled": enabled,
+        })
+    return 0
+
+
 def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):
     """(admit, reason, levels) for a lead claim in this repository.
 
@@ -8307,6 +8643,104 @@ def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):
                 f"below the required {herdr_caps.REQUIRED_CAPABILITY}"
             ), levels
     return True, "task-lead dispatch is admissible", levels
+
+
+SYNC_MAIN_REASONS = {
+    20: "not-a-worktree", 21: "detached", 22: "not-on-branch", 23: "no-upstream",
+    24: "fetch-failed", 25: "ahead", 26: "diverged", 27: "dirty",
+    28: "ff-refused", 29: "inspect-error",
+}
+SYNC_MAIN_TIMEOUT = 120
+# Paths `update --ai` consumes; a hand list, so a new installer input outside
+# it under-reports and `update`'s staleness notice is the fallback.
+UPDATE_AI_PREFIXES = ("install/", "herdr/", "codex/")
+UPDATE_AI_FILES = ("claude/settings.json.tmpl",)
+
+
+def _sync_main_head(checkout):
+    try:
+        return context_git(checkout, "rev-parse", "HEAD")
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def sync_main(repo_path, branch):
+    """Fast-forward the primary worktree through repo-sync.sh; (result, exit code)."""
+    context = repository_context(repo_path)
+    result = {"branch": branch, "checkout": context["primary_root"], "detail": "",
+              "new_head": None, "old_head": None, "reason": "", "synced": False,
+              "update_ai": False, "update_ai_paths": []}
+    if not context["primary_known"]:
+        result["reason"] = "no-primary"
+        return result, 0
+    checkout = context["primary_root"]
+    head = _sync_main_head(checkout)
+    result["old_head"] = result["new_head"] = head
+    try:
+        lock = context_git(checkout, "rev-parse", "--path-format=absolute",
+                           "--git-path", "index.lock")
+    except (OSError, subprocess.SubprocessError):
+        result["reason"] = "error"
+        return result, 1
+    if os.path.exists(lock):
+        result["reason"] = "locked"
+        return result, 1
+    script = Path(__file__).resolve().parents[2] / "install" / "common" / "repo-sync.sh"
+    if not script.is_file():
+        result["reason"] = "error"
+        result["detail"] = "repo-sync.sh missing"
+        return result, 1
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # RS10: a retry overlapping a sync left running by a dead verb may fail on
+    # a git lock; that is reported as a skip and the next merge syncs again.
+    proc = subprocess.Popen(
+        ["bash", str(script), "--require-branch", branch, checkout], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=SYNC_MAIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        result["reason"] = "timeout"
+        return result, 1
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    result["detail"] = lines[-1][:300] if lines else ""
+    code = proc.returncode
+    if code in SYNC_MAIN_REASONS:
+        result["reason"] = SYNC_MAIN_REASONS[code]
+        return result, 0
+    if code == 30:
+        result["reason"] = "uncertain"
+        return result, 1
+    if code != 0:
+        result["reason"] = "error"
+        return result, 1
+    live = _sync_main_head(checkout)
+    result["old_head"] = result["new_head"] = live
+    forwarded = re.search(r"^\[OK\] fast-forwarded ([0-9a-f]{40,64})\.\.([0-9a-f]{40,64})$",
+                          out, re.M)
+    if forwarded is None and "[OK] already up to date" in out:
+        result["reason"] = "up-to-date"
+        result["synced"] = True
+        return result, 0
+    if forwarded is None or live != forwarded.group(2):
+        result["reason"] = "uncertain"
+        return result, 1
+    old, new = forwarded.groups()
+    result.update(reason="synced", synced=True, old_head=old, new_head=new)
+    if (Path(checkout) / "install" / "common" / "ai-update.sh").exists():
+        try:
+            changed = context_git(checkout, "diff", "--name-only", old, new).splitlines()
+        except (OSError, subprocess.SubprocessError):
+            changed = []
+        paths = sorted(f for f in changed
+                       if f.startswith(UPDATE_AI_PREFIXES) or f in UPDATE_AI_FILES)
+        result.update(update_ai=bool(paths), update_ai_paths=paths)
+    return result, 0
 
 
 def main(argv=None) -> int:

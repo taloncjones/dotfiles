@@ -472,6 +472,7 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     reprompt.add_argument("--runtime", default="claude", choices=("claude", "codex"))
     reprompt.add_argument("--prompt-timeout-ms", type=int, default=120_000)
     reprompt.add_argument("--personal", action="store_true")
+    reprompt.add_argument("--binding", default=None)
     for verb in ("settle", "sweep"):
         sub = commands.add_parser(verb)
         flags = ["repo-slug", "task-id", "session", "workspace-id", "cwd"]
@@ -491,6 +492,15 @@ def _dispatch_parser() -> argparse.ArgumentParser:
         sub.add_argument("--personal", action="store_true")
         if verb == "advance":
             sub.add_argument("--focus-file", default=None)
+    gate = commands.add_parser("dispatch-gate")
+    for flag in ("repo-slug", "repo-path", "task-id", "session", "focus-file"):
+        gate.add_argument(f"--{flag}", required=True)
+    gate.add_argument("--fence", required=True, type=int)
+    gate.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+    gate.add_argument("--personal", action="store_true")
+    gate.add_argument("--phase", required=True, choices=("review", "ship"))
+    gate.add_argument("--tier", default=None, choices=("full", "delta"))
+    gate.add_argument("--prior-handoff", default=None)
     return parser
 
 
@@ -544,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime=args.runtime,
                 prompt_timeout_ms=args.prompt_timeout_ms,
                 personal=args.personal,
+                binding=args.binding,
             )
         elif args.command in ("settle", "sweep"):
             kwargs = dict(
@@ -563,6 +574,12 @@ def main(argv: list[str] | None = None) -> int:
                 output = herdr_dispatch.advance(focus_file=args.focus_file, **kwargs)
             else:
                 output = herdr_dispatch.accept_review(**kwargs)
+        elif args.command == "dispatch-gate":
+            output = herdr_dispatch.dispatch_gate(
+                repo_slug=args.repo_slug, repo_path=args.repo_path, runtime=args.runtime,
+                task_id=args.task_id, session=args.session, fence=args.fence,
+                phase=args.phase, focus_file=args.focus_file, tier=args.tier,
+                prior_handoff=args.prior_handoff, personal=args.personal)
         else:
             output = herdr_dispatch.wake(
                 args.thread_id,

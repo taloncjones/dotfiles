@@ -56,10 +56,136 @@ the pane it names from teardown.
 `inspect --binding <bid>` reads the bound attempt and its settlement record.
 `emit-done --binding` and `emit-review --binding` require a live,
 registry-corroborated lead lease, so a worker cannot settle on a dead lead's
-behalf. `reprompt` has no bound form yet: a bound worker that needs a second
-brief is re-dispatched or prompted by hand (follow-up todo). The worker-side
-hooks (`herdr_stop_gate.py`, `scratch_policy.py`) still read launcher scope
-only, so a bound worker's stop is not gated (follow-up todo).
+behalf.
+
+## Reprompting a bound worker
+
+`herdr_dispatch.py reprompt --binding <bid>` sends a second brief to the
+worker a lead launched, with the lead's own `--session` and `--fence`. The
+other flags are the launcher form's. The adapter validates the binding the
+way `launch --binding` does, then requires the named launch to be the final
+bound row (`workers[-1]`) of the lead's task record. Otherwise it refuses with
+"named launch is not the final bound attempt; re-dispatch instead". A lead
+repairs after review by re-dispatching an implement worker, not by
+reprompting an earlier row.
+
+The order is: read the row, probe the agent (`agent get`, idle or done), then
+`reserve-reprompt` (appends a `starting` entry), deliver with no lock held,
+then `enrich-reprompt` (records `delivered`, `uncertain` or
+`delivered-unrecorded`). The adapter never writes a `leads/` record itself.
+
+Exit codes:
+
+- Adapter: `exit 0` with status `reprompted`, `uncertain` or
+  `delivered-unrecorded`; `exit 2` with error JSON and a reason for any
+  refusal (an invalid, unknown, revoked or foreign binding; a non-final row;
+  a failed probe; an unresolved earlier entry).
+- Core verbs (`reserve-reprompt`, `enrich-reprompt`): `exit 0` when written or
+  a replayed no-op; `exit 2` refused, with `[X] <reason>` on stderr.
+
+A launcher fence with `--binding` is refused by the lead-fence check, and a
+lead fence without it is refused by the launcher owner check. Neither writes.
+
+Recovery: an unresolved `starting` or `uncertain` entry blocks further
+reprompts on that row and keeps its pane outstanding for teardown. Before
+re-dispatching, end the prior worker. A re-dispatch into the same pane proves
+the prior agent exited. A re-dispatch into another pane is the lead's
+assertion that the prior pane's occupancy ended, so close that pane first. An
+operator who terminated the pane passes `--descendants-terminated` to
+teardown.
+
+A reprompt after the worker's `emit-done` keeps its pane outstanding until a
+later emit settles the new turn. A review worker cannot replace a verdict at
+the same head with a different outcome: the core refuses with "a same-revision
+review verdict cannot be replaced".
+
+## Worker-side hooks
+
+A worker a lead launched runs in the lead's workspace, so its pane differs
+from the director row's pane. `herdr_stop_gate.py` finds the one claimed
+binding whose final row names that workspace and pane and gates the stop
+against the lead subtree. The refusal's emitter line carries `--binding`, and
+a review line carries `--reviewed-base-sha` and `--reviewer-session`. A pane
+with no match, or with several, is allowed silently. `scratch_policy.py`
+audits the same worker's scratch allows to
+`leads/<bid>/tasks/<task_id>.policy.jsonl`.
+
+## Enabling task leads
+
+Run these steps for one repository at a time, only on the owner's explicit go
+for that repository.
+
+1. Run `task-lead-status` and read `gate_enabled` and `admit`.
+2. Get the owner's explicit go to enable task leads for this repository.
+3. Run `activate-task-leads --repo-path <repo> --repo-slug <slug> --session <director session> --fence <director fence>`.
+   Idempotent. Exit 0 means the record is written; exit 2 means a refusal
+   (invalid slug, stale fence, wrong session, or a non-launcher owner) and
+   nothing is written.
+4. Confirm with `task-lead-status`: `gate_enabled` must read true.
+
+The verb writes only this repository's gate record; repositories without a
+record keep refusing. It admits no lead while the `SKILL.md` capability marker
+is `0`; `admit` stays false until the marker reaches the required level.
+`deactivate-task-leads` is the off switch.
+
+Uncertain outcome: after an activation that did not exit zero, or whose result
+you did not see, read `task-lead-status` first. If it reads
+`gate_enabled: true`, stop. If it reads disabled or absent, run the verb again
+only with a fresh go, because a deactivation may have landed in between and a
+blind retry would undo it.
+
+## Dispatching a task lead (director side)
+
+1. Preconditions: `task-lead-status` reads `gate_enabled: true`, `procedure: 1`
+   and `admit: true` (see "Enabling task leads"). Plan and confirm the task as
+   usual, then settle the plan row. Do not run `advance`; the lead replaces the
+   launch.
+2. Launch the lead as the task's implement row with `herdr_dispatch.py launch
+   --phase implement`. The prompt is the rendered implement brief plus a lead
+   section: the claim, `write-task --binding`, worker, review, PR and envelope
+   steps below, and the rule to start agents only through `launch --binding`.
+3. Handshake: the lead's first turn prints `lead-session $CLAUDE_CODE_SESSION_ID`
+   and stops. The stop gate refuses that first stop; the lead does not emit.
+   Read the line with `herdr pane read <lead pane> --source detection --lines 50`.
+4. Run `issue-binding --task-id <task> --workspace-root <worktree>
+   --expected-session <lead session>` with the launcher fence. Record the
+   binding id.
+5. Deliver the binding with the launcher form of `herdr_dispatch.py reprompt`
+   on the lead's row, naming the binding id.
+6. The lead runs `claim-owner --control-tier lead --binding <bid>`, writes the
+   task record with `write-task --binding`, launches workers and reviewer with
+   `launch --binding`, reprompts a worker for a later slice with `reprompt
+   --binding`, pushes the branch and opens a draft PR, then calls
+   `emit-artifacts` once with every file the director will quote (a later call
+   replaces the manifest and drops the others), and `emit-envelope`. It closes
+   its worker panes and emits its own launcher `emit-done` for the implement
+   phase.
+7. After that `emit-done`, read `leads/<bid>/envelope.json` and
+   `artifacts.json`, and check each blob against its digest and size. Nobody
+   moves the branch from here until step 8 succeeds.
+8. Run `integrate-envelope --binding <bid> --base-sha <base> --head-sha <PR
+   head>`, then `teardown-binding --binding <bid>`. The lead's manifest exists,
+   so `--no-artifacts` is not needed; never `--prune` before the evidence is
+   quoted.
+9. Ship through the normal launcher review and ship gates. Nothing bridges an
+   integrated envelope to them.
+
+Constraints and recovery:
+
+- `set-binding-status --status completed` is refused, because
+  completed is reached only through integrate-envelope.
+- `integrate-envelope` writes the consumption record, then the `completed`
+  status. If it stops between them, re-run it with the same SHAs and the branch
+  unmoved. `teardown-binding --abandon` is refused while a consumption record
+  exists.
+- A bound review row carries `review_base_sha`, copied from the task record by
+  `reserve-dispatch`. When the record has no 40-hex `base_sha`, the reservation
+  fails with "a review reservation requires a 40-hex base_sha on the task record",
+  so the lead writes the base before launching a reviewer.
+- A launcher reprompt entry left `starting` or `uncertain` is never resent and
+  blocks later launcher reprompts of the lead. If the binding reads `claimed`,
+  the lead holds it and the run continues; otherwise stop for the owner, who
+  ends the lead and runs `teardown-binding --abandon` and `reconcile-leads`.
 
 ## Rolling back task leads
 
@@ -69,7 +195,8 @@ verb exited zero before resuming any service.
 
 1. Stop dispatching new leads. A human decision; nothing durable records it,
    so re-assert it by running step 2.
-2. Run `deactivate-task-leads`. Idempotent; re-run it if interrupted, and
+2. Run `deactivate-task-leads` with the same flags and exit codes as the
+   activate verb. Idempotent; re-run it if interrupted, and
    confirm the committed state with `task-lead-status`.
 3. Settle or stop leads and descendants. If interrupted, re-run; outstanding
    work is re-reported by `outstanding_descendants`.

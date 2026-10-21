@@ -6,6 +6,7 @@
     "sessionUrl": false
   },
   "promptSuggestionEnabled": false,
+  "tui": "fullscreen",
   "env": {
     "CLAUDE_CODE_DISABLE_TELEMETRY": "1"
   },
@@ -195,6 +196,10 @@
           },
           {
             "type": "command",
+            "command": "~/.claude/hooks/shell_hint.py"
+          },
+          {
+            "type": "command",
             "command": "~/.claude/hooks/pr_post_guard.py"
           },
           {
@@ -204,6 +209,10 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/planning_artifact_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/signer_guard.py"
           }
         ]
       },
@@ -235,6 +244,19 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/git_remote_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/opaque_label_hint.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/pr_post_guard.py"
           }
         ]
       }
@@ -275,6 +297,15 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/pr_post_guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/director_delegate_hint.py"
           }
         ]
       }

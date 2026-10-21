@@ -47,17 +47,21 @@ target base. Stop if either identity is unavailable or mismatched.
    a stop, not permission to automatically launch another gate.
    `co-review` self-classifies the frozen diff (lessons for a diff touching only
    `claude/rules/personal/agent-lessons.md`, light for other prose-only changes,
-   full otherwise); pass `--full` when a prose change alters a machine-read
+   small for a code change of at most 3 files and 40 changed lines with a test
+   and green CI, full otherwise); pass `--full` when a prose change alters a machine-read
    contract, such as a SKILL.md block a test greps.
-A herdr brief line `herdr-ship-brief: tier=full` runs `co-review --full`.
+A herdr brief line `herdr-ship-brief: tier=auto` runs plain `co-review` (the
+classifier picks the tier) with the caps from `herdr-ship-small-caps:
+<files>/<lines>` and the prefixes from `herdr-ship-small-sensitive:` passed
+to `classify`. `herdr-ship-brief: tier=full` runs `co-review --full`.
 `herdr-ship-brief: tier=delta` runs `co-review --delta` with the prior
 report, expected identity and digests read from the `ship.json` named by
 `herdr-ship-prior-handoff:`, the caps from `herdr-ship-delta-caps:`, and
 the head bound by `herdr-ship-delta-head:`; the co-review Delta tier
-section decides the final tier. A delta gate's `escalate: "full"`
-is not a relaunch after a fix: in a herdr launch it ends the launch, and
-interactively the co-review Delta tier section runs its one fresh full
-gate.
+section decides the final tier. A delta or small gate's
+`escalate: "full"` is not a relaunch after a fix: in a herdr launch it ends the launch, and
+interactively the co-review Delta tier or Small tier section runs its one
+fresh full gate.
 
 4. **Recheck gate evidence.** Immediately before presenting a merge-ready
    result, fetch live PR head, base branch, target base (the live tip from `git ls-remote origin refs/heads/<base branch>`, not the lagging `baseRefOid`), and CI. The active

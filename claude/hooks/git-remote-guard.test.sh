@@ -254,6 +254,8 @@ case_ "denies remote -v remove (option before subcommand)" deny "git remote -v r
 case_ "denies remote --verbose remove" deny "git remote --verbose remove origin"
 case_ "denies path-qualified git" deny "/usr/bin/git remote remove origin"
 case_ "denies env-prefixed git" deny "env FOO=1 git remote remove origin"
+case_ "denies remote remove after a do keyword" deny "for r in x; do git remote remove origin; done"
+case_ "denies remote remove after a ! keyword" deny "! git remote remove origin"
 case_ "denies sh -c wrapped" deny "sh -c 'git remote remove origin'"
 case_ "denies after a compound" deny "ls && git remote remove origin"
 case_ "allows remote add" allow "git remote add origin x"
@@ -278,6 +280,7 @@ case_ "denies cd - (unknown)" deny "cd -; git remote remove origin" "$R"
 case_ "denies a quoted operator fabricating a cd" deny "echo ';' cd $R; git remote remove origin"
 case_ "denies an escaped operator fabricating a cd" deny "echo \\; cd $R; git remote remove origin"
 case_ "denies a skipped cd preserved across a subshell boundary" deny "false && cd $R && (true); git remote remove origin"
+case_ "denies a keyword-prefixed cd that may not run" deny "if false; then cd $R; fi; git remote remove origin"
 case_ "allows a literal cd && git" allow "cd $R && git remote remove origin"
 case_ "allows a literal cd ; git" allow "cd $R; git remote remove origin"
 case_ "allows a cd inside the same subshell" allow "( cd $R && git remote remove origin )"
@@ -516,8 +519,10 @@ ours = [e for e in pre if e.get("matcher") == "Bash|Edit|Write"]
 bash = [h["command"] for e in pre if e.get("matcher") == "Bash" for h in e["hooks"]]
 want_bash = ["~/.claude/hooks/commit_guard.py", "~/.claude/hooks/no_ai_attribution_bash.py",
              "~/.claude/hooks/push_guard.py", "~/.claude/hooks/herdr_worktree_guard.py",
-             "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/pr_post_guard.py",
-             "~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py"]
+             "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/shell_hint.py",
+             "~/.claude/hooks/pr_post_guard.py",
+             "~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py",
+             "~/.claude/hooks/signer_guard.py"]
 ok = len(ours) == 1 and ours[0]["hooks"] == [{"type": "command", "command": "~/.claude/hooks/git_remote_guard.py"}] \
     and bash == want_bash
 sys.exit(0 if ok else 1)

@@ -68,7 +68,9 @@ seed_machine_local_file() {
 #     unioned with live state winning on conflict, so nothing an installer
 #     wrote is lost;
 #   - retired plugins (RETIRED_CLAUDE_PLUGINS_JSON) are pinned off while still registered and dropped once gone, their marketplaces dropped, and their env keys (RETIRED_ENV_KEYS) swept;
-#   - keys the template does not define are preserved as-is.
+#   - keys the template does not define are preserved as-is;
+#   - exception: <config-dir>/settings.override.json (machine-local, owner-made)
+#     may set `model` for that config dir; no other key is honoured.
 # A corrupt/unparseable destination is rebuilt from the template. Idempotent.
 # History: the merge logic originated in bootstrap-cloud.sh (910f2bc), which
 # now delegates here; machines get the same treatment on every `update`.
@@ -243,6 +245,27 @@ if markets:
 else:
     result.pop("extraKnownMarketplaces", None)
 
+# Machine-local per-account override (never tracked, never created here):
+# a config dir may keep its own default model. Only `model` is honoured.
+OVERRIDE_KEYS = ("model",)
+applied = []
+override_path = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "settings.override.json")
+if os.path.isfile(override_path):
+    try:
+        with open(override_path) as fh:
+            override = json.load(fh)
+        if not isinstance(override, dict):
+            raise ValueError("not a JSON object")
+    except (OSError, ValueError) as exc:
+        print(f"{label} WARNING: {override_path}: ignoring unreadable override ({exc})", file=sys.stderr)
+        override = {}
+    for key, value in override.items():
+        if key in OVERRIDE_KEYS and isinstance(value, str) and value:
+            result[key] = value
+            applied.append(key)
+        else:
+            print(f"{label} WARNING: {override_path}: ignoring key {key}", file=sys.stderr)
+
 # Personal sessions do not use Jira/Confluence. Scope this policy to the
 # personal account; work and custom config directories keep their own choice.
 personal_settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
@@ -256,6 +279,8 @@ os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 with open(dest_path, "w") as fh:
     json.dump(result, fh, indent=2)
     fh.write("\n")
+for key in applied:
+    print(f"{label} Applied {key} override from {override_path}.")
 
 # Drift stamp: settings_drift_check.py (SessionStart) compares this against
 # the current template to recommend `update --ai` after template changes.
@@ -635,10 +660,10 @@ link_claude_config_dir() {
     fi
   done
   rm -rf "$cdir"/commands "$cdir"/agents "$cdir"/hooks "$cdir"/interview
-  ln -sf "$DOTFILEDIR"/claude/CLAUDE.md "$cdir"/CLAUDE.md
+  ln -sf "$DOTFILEDIR"/claude/global-instructions.md "$cdir"/CLAUDE.md
 
   # Standing operating principles: the committed, model-agnostic discipline file
-  # that CLAUDE.md @imports into every session.
+  # that global-instructions.md @imports into every session.
   ln -sf "$DOTFILEDIR"/claude/operating-principles.md "$cdir"/operating-principles.md
 
   # Optional per-model audit deep-dives are local-only and gitignored (they hold
