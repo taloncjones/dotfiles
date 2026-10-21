@@ -1488,7 +1488,8 @@ const tabLines = async (ui: any, key: string) => {
 
 test('the queue tab lists queued todos with board links', async ($, on) => {
   const w = newWorld({
-    ...owner('a'), ...queueFile(['q1', 'q2', 'q3']), ...boardFiles(),
+    ...owner('a'), ...boardFiles(),
+    [`${ROOT}/a/queue.json`]: JSON.stringify({ v: 1, todos: ['q1', 'q2', 'q3'] }),
     ...todoFile('q1', 'First thing'), ...todoFile('q2', 'Second thing'),
     ...todoFile('q3', 'Third thing'), ...todoFile('q4', 'Backlog only'),
   })
@@ -1581,7 +1582,7 @@ test('the board link uses the account board file for the lease', async ($, on) =
   const w = newWorld({
     ...owner('a'), ...queueFile(['q1']), ...boardFiles(), ...todoFile('q1', 'One'),
   })
-  w.scope = scopeOf(ACCOUNT_A)
+  w.scope = { exitCode: 0, stdout: JSON.stringify({ account_id: ACCOUNT_A }), stderr: '' }
   const clock = stub(on, w)
   await boot($, clock)
   const ui = await pane($)
