@@ -680,7 +680,18 @@ forces it for a stopped run and whenever the handoff of the row `ship_launch_id`
 pins, on this head or an earlier one, has a verdict other than `APPROVE`, whatever `--tier` says. Never on a `current` non-APPROVE handoff
 (section 6a step 0 owns it), except rule (c). Dispatch with
 `python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
-Read `references/ship-carry-forward.md` (section "Ship dispatch details") for the tier briefs, relaunch limits and gate base before dispatching.
+Read `references/ship-carry-forward.md` (section "Ship dispatch details") for the tier briefs and relaunch limits before dispatching.
+Every ship brief is the text `dispatch-gate` renders from the `brief:ship`
+block of `references/brief-template.md`; never hand-write a ship brief or
+copy one from another task.
+
+The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
+`ship.json` `base_sha` copies the expected identity's `base`, so a fresh
+gate gates the current PR base. A head behind that base is gated on its
+merge result and needs no merge. On a `prepare` conflict the ship worker
+records INCOMPLETE and the director's repair flow resolves it; no worker
+merges the base into the branch. A base that moves cleanly after the gate needs no
+re-gate: `merge-ready` re-checks it with `base-check`.
 
 Decide from the pin alone: a ship row the pin does not name has no
 authority and is never adopted. A ship launch is never reprompted;
