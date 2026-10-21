@@ -1757,27 +1757,29 @@ test('queue and linked rows fit the pane', async ($, on) => {
   }
 })
 
-const FAIL = [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' }]
 // #10 on main, #11 on br10, #12 on br11, and a lone #20 on main.
 const stackPrs = (over: Record<number, object> = {}) => [
   ghPr(10, over[10]), ghPr(11, { baseRefName: 'br10', ...over[11] }),
   ghPr(12, { baseRefName: 'br11', ...over[12] }), ghPr(20),
 ]
+const FAIL = [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' }]
+const colored = async (ui: any, color: string) =>
+  (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === color)
 const stackRows = async (ui: any) => {
-  await ui.press({ key: 'tab-prs' })
   const rows: Record<string, string> = {}
   for (const t of (await lines(ui)).filter(l => l.startsWith('#'))) rows[t.slice(0, 5).trim()] = t
   return rows
 }
-const yellowRows = async (ui: any) =>
-  (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
 
 test('a three-PR stack shows its positions on the PR tab', async ($, on) => {
   const w = newWorld(owner('a'))
-  withPrs(w, stackPrs())
+  withPrs(w, [
+    ghPr(10), ghPr(11, { baseRefName: 'br10' }), ghPr(12, { baseRefName: 'br11' }), ghPr(20),
+  ])
   const clock = stub(on, w)
   await boot($, clock)
   const ui = await pane($, 160)
+  await ui.press({ key: 'tab-prs' })
   const rows = await stackRows(ui)
   expect(rows['#10']).toContain('1/3 #10')
   expect(rows['#11']).toContain('2/3 #10')
@@ -1788,7 +1790,7 @@ test('a three-PR stack shows its positions on the PR tab', async ($, on) => {
   const all = await lines(ui)
   expect(all.join('\n')).not.toContain('br1')
   expect(all.filter(l => l.startsWith('#')).map(l => l.slice(0, 5).trim())).toEqual(['#10', '#11', '#12', '#20'])
-  expect((await yellowRows(ui)).length).toBe(0)
+  expect((await colored(ui, 'yellow')).length).toBe(0)
   for (const line of all) expect(line.length).toBeLessThanOrEqual(160)
   await ui.unmount()
 
@@ -1796,13 +1798,14 @@ test('a three-PR stack shows its positions on the PR tab', async ($, on) => {
   await clock.advance(300000)
   await clock.settle()
   const ui2 = await pane($, 160)
+  await ui2.press({ key: 'tab-prs' })
   const rows2 = await stackRows(ui2)
   expect(rows2['#20'].slice(6)).toMatch(/^PR 20/)
 })
 
 test('a failing middle PR flags its stack and names it', async ($, on) => {
   const cases: Array<[string, Record<number, object>]> = [
-    ['failing CI', { 11: { statusCheckRollup: FAIL } }],
+    ['failing CI', { 11: { statusCheckRollup: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' }] } }],
     ['changes requested', { 11: { reviewDecision: 'CHANGES_REQUESTED' } }],
   ]
   const w = newWorld(owner('a'))
@@ -1813,11 +1816,12 @@ test('a failing middle PR flags its stack and names it', async ($, on) => {
     await clock.advance(300000)
     await clock.settle()
     const ui = await pane($, 160)
+    await ui.press({ key: 'tab-prs' })
     const rows = await stackRows(ui)
     expect(rows['#11']).toContain('2/3 blocks 1')
     expect(rows['#12']).toContain('3/3 blocked by #11')
     expect(rows['#10']).toContain('1/3 #10')
-    const yellow = await yellowRows(ui)
+    const yellow = await colored(ui, 'yellow')
     expect(yellow.length).toBe(1)
     expect(yellow[0].text).toContain('2/3 blocks 1')
     await ui.unmount()
@@ -1826,9 +1830,10 @@ test('a failing middle PR flags its stack and names it', async ($, on) => {
   await clock.advance(300000)
   await clock.settle()
   const ui = await pane($, 160)
+  await ui.press({ key: 'tab-prs' })
   const rows = await stackRows(ui)
   expect(Object.values(rows).join('\n')).not.toContain('block')
-  expect((await yellowRows(ui)).length).toBe(0)
+  expect((await colored(ui, 'yellow')).length).toBe(0)
 })
 
 test('task rows show the stack cell when the pane has room', async ($, on) => {
@@ -1876,7 +1881,7 @@ test('stack building covers unseen bases, forks, shared heads and cycles', () =>
 
   const { baseRefName: _base, ...noBase } = ghPr(40)
   const [bare] = prRows(JSON.stringify([noBase]), [])
-  expect(bare.base).toBe(null)
+  expect(bare).toMatchObject({ base: null })
   expect(cells([noBase])).toEqual([''])
   expect(prRows(JSON.stringify([ghPr(41, { isCrossRepository: true })]), [])[0].isFork).toBe(true)
 
