@@ -57,7 +57,7 @@ Dispatch selector, gate policy, review incorporation and cache rules:
 `python3 "$RUNTIME" route --step <step> --runtime <claude|codex>` (the role is
 derived from the step; do not hand-pick a role for a pipeline step).
 
-On-demand references (read each at the point of use named below): `references/kickoff.md`, `references/contract-pinning.md`, `references/phase-advance.md`, `references/codex-ui-specialist.md`, `references/triage.md`, `references/dispatch-adapter.md`, `references/legacy-wrappers.md`, `references/workflow-routing.md`, `references/jira-writeback.md`, `references/task-leads.md`, `references/director-launch.md`, `references/review-dispatch-details.md`, `references/ship-carry-forward.md`, `references/lesson-harvest.md`, `references/posting.md`; step-to-worker defaults: `references/pipeline-worker-mapping.md`.
+On-demand references (read each at the point of use named below): `references/kickoff.md`, `references/contract-pinning.md`, `references/phase-advance.md`, `references/codex-ui-specialist.md`, `references/triage.md`, `references/dispatch-adapter.md`, `references/legacy-wrappers.md`, `references/workflow-routing.md`, `references/jira-writeback.md`, `references/task-leads.md`, `references/director-launch.md`, `references/review-dispatch-details.md`, `references/ship-carry-forward.md`, `references/lesson-harvest.md`, `references/posting.md`, `references/rollover.md`; step-to-worker defaults: `references/pipeline-worker-mapping.md`.
 
 ## Runtime boundary
 
@@ -204,45 +204,7 @@ transitions, start no kickoff or dispatch in the same turn, then roll over.
    A `[WARNING] rollover: no recorded model` (or `effort`) line means the
    statusline had no usable value, so the new director starts on the account
    default.
-4. `rollover: handed over to pane <p> ...` (exit 0): this session is fenced
-   out. The verb stopped this session's watch; on a `watch:` line that says
-   `unknown` or `not scanned`, TaskStop the watch task. Make
-   `herdr pane close "$HERDR_PANE_ID"` your last tool call; it ends this
-   Claude process. The transcript stays on disk.
-5. `rollover: no ack ... this session keeps the lease (fence <n>)`: the new
-   pane is closed and the marker removed. Use fence `<n>` from now on, say
-   so in this turn's message, and retry later or ask the human.
-6. `rollover: rollover in progress for pane <p>`: an earlier rollover is
-   still waiting. Do not retry until it expires (two minutes); a retry then
-   closes that pane and starts over.
-7. `rollover: lease moved without a handover ack` or `owner: stale-fence`:
-   this session no longer holds the lease. Stop its watch per section 1 step
-   7 and run the section-1 preflight, which reports the holder.
-   `rollover: carry notes not saved; this session keeps the lease`: the new pane
-   is closed; fix `decisions.jsonl` and roll over again.
-
-If the Bash call times out or is interrupted, run the same `rollover`
-command again: it reports a handover that completed meanwhile, refuses
-while the first attempt is still pending, and cleans up an expired one.
-
-In the new pane, the `director_rollover` SessionStart hook runs the core's
-`adopt-rollover`, which takes the lease through the marker (fence + 1, the
-wake socket moves to the new process) and appends an `adopted` line to
-`<slug>/rollover.jsonl`. Its `[INFO] herdr director rollover: lease handed
-over from session <old> (pane <p>).` block is the new director's startup
-report: follow its `Next:` line, act on its `carried:` lines, arm the
-backstop (its `watch:` line says none exists), and run a section-4 check-in
-before any dispatch. On a `[WARNING]` block, or no block, run the section-1
-preflight; its `claim-owner` adopts through the same marker while it is
-valid, and on `BUSY` stop and ask the human.
-
-Every director start (`startup`, `resume`, `clear`, `compact`) also gets the
-`[INFO] herdr decisions` block from the core's `decisions` verb; see
-"Decisions log" in section 4.
-
-A `/clear` or compaction in place still keeps the lease: the same hook runs
-`resume-owner` and prints the `lease re-established in place` block. Nothing
-types `/clear` or a resume line into any pane.
+Read `references/rollover.md` for the verb's outcomes (steps 4-7), the retry rule and the new pane's adoption before acting on any `rollover:` result line.
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
@@ -718,24 +680,11 @@ forces it for a stopped run and whenever the handoff of the row `ship_launch_id`
 pins, on this head or an earlier one, has a verdict other than `APPROVE`, whatever `--tier` says. Never on a `current` non-APPROVE handoff
 (section 6a step 0 owns it), except rule (c). Dispatch with
 `python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
-Without `--tier`, on a first gate or after an `APPROVE`, the brief carries `herdr-ship-brief: tier=auto` and the
-small-tier caps from `config.json` `ship.small`; co-review picks the tier.
+Read `references/ship-carry-forward.md` (section "Ship dispatch details") for the tier briefs and relaunch limits before dispatching.
 Every ship brief is the text `dispatch-gate` renders from the `brief:ship`
 block of `references/brief-template.md`; never hand-write a ship brief or
 copy one from another task.
-It refuses a live or unknown pinned agent. For a pinned run with no
-`ship.json` (it stopped before the gate wrote it), it relaunches at most
-once per reviewed head: it refuses when `ship_relaunch_head` equals
-`review_head_sha`, otherwise writes `ship_relaunch_head` before launching
-(so an interrupted relaunch parks the task) and forces `tier=full`. It
-launches read-only on `claude`, pins `ship_launch_id`, then settles the old
-pinned row.
-Decide from the pin alone: a ship row the pin does not name has no
-authority and is never adopted. A ship launch is never reprompted;
-further gate work is a fresh launch. Every
-ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
-its launch directory, and no merge authority. Launch it in a
-`pane split` or gate-only workspace.
+
 The gate's base is the live tip from `git ls-remote` (not the lagging `baseRefOid`; co-review Freeze), and
 `ship.json` `base_sha` copies the expected identity's `base`, so a fresh
 gate gates the current PR base. A head behind that base is gated on its
@@ -744,6 +693,12 @@ records INCOMPLETE and the director's repair flow resolves it; no worker
 merges the base into the branch. A base that moves cleanly after the gate needs no
 re-gate: `merge-ready` re-checks it with `base-check`.
 
+Decide from the pin alone: a ship row the pin does not name has no
+authority and is never adopted. A ship launch is never reprompted;
+further gate work is a fresh launch. Every
+ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
+its launch directory, and no merge authority. Launch it in a
+`pane split` or gate-only workspace.
 Once `ship.json` is written, section 6a settles the idle ship agent
 (`handoff-recorded`); else close it by hand.
 
