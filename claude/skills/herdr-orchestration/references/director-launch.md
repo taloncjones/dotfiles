@@ -151,14 +151,8 @@ Rules:
 
 ## Host-sleep re-gate (section 6a step 0)
 
-Host-sleep re-gate (owner standing request, 2026-10-12): treat an
-`INCOMPLETE` handoff as if the human asked for a re-gate, with the same
-`write-task`, only when all of these hold: (a) the task's live HEAD
-equals the gate's reviewed head; (b) the gate's ship launch `started_ns`
-(Unix nanoseconds) divided by 1000000000 is earlier than the `sec` field
-of `sysctl -n kern.waketime` (seconds); (c) every report reason
-is `seat <name> runner status is not success`, and each named seat's
-runner JSON has `timed_out: true` and a file write time at or after that
-wake. Anything else waits for the human: any other reason, a seat that
-failed without `timed_out`, a seat result written before the wake, or an
-unreadable wake time, launch time or seat result.
+Host sleep is one infrastructure loss among several. A ship gate whose
+seats timed out, returned no output or died with the host re-runs without
+asking, at most twice per gate per head: see `references/auto-actions.md`.
+The wake-time comparison (`sysctl -n kern.waketime`) is no longer needed to
+qualify.

@@ -117,11 +117,11 @@ do not interrupt.
 review deadline, <launch_id>`, and never fabricate a review record,
   blocker count, or approval. A late sidecar cannot change that
   non-approved status.
-- After that write, ask with `AskUserQuestion`:
-  "Re-dispatch the review at <sha> (Recommended)" applies the
-  stale-verdict reset (`status: completed`, `review_head_sha: null`) with
-  `write-task` and continues with this section's dispatch; "Leave for
-  repair" changes nothing. The answer is not stored: ask again whenever
-  you report on a task that is `changes-requested` at an unchanged HEAD
-  with no correlating record for its latest review row, until the human
-  picks re-dispatch or the HEAD moves.
+- After that write, re-dispatch without asking:
+  `dispatch-gate ... --phase review --infra-rerun` (no director-side reset;
+  the gate resets the stale verdict and counts the re-run). Record a note
+  from the result's `infra_rerun` field. When it refuses with
+  `infrastructure re-run budget spent`, ask once per
+  `references/auto-actions.md`. A review `changes-requested` verdict whose
+  latest review row is not retired is not a deadline stop and keeps its
+  handling.

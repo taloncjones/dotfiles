@@ -501,6 +501,11 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     gate.add_argument("--phase", required=True, choices=("review", "ship"))
     gate.add_argument("--tier", default=None, choices=("full", "delta"))
     gate.add_argument("--prior-handoff", default=None)
+    budget = gate.add_mutually_exclusive_group()
+    budget.add_argument("--infra-rerun", action="store_true",
+                        help="count this dispatch as an automatic re-run of a lost gate")
+    budget.add_argument("--owner-approved", action="store_true",
+                        help="owner approved a dispatch past a spent re-run budget")
     return parser
 
 
@@ -579,7 +584,8 @@ def main(argv: list[str] | None = None) -> int:
                 repo_slug=args.repo_slug, repo_path=args.repo_path, runtime=args.runtime,
                 task_id=args.task_id, session=args.session, fence=args.fence,
                 phase=args.phase, focus_file=args.focus_file, tier=args.tier,
-                prior_handoff=args.prior_handoff, personal=args.personal)
+                prior_handoff=args.prior_handoff, personal=args.personal,
+                infra_rerun=args.infra_rerun, owner_approved=args.owner_approved)
         else:
             output = herdr_dispatch.wake(
                 args.thread_id,

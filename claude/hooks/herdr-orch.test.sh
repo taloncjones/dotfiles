@@ -13659,5 +13659,39 @@ n=$(wc -c < claude/skills/herdr-orchestration/SKILL.md)
 [ "$n" -le 67000 ]
 SH
 
+check "docs: lost gates re-run without asking, at most 2 per gate per head" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+auto = open(d + "references/auto-actions.md", encoding="utf-8").read()
+for text in ("runner status is not success", "artifact is empty", "structured report is missing",
+             "usage-limit refusal", "retired_review_launch_ids", "--infra-rerun", "--owner-approved",
+             "infrastructure re-run budget spent", "at most twice", "Ask after a refusal",
+             "Leave it"):
+    assert text in auto, text
+review = open(d + "references/review-dispatch-details.md", encoding="utf-8").read()
+assert "After that write, ask with" not in review and "--infra-rerun" in review
+skill = open(d + "SKILL.md", encoding="utf-8").read()
+assert "surface it. Only a human re-gate request" not in skill and "references/auto-actions.md" in skill
+launch = open(d + "references/director-launch.md", encoding="utf-8").read()
+assert "## Host-sleep re-gate" in launch and "auto-actions.md" in launch
+PY
+
+check "docs: verifier-confirmed blockers repair without asking unless a decision or scope conflicts" <<'PY'
+import os
+auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
+for text in ("dispatch the repair worker", "without asking", "contradicts a live recorded",
+             "outside the PR's scope", "git diff --name-only", "co-review --fix"):
+    assert text in auto, text
+PY
+
+check "docs: auto-actions keeps the merge, post, Jira, force-push, takeover, digest and advisory asks" <<'PY'
+import os
+auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
+section = auto[auto.index("## Asks that stay"):]
+for text in ("work-repository merge", "person-aimed post", "Jira write", "force push",
+             "lease takeover", "findings-digest mismatch", "unreproduced advisory"):
+    assert text in section, text
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
