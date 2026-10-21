@@ -107,7 +107,8 @@ STATE_ROOT/
                                                # "last_delivery":{"event","reason","ts"}}.
                                                # Machine-local, written by the hook after
                                                # each delivery attempt. `records` advances
-                                               # only on `sent`, so a debounced record change
+                                               # only on `sent` and covers the task's done, review and
+                                               # ship-report files, so a debounced record change
                                                # is delayed, never dropped.
       <HERDR_WORKSPACE_ID>.wake.jsonl         # one {"v":1,"ts","event","reason"} line per
                                                # delivery attempt; diagnostic only, nothing reads it

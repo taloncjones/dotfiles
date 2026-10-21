@@ -1433,7 +1433,7 @@ def wake_for_event(rd, ws, task_id, event, own_socket="", now=None):
     return reason
 
 
-_RECORD_SUFFIXES = (".done.json", ".review.json")
+_RECORD_SUFFIXES = (".done.json", ".review.json", ".ship.md")
 
 
 def wake_marker_path(rd, ws) -> Path:
@@ -1494,7 +1494,7 @@ def write_wake_marker(rd, ws, marker) -> bool:
 
 
 def record_fingerprint(rd, task_id) -> dict:
-    """{path: [mtime_ns, size]} for the task's own two completion sidecars.
+    """{path: [mtime_ns, size]} for the task's own three completion sidecars.
     An absent path is OMITTED, never recorded as None -- the one-directional
     predicate in wake_decision matches watch_changed only under that shape."""
     out = {}
@@ -2170,16 +2170,16 @@ def fold_spend(lines, task_id):
     return out
 
 
-# The default watch and the worker-status hook share one completion-record
-# predicate; the default watch also covers think answers and the legacy
+# The default watch, the backstop and the worker-status hook share one
+# completion-record set (ship reports included); the default watch also covers think answers and the legacy
 # mech ledger. workspaces/*.events.jsonl is deliberately absent -- watching
 # it would re-admit a signal per worker turn end through the fallback.
 WATCH_DIRS = {
-    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
-              (".spend.jsonl", valid_task_id)),
+    "tasks": tuple((s, valid_task_id) for s in _RECORD_SUFFIXES)
+    + ((".spend.jsonl", valid_task_id),),
     "think": ((".answer.json", valid_think_id),),
 }
-BACKSTOP_DIRS = {"tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id))}
+BACKSTOP_DIRS = {"tasks": tuple((s, valid_task_id) for s in _RECORD_SUFFIXES)}
 BACKSTOP_GRACE_SECS = 120
 # Kept well under WAKE_HEARTBEAT_STALE_SECS (900) so a director idle for the
 # whole backstop window still wakes in time to refresh its own heartbeat --
@@ -2341,6 +2341,11 @@ def delivered_records(rd) -> dict:
     return out
 
 
+def record_delivered(delivered, path, value) -> bool:
+    """True iff a sent push covered this (mtime_ns, size) of the record."""
+    return tuple(value) in delivered.get(Path(path).name, ())
+
+
 def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
     """One backstop pass (pure; clock injected). st: {"pending": {path: first_seen}}.
 
@@ -2351,7 +2356,7 @@ def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
             pending[key] = now
     for key in list(pending):
         value = snap.get(key)
-        if value is None or tuple(value) in delivered.get(Path(key).name, ()):
+        if value is None or record_delivered(delivered, key, value):
             del pending[key]
     return any(now - first >= grace_secs for first in pending.values())
 
@@ -4072,7 +4077,17 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
             and not plan_completed):
         unverifiable.append("plan")
     last = read_wake_marker(rd, ws).get("last_delivery") if valid_workspace_id(ws) else None
-    wake = last.get("reason") if isinstance(last, dict) and isinstance(last.get("reason"), str) else "none"
+    delivered = delivered_records(rd)
+    unsent = sorted(Path(p).name[len(tid) + 1:]
+                    for p, v in record_fingerprint(rd, tid).items()
+                    if not record_delivered(delivered, p, v))
+    if unsent:
+        wake = "unsent:" + ",".join(unsent)
+    elif (isinstance(last, dict) and isinstance(last.get("reason"), str)
+          and isinstance(last.get("event"), str)):
+        wake = f"{last['reason']}:{last['event']}"
+    else:
+        wake = "none"
 
     events = []
     for row in workers:
