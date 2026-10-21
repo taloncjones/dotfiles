@@ -5512,6 +5512,27 @@ def _note_decision(ns) -> int:
     return 0
 
 
+QUEUE_FILE = "queue.json"
+QUEUE_MAX = 10
+
+
+def _set_queue(ns) -> int:
+    """Write the director's queued-next todo ids; the fleet panel's Queue tab reads them."""
+    _require(ns.repo_path, "--repo-path is required")
+    ids = ns.todo
+    _require(len(ids) <= QUEUE_MAX, f"at most {QUEUE_MAX} todos")
+    _require(len(set(ids)) == len(ids), "duplicate todo id")
+    for todo_id in ids:
+        _require(valid_task_id(todo_id), f"invalid todo id: {todo_id}")
+        _require((Path(ns.repo_path) / ".todos" / "pending" / f"{todo_id}.md").is_file(),
+                 f"not a pending todo: {todo_id}")
+    with _fenced(ns) as rd:
+        write_json_atomic(Path(rd) / QUEUE_FILE, {"v": 1, "todos": ids, "ts": now_iso(),
+                                                  "session": ns.session, "fence": ns.fence})
+    print(f"queue: {len(ids)} todos")
+    return 0
+
+
 def _retire_decision(ns) -> int:
     with _fenced(ns) as rd:
         entries = read_decisions(rd)
@@ -5975,6 +5996,8 @@ def _main(argv=None) -> int:
     scope_group.add_argument("--task", default=None)
     scope_group.add_argument("--repo-wide", action="store_true")
     add("retire-decision", "--id", fenced=True)
+    sq = add("set-queue", fenced=True)
+    sq.add_argument("--todo", action="append", default=[])
     ak = add("archive-task", "--task-id", fenced=True)
     ak.add_argument("--agents-json", default=None)
     ak.add_argument("--workspaces-json", default=None)
@@ -6082,6 +6105,8 @@ def _main(argv=None) -> int:
         return _note_decision(ns)
     if ns.cmd == "retire-decision":
         return _retire_decision(ns)
+    if ns.cmd == "set-queue":
+        return _set_queue(ns)
     if ns.cmd == "write-task":
         _require(not (ns.present and ns.binding is not None),
                  "--present is launcher scope only; drop it with --binding")

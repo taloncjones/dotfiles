@@ -2,6 +2,7 @@ import type {
   FleetDeadline,
   FleetGroup,
   FleetPrRow,
+  FleetQueueRow,
   FleetSnapshot,
   FleetTaskRow,
 } from '../types'
@@ -16,7 +17,7 @@ export const GH_ARGV = [
   'open',
   '--author', '@me',
   '--json',
-  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews',
+  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews,url',
   '--limit',
   String(GH_LIMIT),
 ] as const
@@ -234,6 +235,33 @@ function liveState(
   return { agent, state: unresolved ? 'unknown' : 'working', since: start }
 }
 
+const JIRA_KEY = /^[A-Z][A-Z0-9]+-\d+$/
+const TODO_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/
+const UNSAFE_URL = '[^\\s\\u0000-\\u001f\\u007f-\\u009f]+'
+const HTTPS_URL = new RegExp(`^https://${UNSAFE_URL}$`)
+const HTTP_URL = new RegExp(`^https?://${UNSAFE_URL}$`)
+
+/** The URL when it is a safe https link of at most 2048 characters; else null. */
+export function safeHttps(value: unknown): string | null {
+  return typeof value === 'string' && value.length <= 2048 && HTTPS_URL.test(value) ? value : null
+}
+
+function todoIdOf(value: unknown): string | null {
+  return typeof value === 'string' && TODO_ID.test(value) && !value.includes('..') ? value : null
+}
+
+function jiraKeyOf(record: Json, taskId: string): string | null {
+  const key = str(record.jira_key)
+  if (key !== null && JIRA_KEY.test(key)) return key
+  return record.kind === 'jira' && JIRA_KEY.test(taskId) ? taskId : null
+}
+
+/** `<base>/browse/<key>` for a Jira base that is http(s); else null. */
+export function jiraHref(base: string | null | undefined, key: string | null): string | null {
+  if (!base || !key || !HTTP_URL.test(base)) return null
+  return `${base.replace(/\/+$/, '')}/browse/${key}`
+}
+
 /** Builds one row from a parsed record; `ship`, `done`, `events` and `sidecar` are sidecars or null. */
 export function taskRow(
   name: string,
@@ -253,6 +281,9 @@ export function taskRow(
       head: '-',
       pr: '-',
       prNumber: null,
+      prUrl: null,
+      todoId: null,
+      jiraKey: null,
       branch: null,
       verdict: '-',
       isDirty: false,
@@ -313,6 +344,9 @@ export function taskRow(
     head: sha7(head),
     pr: prNumber === null ? '-' : `#${prNumber}`,
     prNumber,
+    prUrl: safeHttps(record.pr_url),
+    todoId: todoIdOf(record.todo_id),
+    jiraKey: jiraKeyOf(record, taskId),
     branch: str(record.branch),
     verdict: shipVerdict(record, ship, sidecar),
     isDirty,
@@ -437,6 +471,12 @@ export function activeRows(live: FleetTaskRow[]): FleetTaskRow[] {
 
 export const PARKED_MS = 3 * 24 * 3600 * 1000
 export const GROUPS: FleetGroup[] = ['Your call', 'Needs director', 'Waiting on reviewers', 'Agents working']
+export const GROUP_ICONS: Record<string, string> = {
+  'Your call': '\u{1F514}',
+  'Needs director': '\u{1F9ED}',
+  'Waiting on reviewers': '\u{1F440}',
+  'Agents working': '\u{1F916}',
+}
 
 export type Classified = { group: FleetGroup; waits: string; since: number | null; isLate: boolean }
 type Placed = Omit<Classified, 'since'>
@@ -491,6 +531,7 @@ function prStage(row: FleetTaskRow, pr: FleetPrRow | null, complete: boolean): P
   if (row.reviewHead && pr.headOid && row.reviewHead !== pr.headOid) {
     return place('Needs director', 'PR head moved')
   }
+  if (pr.human === 'changes') return place('Your call', HUMAN_WAITS.changes)
   if (pr.human in HUMAN_WAITS) {
     return place('Waiting on reviewers', HUMAN_WAITS[pr.human as keyof typeof HUMAN_WAITS])
   }
@@ -658,6 +699,7 @@ export function prRows(text: string, tasks: FleetTaskRow[]): FleetPrRow[] {
       branch,
       headOid: str(pr.headRefOid),
       reviewAt: latest(reviews.map(review => isoMs(review?.submittedAt))),
+      url: safeHttps(pr.url),
       human: humanState(pr),
     }
   })
@@ -681,6 +723,47 @@ export function summaryLine(
     `fleet: ${active} active, ${done} done, ${prText}` +
     (ghError ? '; gh unavailable' : '')
   )
+}
+
+export const QUEUE_MAX = 10
+
+/** Ids from `queue.json`: [] when the file is missing, null when it is unreadable. */
+export function parseQueue(text: string | null): string[] | null {
+  if (text === null) return []
+  const queue = parseJson(text)
+  if (!queue || queue.v !== 1 || !Array.isArray(queue.todos) || queue.todos.length > QUEUE_MAX) {
+    return null
+  }
+  const ids = queue.todos as unknown[]
+  return ids.every(id => todoIdOf(id) !== null) ? (ids as string[]) : null
+}
+
+/** A queued todo's title: its frontmatter `title:` through labelTitle, else the id. */
+export function queueTitle(id: string, text: string): string {
+  let title: string | undefined
+  if (text.startsWith('---\n')) {
+    const end = text.indexOf('\n---', 4)
+    const head = end === -1 ? text.slice(4) : text.slice(4, end)
+    const match = /^title:[ \t]*(.*)$/m.exec(head)
+    title = match ? match[1].trim().replace(/^(["'])(.*)\1$/, '$2') : undefined
+  }
+  return labelTitle({ title, task_id: id }) || id
+}
+
+/** Queue rows left once any task record naming the todo hides it (D4). */
+export function visibleQueue(rows: FleetQueueRow[], tasks: FleetTaskRow[]): FleetQueueRow[] {
+  const named = new Set(tasks.map(task => task.todoId))
+  return rows.filter(row => !named.has(row.id))
+}
+
+/** `account_id` from `workflow_context.py account-scope`: 64 lowercase hex, else null. */
+export function accountId(stdout: string): string | null {
+  const id = parseJson(stdout)?.account_id
+  return typeof id === 'string' && /^[0-9a-f]{64}$/.test(id) ? id : null
+}
+
+export function boardHref(path: string | null | undefined, todoId: string | null): string | null {
+  return path && todoId ? `file://${encodeURI(path)}#todo-${todoId}` : null
 }
 
 /** Replaces control characters so record or PR text cannot drive the terminal. */

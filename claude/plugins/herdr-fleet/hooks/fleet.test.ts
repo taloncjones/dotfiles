@@ -8,7 +8,7 @@ import { STATE_CASES } from './state-cases'
 
 const ROOT = '/h/.claude/herdr-orch'
 const GH = ['gh', 'pr', 'list', '--state', 'open', '--author', '@me', '--json',
-  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews',
+  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews,url',
   '--limit', '100']
 const OK = { exitCode: 0, stdout: '[]', stderr: '' }
 const OK_VERB = { exitCode: 0, stdout: '', stderr: '' }
@@ -35,6 +35,9 @@ type World = {
   verbRuns: string[][]
   verbRunning: number
   verbMax: number
+  env: Record<string, string>
+  scope: GhAnswer
+  scopeEvents: any[]
 }
 
 function newWorld(files: Record<string, string> = {}): World {
@@ -43,6 +46,7 @@ function newWorld(files: Record<string, string> = {}): World {
     runs: [], running: 0, maxRunning: 0, opened: [], logs: [], repoFails: false, openFails: false,
     root: '/repo', reads: [],
     verb: OK_VERB, verbGate: null, verbRuns: [], verbRunning: 0, verbMax: 0,
+    env: { HOME: '/h' }, scope: { exitCode: 1, stdout: '', stderr: 'no scope' }, scopeEvents: [],
   }
 }
 
@@ -65,7 +69,7 @@ function task(slug: string, id: string, over: object = {}, sidecars: Record<stri
 // Stubs the engine beneath the plugin: env, session, fs, process and ui.
 function stub(on: any, w: World) {
   const clock = mock.clock(on)
-  on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('env.get', (_$: any, e: any) => ({ value: w.env[e.name] }))
   on('command.register', () => ({ value: undefined }))
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => (globalThis as any).h($.ui.resolve(e).Box, {}))
@@ -109,6 +113,11 @@ function stub(on: any, w: World) {
     return { value: text }
   })
   on('process.run', async (_$: any, e: any, next: any) => {
+    if (e.argv[0] === 'python3' && String(e.argv[1]).endsWith('workflow_context.py')) {
+      w.scopeEvents.push(e)
+      if (w.scope === 'reject') return next(e)
+      return { value: w.scope }
+    }
     if (e.argv[0] === 'python3') {
       w.verbRuns.push([...e.argv])
       w.verbRunning += 1
@@ -152,8 +161,14 @@ async function pane($: any, cols = 160) {
   })
 }
 
+// The harness shows a Link as its href then its label; a terminal with OSC 8 shows the label only.
+const hrefOf = (l: any): string => l.props.href
+const labelOf = (l: any): string => l.text.slice(hrefOf(l).length)
+
 async function lines(ui: any): Promise<string[]> {
-  return (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
+  const hrefs = (await ui.findAll({ type: 'Link' })).map(hrefOf)
+  return (await ui.findAll({ type: 'Text' })).map((t: any) =>
+    hrefs.reduce((text: string, href: string) => text.split(href).join(''), t.text))
 }
 
 const prJson = (list: object[]) => JSON.stringify(list)
@@ -1048,8 +1063,7 @@ test('a worker blocked event puts the task under your call', async ($, on) => {
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  const all = await lines(ui)
-  expect(all).toContain('Your call (1)')
+  expect(await headers(ui)).toEqual(['Your call (1)'])
   const yellow = (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
   expect(yellow.length).toBe(1)
   expect(yellow[0].text).toMatch(/^\s+t1\s+blocked\s+50s/)
@@ -1115,7 +1129,10 @@ const reviewed = (id: string, n: number, over: object = {}) => ({
   }),
   ...shipFile(id, 'S1', { launch_id: 'S1', verdict: 'APPROVE', head_sha: HEAD }),
 })
-const headers = async (ui: any) => (await lines(ui)).filter(t => /^[A-Z][A-Za-z ]+ \(\d+\)$/.test(t))
+const ICONS = ['\u{1F514}', '\u{1F9ED}', '\u{1F440}', '\u{1F916}']
+const headers = async (ui: any) =>
+  (await lines(ui)).filter(t => /^[A-Z][A-Za-z ]+ \(\d+\)$/.test(t.slice(3)) && ICONS.includes(t.slice(0, 2)))
+    .map(t => t.slice(3))
 
 test('tasks group under fixed headers in who-acts-next order', async ($, on) => {
   const w = newWorld({
@@ -1159,8 +1176,9 @@ test('a human change request outranks a ship approve', async ($, on) => {
   const clock = stub(on, w)
   await bootAt($, clock)
   const ui = await pane($)
-  expect(await headers(ui)).toEqual(['Waiting on reviewers (1)'])
+  expect(await headers(ui)).toEqual(['Your call (1)'])
   expect(await rowOf(ui, 't1')).toMatch(/changes requested/)
+  expect((await textOf(ui, 't1')).props.color).toBe('yellow')
   expect((await lines(ui)).join('\n')).not.toContain('ready to merge')
   // The ship verdict is APPROVE at head; only the human review blocks.
   expect(shipVerdict({ head_sha: HEAD }, { verdict: 'APPROVE', head_sha: HEAD })).toBe('ship:APPROVE')
@@ -1396,7 +1414,7 @@ test('classify gives each wait phrase its group', () => {
     ['record lacks PR #8', run({ status: 'reviewed', branch: 'br8' }, { prs: [ghPr(8)] }), 'Needs director', 'record lacks PR #8'],
     ['PR is not open', run(shipRecord({ pr_number: 9 })), 'Needs director', 'PR is not open'],
     ['PR head moved', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { headRefOid: OLD })] }), 'Needs director', 'PR head moved'],
-    ['changes requested', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'CHANGES_REQUESTED' })] }), 'Waiting on reviewers', 'changes requested'],
+    ['changes requested', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'CHANGES_REQUESTED' })] }), 'Your call', 'changes requested'],
     ['needs a human review', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'REVIEW_REQUIRED' })] }), 'Waiting on reviewers', 'needs a human review'],
     ['approval on older head', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5, { reviewDecision: 'APPROVED', reviews: [approval(OLD)] })] }), 'Waiting on reviewers', 'approval on older head'],
     ['ready to merge', run(shipRecord(), { ship: pinnedShip(), prs: [ghPr(5)] }), 'Your call', 'ready to merge'],
@@ -1447,4 +1465,291 @@ test('the age is the latest activity the panel reads', () => {
   expect(classify(row, prs, true, NOW).since).toBe(ago(100))
   const matched = { ...row, branch: 'br5' }
   expect(classify(matched, prs, true, NOW).since).toBe(ago(50))
+})
+
+// Queue tab, board links and row links.
+const ACCOUNT_A = 'a'.repeat(64)
+const ACCOUNT_B = 'b'.repeat(64)
+const DASH = '/h/.local/state/dotfiles/dashboard'
+const BOARD = `${DASH}/${ACCOUNT_A}/a.html`
+const scopeOf = (id: string) => ({ exitCode: 0, stdout: JSON.stringify({ account_id: id }), stderr: '' })
+const todoFile = (id: string, title: string) => ({
+  [`/repo/.todos/pending/${id}.md`]: `---\ntitle: ${title}\n---\nbody\n`,
+})
+const queueFile = (ids: unknown[], over: object = {}) => ({
+  [`${ROOT}/a/queue.json`]: JSON.stringify({ v: 1, todos: ids, ts: 'x', session: 'sess', fence: 1, ...over }),
+})
+const boardFiles = () => ({ [BOARD]: '<html>', [`${DASH}/${ACCOUNT_B}/a.html`]: '<html>' })
+const hrefs = async (ui: any) => (await ui.findAll({ type: 'Link' })).map(hrefOf)
+const tabLines = async (ui: any, key: string) => {
+  await ui.press({ key })
+  return lines(ui)
+}
+
+test('the queue tab lists queued todos with board links', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'), ...queueFile(['q1', 'q2', 'q3']), ...boardFiles(),
+    ...todoFile('q1', 'First thing'), ...todoFile('q2', 'Second thing'),
+    ...todoFile('q3', 'Third thing'), ...todoFile('q4', 'Backlog only'),
+  })
+  w.scope = scopeOf(ACCOUNT_A)
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  const tab = await ui.find({ key: 'tab-queue' })
+  expect(tab.props.label).toBe('queue (3)')
+  expect(tab.props.hotkey).toBe('4')
+  const all = await tabLines(ui, 'tab-queue')
+  const rows = all.filter(t => /^\d\./.test(t))
+  expect(rows.map(t => t.slice(0, 2))).toEqual(['1.', '2.', '3.'])
+  expect(rows[0]).toContain('First thing')
+  expect(rows[1]).toContain('Second thing')
+  expect(rows[2]).toContain('Third thing')
+  expect(await hrefs(ui)).toEqual([
+    `file://${BOARD}#todo-q1`, `file://${BOARD}#todo-q2`, `file://${BOARD}#todo-q3`,
+  ])
+  expect(all.join('\n')).not.toContain('Backlog only')
+})
+
+test('an empty or missing queue draws no queue rows', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...todoFile('q1', 'Backlog only') })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  for (const file of [null, queueFile([])]) {
+    delete w.files[`${ROOT}/a/queue.json`]
+    if (file) Object.assign(w.files, file)
+    await clock.advance(15000)
+    const all = await tabLines(ui, 'tab-queue')
+    expect(all.join('\n')).toContain('nothing queued')
+    expect((await ui.find({ key: 'tab-queue' })).props.label).toBe('queue (0)')
+    expect(all.filter(t => /^\d\./.test(t))).toEqual([])
+    expect(all.join('\n')).not.toContain('Backlog only')
+  }
+})
+
+test('a queued todo that started or left pending leaves the queue', async ($, on) => {
+  const ids = ['q1', 'q2', 'q3', 'q4', 'q5']
+  const w = newWorld({
+    ...owner('a'), ...queueFile(ids), ...boardFiles(),
+    ...Object.assign({}, ...ids.filter(id => id !== 'q2').map(id => todoFile(id, `Todo ${id}`))),
+    ...task('a', 'k1', { status: 'in-progress', todo_id: 'q1' }),
+    ...task('a', 'k3', { status: 'merged', todo_id: 'q3' }),
+    [`${ROOT}/a/archive/2026-09/tasks/k4.json`]: JSON.stringify({ task_id: 'k4', status: 'merged', todo_id: 'q4' }),
+  })
+  w.scope = scopeOf(ACCOUNT_A)
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  expect((await ui.find({ key: 'tab-queue' })).props.label).toBe('queue (1)')
+  let all = await tabLines(ui, 'tab-queue')
+  expect(all.filter(t => /^\d\./.test(t)).map(t => t.slice(0, 2))).toEqual(['1.'])
+  expect(all.join('\n')).toContain('Todo q5')
+  // The fifth todo starts, then its record leaves tasks/ for the archive between task ticks.
+  Object.assign(w.files, task('a', 'k5', { status: 'in-progress', todo_id: 'q5' }))
+  await clock.advance(15000)
+  expect((await ui.find({ key: 'tab-queue' })).props.label).toBe('queue (0)')
+  delete w.files[`${ROOT}/a/tasks/k5.json`]
+  w.files[`${ROOT}/a/archive/2026-10/tasks/k5.json`] = JSON.stringify({ task_id: 'k5', status: 'merged', todo_id: 'q5' })
+  await clock.advance(15000)
+  all = await lines(ui)
+  expect(all.join('\n')).toContain('nothing queued')
+})
+
+test('a malformed queue says it is unreadable', async ($, on) => {
+  const w = newWorld({ ...owner('a'), ...todoFile('q1', 'One'), ...todoFile('x', 'X') })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  const eleven = Array.from({ length: 11 }, (_, i) => `q${i}`)
+  const bad = [
+    '{', JSON.stringify({ v: 2, todos: ['q1'] }), JSON.stringify({ v: 1, todos: ['q1', 7] }),
+    JSON.stringify({ v: 1, todos: ['../x'] }), JSON.stringify({ v: 1, todos: eleven }),
+  ]
+  for (const text of bad) {
+    w.files[`${ROOT}/a/queue.json`] = text
+    w.reads.length = 0
+    await clock.advance(15000)
+    const all = await tabLines(ui, 'tab-queue')
+    expect(all.join('\n')).toContain('queue unreadable')
+    expect(all.filter(t => /^\d\./.test(t))).toEqual([])
+    expect(w.reads.filter(path => path.includes('/.todos/'))).toEqual([])
+  }
+})
+
+test('the board link uses the account board file for the lease', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'), ...queueFile(['q1']), ...boardFiles(), ...todoFile('q1', 'One'),
+  })
+  w.scope = scopeOf(ACCOUNT_A)
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  await ui.press({ key: 'tab-queue' })
+  expect(await hrefs(ui)).toEqual([`file://${BOARD}#todo-q1`])
+  const first = w.scopeEvents[0]
+  expect(first.argv.slice(2)).toEqual(['account-scope', '--cwd', '/repo', '--runtime', 'claude'])
+  expect(first.argv[1]).toBe('/h/.claude/skills/lib/workflow_context.py')
+  expect(typeof first.init.timeoutMs).toBe('number')
+
+  w.env.HERDR_PERSONAL = '1'
+  await clock.advance(300000)
+  expect(w.scopeEvents[w.scopeEvents.length - 1].argv).toContain('--personal')
+
+  // An override directory wins and runs no Python.
+  const runs = w.scopeEvents.length
+  w.env.TODOS_DASHBOARD_DIR = '/d/'
+  w.files['/d/a.html'] = '<html>'
+  await clock.advance(300000)
+  expect(w.scopeEvents.length).toBe(runs)
+  expect(await hrefs(ui)).toEqual(['file:///d/a.html#todo-q1'])
+
+  // Each failure draws the titles with no Link.
+  delete w.env.TODOS_DASHBOARD_DIR
+  const failures: GhAnswer[] = [
+    { exitCode: 1, stdout: '', stderr: 'boom' }, 'reject', scopeOf('not-hex'), scopeOf('c'.repeat(64)),
+  ]
+  for (const answer of failures) {
+    w.scope = answer
+    await clock.advance(300000)
+    expect(await hrefs(ui)).toEqual([])
+    expect((await lines(ui)).join('\n')).toContain('One')
+  }
+  // A listed account directory without the board file is no board either.
+  w.scope = scopeOf(ACCOUNT_A)
+  delete w.files[BOARD]
+  await clock.advance(300000)
+  expect(await hrefs(ui)).toEqual([])
+})
+
+const PR_URL = (n: number) => `https://github.com/o/r/pull/${n}`
+
+test('task rows link the title to the board and the PR to GitHub', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'), ...boardFiles(), ...todoFile('q1', 'Todo one'),
+    ...task('a', 't1', { title: 'Todo task', todo_id: 'q1', pr_number: 5, workers: [worker()] }),
+    ...task('a', 't2', { title: 'Record url', pr_number: 6, pr_url: PR_URL(6), workers: [worker()] }),
+    ...task('a', 't3', { title: 'Unsafe url', pr_number: 7, pr_url: 'javascript:alert(1)', workers: [worker()] }),
+  })
+  w.scope = scopeOf(ACCOUNT_A)
+  withPrs(w, [ghPr(5, { url: 'https://github.com/o/r/pull/5' })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const links = await ui.findAll({ type: 'Link' })
+  const byText = Object.fromEntries(links.map((l: any) => [labelOf(l), hrefOf(l)]))
+  expect(byText['Todo task']).toBe(`file://${BOARD}#todo-q1`)
+  expect(byText['#5']).toBe(PR_URL(5))
+  expect(byText['#6']).toBe(PR_URL(6))
+  expect(byText['#7']).toBeUndefined()
+  expect(byText['Record url']).toBeUndefined()
+  expect((await lines(ui)).join('\n')).toContain('#7')
+})
+
+test('jira keys link to JIRA_URL and stay plain when it is unset', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 'BESS-3832', { kind: 'jira', title: 'Jira task', workers: [worker()] }),
+    ...task('a', 't2', { jira_key: 'BESS-3835', title: 'Keyed task', workers: [worker()] }),
+  })
+  w.env.JIRA_URL = 'https://jira.example.com/'
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  expect(await hrefs(ui)).toEqual([
+    'https://jira.example.com/browse/BESS-3832', 'https://jira.example.com/browse/BESS-3835',
+  ].sort())
+  const text = (await lines(ui)).join('\n')
+  expect(text).toContain('BESS-3832')
+  expect(text).toContain('BESS-3835')
+
+  delete w.env.JIRA_URL
+  await clock.advance(15000)
+  expect(await hrefs(ui)).toEqual([])
+  expect((await lines(ui)).join('\n')).toContain('BESS-3832')
+  w.env.JIRA_URL = 'ftp://x'
+  await clock.advance(15000)
+  expect(await hrefs(ui)).toEqual([])
+  expect((await lines(ui)).join('\n')).toContain('BESS-3835')
+
+  // With no key anywhere the key cell is gone and the title keeps its offset.
+  for (const id of ['BESS-3832', 't2']) delete w.files[`${ROOT}/a/tasks/${id}.json`]
+  Object.assign(w.files, task('a', 't3', { title: 'Plain task', pr_number: 3, workers: [worker()] }))
+  await clock.advance(15000)
+  expect(await rowOf(ui, 'Plain task')).toMatch(/^#3\s{5}Plain task/)
+})
+
+test('PR and done tab rows link PR numbers and Jira keys', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't1', { title: 'Jira task', jira_key: 'BESS-3835', pr_number: 5, workers: [worker()] }),
+    ...task('a', 'd1', { status: 'merged', pr_number: 9, pr_url: PR_URL(9), head_sha: 'abcdef0123' }),
+  })
+  w.env.JIRA_URL = 'https://jira.example.com'
+  withPrs(w, [ghPr(5, { url: PR_URL(5) })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  await ui.press({ key: 'tab-prs' })
+  const byText = async () =>
+    Object.fromEntries((await ui.findAll({ type: 'Link' })).map((l: any) => [labelOf(l), hrefOf(l)]))
+  const prs = await byText()
+  expect(prs['#5']).toBe(PR_URL(5))
+  expect(prs.t1).toBe('https://jira.example.com/browse/BESS-3835')
+  await ui.press({ key: 'tab-done' })
+  const done = await byText()
+  expect(done['#9']).toBe(PR_URL(9))
+})
+
+test('each group header carries its status icon', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 'ya', { status: 'blocked', title: 'Blocked thing', updated: iso(3000) }),
+    ...task('a', 'nd', { status: 'completed', title: 'Review not sent task', updated: iso(100) }),
+    ...reviewed('wr', 5, { title: 'Waits on human', updated: iso(600) }),
+    ...task('a', 'aw', { title: 'Doing work', workers: [worker({ started_ns: ns(30) })] }),
+  })
+  withPrs(w, [ghPr(5, { reviewDecision: 'REVIEW_REQUIRED' })])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const ui = await pane($)
+  const all = await lines(ui)
+  const shown = all.filter(t => /\(\d+\)$/.test(t) && !t.startsWith('queue'))
+  expect(shown).toEqual([
+    '\u{1F514} Your call (1)',
+    '\u{1F9ED} Needs director (1)',
+    '\u{1F440} Waiting on reviewers (1)',
+    '\u{1F916} Agents working (1)',
+  ])
+})
+
+test('queue and linked rows fit the pane', async ($, on) => {
+  const long = 'A very long task title that goes on and on past any sensible pane width'
+  const w = newWorld({
+    ...owner('a'), ...boardFiles(), ...queueFile(['q1', 'q2', 'q3']),
+    ...todoFile('q1', long), ...todoFile('q2', long), ...todoFile('q3', long),
+    ...task('a', 'BESS-3832', {
+      kind: 'jira', title: long, todo_id: 'q9', pr_number: 12, branch: 'secret/branch-name',
+      workers: [worker()],
+    }),
+    ...task('a', 't2', {
+      title: long, jira_key: 'BESS-3835', pr_number: 13, branch: 'secret/other', workers: [worker()],
+    }),
+  })
+  w.scope = scopeOf(ACCOUNT_A)
+  w.env.JIRA_URL = 'https://jira.example.com'
+  withPrs(w, [ghPr(12), ghPr(13)])
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  for (const cols of [60, 109]) {
+    const ui = await pane($, cols)
+    await ui.press({ key: 'tab-tasks' })
+    const tasks = await lines(ui)
+    expect(tasks.some(t => t.includes('BESS-3832'))).toBe(true)
+    const queue = await tabLines(ui, 'tab-queue')
+    expect(queue.filter(t => /^\d\./.test(t)).length).toBe(3)
+    for (const line of [...tasks, ...queue]) expect(line.length).toBeLessThanOrEqual(cols)
+    expect([...tasks, ...queue].join('\n')).not.toContain('secret/')
+    await ui.unmount()
+  }
 })
