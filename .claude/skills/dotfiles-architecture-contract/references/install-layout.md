@@ -90,8 +90,18 @@ Tested by `install/herdr-manifest.test.sh` (fixtures in `herdr/agent-detection/f
 `$.state` contract) that draws the director's fleet pane. The tasks tab
 groups active tasks by who acts next (Your call, Needs director, Waiting on
 reviewers, Agents working, and a Parked count), one line per task with the PR
-number, title, what it waits on and the time since the latest activity; the
-PR tab has one row per open PR. The grouping joins the record with GitHub
+number, title, what it waits on and the time since the latest activity; a
+status icon (bell, compass, eyes, robot) leads each group header, and a PR with
+a human change request sits under Your call. The PR tab has one row per open
+PR. The Queue tab (hotkey 4) lists the todos in `<state>/<slug>/queue.json`,
+which the director writes with the core's fenced `set-queue` verb (at most 10
+pending todo ids); a todo that any task record names, or that has no pending
+file, is hidden. Cells link out through the terminal's hyperlinks: a task title
+and a queue title to the todo on the board (`file://` + the board HTML under
+the account directory that `workflow_context.py account-scope` names, or under
+`TODOS_DASHBOARD_DIR`, + `#todo-<id>`), a `#<pr>` cell to the `url` that `gh
+pr list` returns (or the record's `pr_url`), and a Jira key to
+`$JIRA_URL/browse/<KEY>` when `JIRA_URL` is set in the director's environment. The grouping joins the record with GitHub
 review state from `gh pr list --author @me` (`reviewDecision` and `reviews`;
 an empty decision means no review rule applies) and with the review verdict
 sidecar `tasks/<id>.review.json`. `director()` (`zsh/claude-account.zsh`) loads it

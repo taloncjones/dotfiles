@@ -61,6 +61,7 @@ STATE_ROOT/
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
+    queue.json                        # todos queued to start next (see "queue.json" below); `set-queue` writes it
     rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
     decisions.jsonl                   # append-only owner decisions (see "decisions.jsonl" below); fenced verbs and `rollover --carry` write it
     rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed|takeover, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
@@ -263,6 +264,17 @@ last `carry-batch`. Unparseable lines, other versions, and entries of the wrong 
 `decisions --repo-path <P> [--no-carry] [--all]` verb prints the live entries
 (newest kept, 3000 characters unless `--all`); the SessionStart hook injects
 that block.
+
+### `queue.json`
+
+`{"v": 1, "todos": [<todo id>, ...], "ts": <iso>, "session": <id>, "fence": <n>}`,
+rewritten whole by `set-queue --repo-slug S --repo-path P --session ID --fence F
+[--todo ID ...]` (fenced; atomic). It refuses, writing nothing, an id that is
+not a todo id, an id with no `<repo-path>/.todos/pending/<id>.md`, a repeated
+id, more than 10 ids, a stale fence or a foreign session. No `--todo` clears
+the queue. `session` and `fence` are an audit trail only. The fleet panel's
+Queue tab reads the file for display; nothing else does. A missing file is an
+empty queue; a file of another shape reads as unreadable.
 
 ### `config.json`
 

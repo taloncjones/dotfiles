@@ -1,4 +1,4 @@
-export type FleetTab = 'tasks' | 'prs' | 'done'
+export type FleetTab = 'tasks' | 'prs' | 'done' | 'queue'
 export type FleetTaskRow = {
   id: string
   status: string
@@ -7,6 +7,9 @@ export type FleetTaskRow = {
   head: string
   pr: string
   prNumber: number | null
+  prUrl: string | null
+  todoId: string | null
+  jiraKey: string | null
   branch: string | null
   verdict: string
   isDirty: boolean
@@ -44,8 +47,13 @@ export type FleetPrRow = {
   branch: string | null
   headOid: string | null
   reviewAt: number | null
+  url: string | null
   human: 'none' | 'changes' | 'required' | 'approved' | 'approved-old'
 }
+export type FleetQueueRow = { id: string; title: string }
+export type FleetQueue =
+  | { slug: string; state: 'unreadable' }
+  | { slug: string; state: 'ok'; rows: FleetQueueRow[] }
 export type FleetLease =
   | { kind: 'none' }
   | { kind: 'ambiguous'; slugs: string[] }
@@ -59,6 +67,9 @@ export type FleetSnapshot = {
   prs: (FleetPart<FleetPrRow> & { at: number }) | null
   ghError: { slug: string; reason: string } | null
   deadlines: { slug: string; at: number; rows: Record<string, FleetDeadline> } | null
+  queue: FleetQueue | null
+  board: { slug: string; path: string | null } | null
+  jiraUrl: string | null
   readError: string | null
   readAt: number | null
 }

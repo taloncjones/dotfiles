@@ -333,6 +333,15 @@ Entries for a failed, abandoned or merged task drop out on their own.
 Write each note so it reads without the session: it is re-injected into a
 fresh context later. Name any label (R12, a run number) by its substance.
 
+Queue the todos you plan to start next so the fleet panel's Queue tab shows
+them (fenced; at most 10 pending todo ids, in start order; no `--todo` clears):
+
+`python3 "$CORE" set-queue --repo-slug <slug> --repo-path <repo> --session <id> --fence <fence> [--todo <todo-id> ...]`
+
+Rerun it whenever the next-up list changes; a todo that a task record names
+leaves the panel's queue on its own, but the id stays in the file until you
+rewrite it.
+
 The `director_rollover` hook injects the live entries as an `[INFO] herdr
 decisions` block at every session start. That block is authoritative: do not
 re-ask a listed decision. When it ends with an `older omitted` line, run the

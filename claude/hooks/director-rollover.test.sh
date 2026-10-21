@@ -1635,6 +1635,57 @@ $CORE note-decision $A --task never-recorded --text ok >/dev/null
 test "$(wc -l < "$(find "$FX" -name decisions.jsonl -type f)")" -eq 2
 SH
 
+check "queue: set-queue writes the ordered todos and an empty call clears them" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+mkdir -p "$FX_REPO/.todos/pending"
+printf -- '---\ntitle: one\n---\n' > "$FX_REPO/.todos/pending/2026-10-21-one.md"
+printf -- '---\ntitle: two\n---\n' > "$FX_REPO/.todos/pending/2026-10-21-two.md"
+out=$($CORE set-queue $A --todo 2026-10-21-two --todo 2026-10-21-one)
+test "$out" = "queue: 2 todos"
+Q=$(find "$FX" -name queue.json -type f)
+test -n "$Q"
+python3 - "$Q" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert set(rec) == {"v", "todos", "ts", "session", "fence"}, rec
+assert rec["v"] == 1 and rec["todos"] == ["2026-10-21-two", "2026-10-21-one"], rec
+PY
+test "$($CORE set-queue $A)" = "queue: 0 todos"
+python3 - "$Q" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["todos"] == []
+PY
+SH
+
+check "queue: set-queue refuses a stale fence, a duplicate, a non-pending todo and an eleventh todo" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1"
+mkdir -p "$FX_REPO/.todos/pending"
+for i in 1 2 3 4 5 6 7 8 9 10 11; do
+    printf -- '---\ntitle: t\n---\n' > "$FX_REPO/.todos/pending/todo-$i.md"
+done
+$CORE set-queue $A --fence "$F" --todo todo-1 >/dev/null
+Q=$(find "$FX" -name queue.json -type f)
+cp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence $((F + 7)) --todo todo-2 >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --session 33333333-3333-4333-8333-333333333333 --fence "$F" --todo todo-2 >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence "$F" --todo todo-2 --todo todo-2 >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence "$F" --todo ../x >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+if $CORE set-queue $A --fence "$F" --todo no-such-todo >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+eleven=""
+for i in 1 2 3 4 5 6 7 8 9 10 11; do eleven="$eleven --todo todo-$i"; done
+if $CORE set-queue $A --fence "$F" $eleven >/dev/null 2>&1; then exit 1; fi
+cmp "$Q" "$FX/before.json"
+SH
+
 check "decisions: retire-decision hides the entry, repeats are no-ops, unknown id refused" <<'SH'
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
