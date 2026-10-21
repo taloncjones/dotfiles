@@ -14,7 +14,18 @@ export type FleetTaskRow = {
   owner: string | null
   gateSince: number | null
   reviewLaunch: string | null
+  since: number | null
+  reviewHead: string | null
+  review: string | null
+  phase: string | null
+  ship: { verdict: string | null; head: string | null } | null
 }
+export type FleetGroup =
+  | 'Your call'
+  | 'Needs director'
+  | 'Waiting on reviewers'
+  | 'Agents working'
+  | 'Parked'
 export type FleetDeadline = {
   launch: string
   state: 'running' | 'overdue' | 'expired' | 'unknown'
@@ -30,6 +41,10 @@ export type FleetPrRow = {
   ci: 'pass' | 'fail' | 'pending' | 'none'
   review: string
   task: string | null
+  branch: string | null
+  headOid: string | null
+  reviewAt: number | null
+  human: 'none' | 'changes' | 'required' | 'approved' | 'approved-old'
 }
 export type FleetLease =
   | { kind: 'none' }

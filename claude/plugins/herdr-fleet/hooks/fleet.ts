@@ -1,6 +1,8 @@
 import type {
   FleetDeadline,
+  FleetGroup,
   FleetPrRow,
+  FleetSnapshot,
   FleetTaskRow,
 } from '../types'
 
@@ -14,7 +16,7 @@ export const GH_ARGV = [
   'open',
   '--author', '@me',
   '--json',
-  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision',
+  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews',
   '--limit',
   String(GH_LIMIT),
 ] as const
@@ -24,7 +26,12 @@ const CI_IGNORED = new Set(['SKIPPED', 'NEUTRAL'])
 
 type Json = Record<string, unknown>
 
-export type ShipHandoff = { head_sha?: unknown; verdict?: unknown; launch_id?: unknown } | null
+export type ShipHandoff = {
+  head_sha?: unknown
+  verdict?: unknown
+  launch_id?: unknown
+  written_at?: unknown
+} | null
 export type DoneRecord = Json | null
 export type EventLines = Json[] | null
 
@@ -52,9 +59,26 @@ export function parseJson(text: string): Json | null {
   }
 }
 
+/** The sidecar's outcome when it is the current review of this record; else null (partial port of is_reviewed). */
+export function currentReview(record: Json, sidecar: Json | null): string | null {
+  if (!sidecar) return null
+  const launch = str(sidecar.launch_id)
+  if (!launch || launch !== str(lastWorker(record, 'review')?.launch_id)) return null
+  const head = str(sidecar.reviewed_head_sha)
+  if (!head || head !== str(record.review_head_sha)) return null
+  if ('retired_review_launch_ids' in record) {
+    const retired = record.retired_review_launch_ids
+    if (!Array.isArray(retired) || retired.includes(launch)) return null
+  }
+  const blocking = sidecar.blocking_count
+  if (!Number.isInteger(blocking) || blocking !== 0) return 'changes-requested'
+  return str(sidecar.outcome)
+}
+
 export function shipVerdict(
   record: Json,
   ship: ShipHandoff,
+  sidecar: Json | null = null,
 ): string {
   const verdict = ship ? str(ship.verdict) : null
   if (verdict) {
@@ -64,7 +88,7 @@ export function shipVerdict(
       ? `ship:${verdict}`
       : `ship:${verdict}@${sha7(shipHead)}`
   }
-  const review = str(record.review_outcome)
+  const review = currentReview(record, sidecar) ?? str(record.review_outcome)
   return review ? `review:${review}` : '-'
 }
 
@@ -122,8 +146,6 @@ export function parseEvents(text: string): Json[] {
 
 const noWorker = { agent: '-', state: '', since: null }
 
-const PARKED_ORDER = ['merge?', 'gate?', 'open-pr?']
-
 function prNumberOf(record: Json): number | null {
   for (const key of ['pr_number', 'pr']) {
     const value = record[key]
@@ -152,6 +174,11 @@ function lastWorker(record: Json, phase: string, launch?: string): Json | null {
     }
   }
   return null
+}
+
+function latest(values: Array<number | null>): number | null {
+  const known = values.filter((v): v is number => v !== null)
+  return known.length ? Math.max(...known) : null
 }
 
 function nsToMs(value: unknown): number | null {
@@ -207,13 +234,14 @@ function liveState(
   return { agent, state: unresolved ? 'unknown' : 'working', since: start }
 }
 
-/** Builds one row from a parsed record; `ship`, `done` and `events` are sidecars or null. */
+/** Builds one row from a parsed record; `ship`, `done`, `events` and `sidecar` are sidecars or null. */
 export function taskRow(
   name: string,
   record: Json | null,
   done: DoneRecord,
   ship: ShipHandoff,
   events: EventLines = null,
+  sidecar: Json | null = null,
 ): FleetTaskRow {
   const id = name.slice(0, -5)
   if (!record) {
@@ -232,6 +260,11 @@ export function taskRow(
       owner: null,
       gateSince: null,
       reviewLaunch: null,
+      since: null,
+      reviewHead: null,
+      review: null,
+      phase: null,
+      ship: null,
     }
   }
   const status = str(record.status) ?? '-'
@@ -245,7 +278,7 @@ export function taskRow(
       ? { agent: str(last.agent) ?? '-', state: '', since: null }
       : liveState(taskId, last, done, events)
   }
-  const prNumber = typeof record.pr_number === 'number' ? record.pr_number : null
+  const prNumber = prNumberOf(record)
   const head = str(record.head_sha)
   const isDirty =
     done !== null && done.dirty === true && str(done.head_sha) === head
@@ -260,6 +293,15 @@ export function taskRow(
   }
   const reviewLaunch =
     status === 'review-dispatched' ? str(lastWorker(record, 'review')?.launch_id) : null
+  const review = currentReview(record, sidecar)
+  const since = latest([
+    live.since,
+    last && typeof last === 'object' ? nsToMs(last.started_ns) : null,
+    done ? isoMs(done.ts) : null,
+    review !== null && sidecar ? isoMs(sidecar.ts) : null,
+    pinnedShip ? isoMs(pinnedShip.written_at) : null,
+    isoMs(record.updated),
+  ])
   return {
     id: taskId,
     title:
@@ -272,25 +314,18 @@ export function taskRow(
     pr: prNumber === null ? '-' : `#${prNumber}`,
     prNumber,
     branch: str(record.branch),
-    verdict: shipVerdict(record, ship),
+    verdict: shipVerdict(record, ship, sidecar),
     isDirty,
     isTerminal,
     owner,
     gateSince,
     reviewLaunch,
+    since,
+    reviewHead: str(record.review_head_sha) ?? head,
+    review,
+    phase: last && typeof last === 'object' ? str(last.phase) : null,
+    ship: pinnedShip ? { verdict: str(pinnedShip.verdict), head: str(pinnedShip.head_sha) } : null,
   }
-}
-
-/** Waiting tasks for the owner band: blocked first, then parked by token; each task once. */
-export function ownerBand(rows: FleetTaskRow[]): Array<{ row: FleetTaskRow; token: string }> {
-  const live = rows.filter(r => !r.isTerminal)
-  const blocked = live.filter(r => r.status === 'blocked' || r.live.state === 'blocked')
-  const parked = live.filter(r => !blocked.includes(r) && r.owner !== null)
-  parked.sort((a, b) => PARKED_ORDER.indexOf(a.owner!) - PARKED_ORDER.indexOf(b.owner!))
-  return [
-    ...blocked.map(row => ({ row, token: 'blocked' })),
-    ...parked.map(row => ({ row, token: row.owner! })),
-  ]
 }
 
 const DEADLINE_STATES = new Set(['running', 'overdue', 'expired', 'unknown'])
@@ -375,9 +410,9 @@ export function liveCell(row: FleetTaskRow, readAt: number | null, width: number
   return `${plain(agent).slice(0, room)} ${tail}`
 }
 
-/** `<repo> | fence <n> | read <clock>`, clipping the repo name so the clock fits. */
-export function headerLine(name: string, fence: number | null, read: string, width: number): string {
-  const tail = ` | fence ${fence ?? '-'} | read ${read}`
+/** `<repo> | read <clock>`, clipping the repo name so the clock fits. */
+export function headerLine(name: string, read: string, width: number): string {
+  const tail = ` | read ${read}`
   return `${plain(name).slice(0, Math.max(1, width - tail.length))}${tail}`
 }
 
@@ -398,6 +433,154 @@ export function activeRows(live: FleetTaskRow[]): FleetTaskRow[] {
   return live
     .filter(row => !row.isTerminal)
     .sort((a, b) => (a.id < b.id ? 1 : -1))
+}
+
+export const PARKED_MS = 3 * 24 * 3600 * 1000
+export const GROUPS: FleetGroup[] = ['Your call', 'Needs director', 'Waiting on reviewers', 'Agents working']
+
+export type Classified = { group: FleetGroup; waits: string; since: number | null; isLate: boolean }
+type Placed = Omit<Classified, 'since'>
+
+const PHASE_WORDS: Record<string, string> = { ship: 'co-review', mechanical: 'implement' }
+const phaseWord = (phase: string | null) => (phase ? (PHASE_WORDS[phase] ?? phase) : 'worker')
+const HUMAN_WAITS = {
+  changes: 'changes requested',
+  required: 'needs a human review',
+  'approved-old': 'approval on older head',
+}
+
+function place(group: FleetGroup, waits: string, isLate = false): Placed {
+  return { group, waits, isLate }
+}
+
+function findPr(row: FleetTaskRow, prs: FleetPrRow[]): FleetPrRow | null {
+  return (
+    prs.find(pr => row.prNumber !== null && pr.number === row.prNumber) ??
+    prs.find(pr => row.branch !== null && pr.branch === row.branch) ??
+    null
+  )
+}
+
+/** What a reviewed row waits on once the herdr gate is read (R5.7). */
+function gateWaits(row: FleetTaskRow, human: FleetPrRow['human'] | null): Placed {
+  if (row.status === 'pr-open-pending-merge' || row.owner === 'merge?') {
+    return place('Your call', 'ready to merge')
+  }
+  if (row.ship) {
+    const verdict = (row.ship.verdict ?? 'no verdict').toLowerCase()
+    return place(
+      'Needs director',
+      row.ship.head !== row.reviewHead ? 'co-review on old head' : `co-review: ${verdict}`,
+    )
+  }
+  return place('Needs director', human === 'approved' ? 'approved; no co-review' : 'co-review not run')
+}
+
+function prStage(row: FleetTaskRow, pr: FleetPrRow | null, complete: boolean): Placed {
+  if (!pr) {
+    if (!complete) {
+      if (row.owner === 'merge?') return place('Your call', 'merge? review unknown')
+      if (row.owner === 'open-pr?') return place('Your call', 'open the PR')
+      return gateWaits(row, null)
+    }
+    return row.prNumber === null
+      ? place('Your call', 'open the PR')
+      : place('Needs director', 'PR is not open')
+  }
+  if (row.prNumber === null) return place('Needs director', `record lacks PR #${pr.number}`)
+  if (row.reviewHead && pr.headOid && row.reviewHead !== pr.headOid) {
+    return place('Needs director', 'PR head moved')
+  }
+  if (pr.human in HUMAN_WAITS) {
+    return place('Waiting on reviewers', HUMAN_WAITS[pr.human as keyof typeof HUMAN_WAITS])
+  }
+  return gateWaits(row, pr.human)
+}
+
+function placeRow(
+  row: FleetTaskRow,
+  pr: FleetPrRow | null,
+  complete: boolean,
+  readAt: number,
+  deadlines: FleetSnapshot['deadlines'],
+): Placed {
+  if (row.status === 'blocked' || row.live.state === 'blocked') return place('Your call', 'blocked')
+  const finished = row.phase === 'review' && row.review !== null
+  const d = deadlines?.rows[row.id]
+  const shown =
+    deadlines && d && row.status === 'review-dispatched' && row.reviewLaunch !== null && d.launch === row.reviewLaunch
+      ? countdown(d, (readAt - deadlines.at) / 1000)
+      : null
+  if (shown?.text === 'expired' && !finished) return place('Needs director', 'review expired', true)
+
+  const fresh = (at: number | null) => at !== null && readAt - at <= PARKED_MS
+  const working = row.live.state === 'working' || row.live.state === 'unknown'
+  // A ship worker whose handoff is pinned has finished, whatever its event log says.
+  const isLive =
+    working && fresh(row.live.since) && !finished && !(row.phase === 'ship' && row.ship !== null)
+  const word = phaseWord(row.phase)
+  if (fresh(row.gateSince)) return place('Agents working', 'co-review running')
+  if (isLive) {
+    if (shown) return place('Agents working', `review ${shown.text}`, shown.isLate)
+    return place('Agents working', `${word} ${row.live.state === 'unknown' ? 'state unknown' : 'running'}`)
+  }
+  if (row.status === 'reviewed' || row.status === 'pr-open-pending-merge') {
+    return prStage(row, pr, complete)
+  }
+  const worker = row.live.state
+    ? `${word} ${working && !finished ? 'no signal' : row.live.state}`
+    : 'no worker'
+  const waits: Record<string, string> = {
+    completed: 'review not sent',
+    'changes-requested': 'repair not started',
+    'review-dispatched': row.review ? `review ${row.review}` : worker,
+    'in-progress': worker,
+    unreadable: 'record unreadable',
+  }
+  return place('Needs director', waits[row.status] ?? row.status)
+}
+
+/** Group, wait phrase, activity time and lateness of one active row (R4 to R6). */
+export function classify(
+  row: FleetTaskRow,
+  prs: FleetPrRow[],
+  complete: boolean,
+  readAt: number,
+  deadlines: FleetSnapshot['deadlines'] = null,
+): Classified {
+  const pr = findPr(row, prs)
+  const since = latest([row.since, pr?.reviewAt ?? null])
+  const placed = placeRow(row, pr, complete, readAt, deadlines)
+  const isIdle = since !== null && readAt - since > PARKED_MS
+  const parks = placed.group === 'Needs director' || placed.group === 'Waiting on reviewers'
+  return { ...placed, group: isIdle && parks ? 'Parked' : placed.group, since }
+}
+
+export type GroupedRows = {
+  groups: Array<{ group: FleetGroup; items: Array<{ row: FleetTaskRow } & Classified> }>
+  parked: number
+}
+
+/** Non-empty groups in who-acts-next order, oldest activity first; parked rows only counted. */
+export function groupRows(
+  rows: FleetTaskRow[],
+  prs: FleetPrRow[],
+  complete: boolean,
+  readAt: number,
+  deadlines: FleetSnapshot['deadlines'] = null,
+): GroupedRows {
+  const items = rows
+    .filter(row => !row.isTerminal)
+    .map(row => ({ row, ...classify(row, prs, complete, readAt, deadlines) }))
+  const oldest = (a: number | null, b: number | null) =>
+    a === b ? 0 : a === null ? 1 : b === null ? -1 : a - b
+  const groups = GROUPS.map(group => ({
+    group,
+    items: items
+      .filter(item => item.group === group)
+      .sort((a, b) => oldest(a.since, b.since) || (a.row.id < b.row.id ? -1 : 1)),
+  })).filter(g => g.items.length)
+  return { groups, parked: items.filter(item => item.group === 'Parked').length }
 }
 
 type Check = Json
@@ -432,6 +615,27 @@ export function ciCell(rollup: unknown): FleetPrRow['ci'] {
   return counted ? 'pass' : 'none'
 }
 
+/** Summarises the human review state; an empty decision means no review rule applies. */
+function humanState(pr: Json): FleetPrRow['human'] {
+  const decision = str(pr.reviewDecision)
+  if (!decision) return 'none'
+  if (decision === 'CHANGES_REQUESTED') return 'changes'
+  if (decision !== 'APPROVED') return 'required'
+  let approval: Json | null = null
+  let approvedAt = -Infinity
+  for (const review of Array.isArray(pr.reviews) ? (pr.reviews as Json[]) : []) {
+    if (review?.state !== 'APPROVED') continue
+    const at = isoMs(review.submittedAt) ?? -Infinity
+    if (at >= approvedAt) {
+      approval = review
+      approvedAt = at
+    }
+  }
+  const commit = approval?.commit as Json | null | undefined
+  const head = str(pr.headRefOid)
+  return head !== null && str(commit?.oid) === head ? 'approved' : 'approved-old'
+}
+
 /** Throws when `text` is not a JSON array. */
 export function prRows(text: string, tasks: FleetTaskRow[]): FleetPrRow[] {
   const list: unknown = JSON.parse(text)
@@ -442,6 +646,7 @@ export function prRows(text: string, tasks: FleetTaskRow[]): FleetPrRow[] {
     const linked =
       tasks.find(task => task.prNumber === number) ??
       tasks.find(task => branch !== null && task.branch === branch)
+    const reviews = Array.isArray(pr.reviews) ? (pr.reviews as Json[]) : []
     return {
       number,
       title: String(pr.title ?? ''),
@@ -450,6 +655,10 @@ export function prRows(text: string, tasks: FleetTaskRow[]): FleetPrRow[] {
       ci: ciCell(pr.statusCheckRollup),
       review: String(pr.reviewDecision ?? '').toLowerCase() || '-',
       task: linked ? linked.id : null,
+      branch,
+      headOid: str(pr.headRefOid),
+      reviewAt: latest(reviews.map(review => isoMs(review?.submittedAt))),
+      human: humanState(pr),
     }
   })
 }

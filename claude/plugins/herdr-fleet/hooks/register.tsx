@@ -12,17 +12,18 @@ import {
   GH_ARGV,
   GH_LIMIT,
   activeRows,
+  age,
   clip,
   plain,
   doneRows,
   eventsWorkspace,
   fitTitle,
   ghReason,
+  groupRows,
   hasEvidence,
   headerLine,
   isRecordName,
   liveCell,
-  ownerBand,
   parseDeadlines,
   parseEvents,
   parseJson,
@@ -175,6 +176,7 @@ function createFleet($: Dollar, generation: number) {
           typeof launch === 'string' && launch
             ? await readText(`${dir}/artifacts/${id}/ship-${launch}/ship.json`)
             : null
+        const reviewText = await readText(`${dir}/tasks/${id}.review.json`)
         const workspace = eventsWorkspace(record)
         const eventText =
           workspace === null
@@ -187,6 +189,7 @@ function createFleet($: Dollar, generation: number) {
             doneText === null ? null : parseJson(doneText),
             shipText === null ? null : parseJson(shipText),
             eventText === null ? null : parseEvents(eventText),
+            reviewText === null ? null : parseJson(reviewText),
           ),
         )
       }
@@ -230,7 +233,17 @@ function createFleet($: Dollar, generation: number) {
       for (const entry of entries.filter(e => isRecordName(e.name))) {
         const text = await readText(`${dir}/${entry.name}`)
         if (text === null) continue
-        rows.push(taskRow(entry.name, parseJson(text), null, null))
+        const reviewText = await readText(`${dir}/${entry.name.slice(0, -5)}.review.json`)
+        rows.push(
+          taskRow(
+            entry.name,
+            parseJson(text),
+            null,
+            null,
+            null,
+            reviewText === null ? null : parseJson(reviewText),
+          ),
+        )
       }
     }
     await publish(slug, s => ({ ...s, archived: { slug, rows } }))
@@ -377,17 +390,30 @@ function taskLine(
   }
 }
 
-function bandLine(r: FleetTaskRow, token: string, width: number): Line {
-  const titleWidth = Math.max(16, width - 8 - 5 - 2)
-  return {
-    key: `band-${r.id}`,
-    text: row([
-      [token, 8],
-      [r.prNumber === null ? '' : `#${r.prNumber}`, 5],
-      [fitTitle(plain(r.title), titleWidth), titleWidth],
-    ]),
-    color: 'yellow',
+// `#pr`, title, what the row waits on, time in that state.
+function groupLines(
+  grouped: ReturnType<typeof groupRows>,
+  width: number,
+  readAt: number,
+): Line[] {
+  const titleWidth = Math.max(16, width - 6 - 24 - 4 - 3)
+  const lines: Line[] = []
+  for (const { group, items } of grouped.groups) {
+    lines.push({ text: `${group} (${items.length})` })
+    for (const { row: r, waits, since, isLate } of items) {
+      lines.push({
+        text: row([
+          [r.prNumber === null ? '' : `#${r.prNumber}`, 6],
+          [fitTitle(plain(r.title), titleWidth), titleWidth],
+          [waits, 24],
+          [since === null ? '' : age(readAt - since), 4],
+        ]),
+        color: isLate ? 'red' : group === 'Your call' ? 'yellow' : undefined,
+      })
+    }
   }
+  if (grouped.parked) lines.push({ text: `Parked: ${grouped.parked} idle over 3 days` })
+  return lines
 }
 
 // Head, PR and verdict show only when some row has one and the title keeps 24 columns.
@@ -485,10 +511,8 @@ export const register: Register = on => {
     if (snap.lease.kind === 'ambiguous') {
       header = `ambiguous: this session holds leases for ${snap.lease.slugs.join(', ')}`
     } else if (slug !== null) {
-      const held = snap.lease.kind === 'held' ? snap.lease.fence : null
       header = headerLine(
         repoName(snap.repoRoot, slug),
-        held,
         snap.readAt === null ? '-' : clock(snap.readAt),
         width,
       )
@@ -500,10 +524,11 @@ export const register: Register = on => {
       if (!snap.readError) say('reading...')
     } else if (slug !== null) {
       if (tab === 'tasks') {
-        const evidence = showEvidence(active, width)
-        lines.push(...ownerBand(active).map(b => bandLine(b.row, b.token, width)))
+        const complete = prPart !== null && prs.length < GH_LIMIT
         if (active.length) {
-          lines.push(...active.map(r => taskLine(r, width, snap.readAt, evidence, deadlines)))
+          lines.push(
+            ...groupLines(groupRows(active, prs, complete, snap.readAt, deadlines), width, snap.readAt),
+          )
         } else say('no tasks')
       } else if (tab === 'done') {
         if (snap.archived.slug !== slug) say('reading...')

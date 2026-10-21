@@ -85,8 +85,14 @@ Tested by `install/herdr-manifest.test.sh` (fixtures in `herdr/agent-detection/f
 **Claude Code mods:**
 
 `claude/plugins/herdr-fleet` is a Claude Code mod (hooks module plus
-`$.state` contract) that draws the director's fleet pane: one row per herdr
-task and one per open PR. `director()` (`zsh/claude-account.zsh`) loads it
+`$.state` contract) that draws the director's fleet pane. The tasks tab
+groups active tasks by who acts next (Your call, Needs director, Waiting on
+reviewers, Agents working, and a Parked count), one line per task with the PR
+number, title, what it waits on and the time since the latest activity; the
+PR tab has one row per open PR. The grouping joins the record with GitHub
+review state from `gh pr list --author @me` (`reviewDecision` and `reviews`;
+an empty decision means no review rule applies) and with the review verdict
+sidecar `tasks/<id>.review.json`. `director()` (`zsh/claude-account.zsh`) loads it
 with `--plugin-dir` when the directory exists; it is never installed from a
 marketplace and has no `enabledPlugins` entry. `claude/plugins/` is not linked
 into `~/.claude`, which Claude Code's installer owns. The engine writes
@@ -97,5 +103,5 @@ The mod's CI cell (`hooks/fleet.ts` `ciCell`) copies
 `claude/skills/pr-status/scripts/pr_status.py` `ci_state`/`ci_cell`; change
 both together. On the 300 s slow tick the mod runs the core's read-only
 `review-deadlines` verb to draw review countdowns, and `hooks/state-cases.ts`
-keeps its owner-band token port (`ownerToken`) in step with
+keeps its token port (`ownerToken`) in step with
 `task_state_token`; `plugin.test.sh` checks both.
