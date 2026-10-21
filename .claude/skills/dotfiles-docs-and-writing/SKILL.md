@@ -27,9 +27,10 @@ Rule one: always edit the REPO file, never the live symlinked copy under
   blocked at write or commit time, not merely flagged in review. Emojis and AI
   attribution never pass.
 - [WARNING] `format_files.py` runs `prettier --write --ignore-unknown` after
-  every file edit in Claude sessions. Markdown gets reflowed -- re-read a doc
-  after editing before making a second edit (operating-principles: re-read
-  after any formatter pass).
+  an edit, but only on files the repo already formats with prettier (a config
+  covers the path, or the committed file is prettier-clean). Such Markdown gets
+  reflowed -- re-read a doc after editing before making a second edit
+  (operating-principles: re-read after any formatter pass).
 
 ## When NOT to use this skill
 
