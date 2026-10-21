@@ -749,14 +749,16 @@ p2, m2 = c.wake_decision("not-a-dict", "stopped", {"/t/d.json": [5, 9]}, 9000.0)
 assert p2 is True, p2
 PY
 
-check "record_fingerprint: only the task's own two sidecars, absent paths omitted" <<PY
+check "record_fingerprint: only the task's own three sidecars, absent paths omitted" <<PY
 $LOAD
 rd = tempfile.mkdtemp()
 os.makedirs(os.path.join(rd, "tasks"))
 open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
 open(os.path.join(rd, "tasks", "PROJ-2.done.json"), "w").write("{}")
+open(os.path.join(rd, "tasks", "PROJ-1.ship.md"), "w").write("r")
+open(os.path.join(rd, "tasks", "PROJ-2.ship.md"), "w").write("r")
 fp = c.record_fingerprint(rd, "PROJ-1")
-assert list(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json")], fp
+assert sorted(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json"), os.path.join(rd, "tasks", "PROJ-1.ship.md")], fp
 assert all(isinstance(v, list) and len(v) == 2 for v in fp.values()), fp
 assert c.record_fingerprint(rd, "../escape") == {}, "unsafe task id must yield nothing"
 PY
@@ -12109,11 +12111,107 @@ printf '{"result":{"workspaces":[]}}' > "$root/w.json"
 printf '%s' '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"stopped","reason":"connect-failed","ts":1}}' > "$RD/workspaces/w1.wake.json"
 before=$(shasum "$RD/workspaces/w1.wake.json")
 $CLI checkin --repo-slug slug-x --session S --fence "$F" \
-    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=connect-failed'
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=connect-failed:stopped'
 [ "$before" = "$(shasum "$RD/workspaces/w1.wake.json")" ]
 rm "$RD/workspaces/w1.wake.json"
 $CLI checkin --repo-slug slug-x --session S --fence "$F" \
     --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=none'
+SH
+
+check "hook: a review-role Stop after a new ship report pushes one wake; a repeat Stop pushes none" <<'PY'
+import importlib.util as u, os, sys, io, json, tempfile
+root = os.path.realpath(tempfile.mkdtemp())
+os.environ.update({"CLAUDE_CONFIG_DIR": root, "HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1",
+                   "HERDR_COORDINATION_ROOT": os.path.realpath(tempfile.mkdtemp())})
+os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+s = u.spec_from_file_location("hook", "claude/hooks/herdr_worker_status.py")
+h = u.module_from_spec(s); s.loader.exec_module(h)
+rd = os.path.join(root, "herdr-orch", "slug-x")
+os.makedirs(rd + "/workspaces"); os.makedirs(rd + "/tasks")
+calls = []
+def fake_post(rd, ws, event, own_socket=""):
+    calls.append(event)
+    return "sent"
+h.core.post_wake = fake_post
+def stop():
+    sys.stdin = io.StringIO(json.dumps({"hook_event_name": "Stop"}))
+    assert h.main() == 0
+for ws, task, role, ev in (("w1", "PROJ-1", "review", "review-stopped"),
+                           ("w2", "PROJ-2", "impl", "stopped")):
+    os.environ["HERDR_WORKSPACE_ID"] = ws
+    json.dump({"task_id": task, "repo_slug": "slug-x", "role": role},
+              open(rd + "/workspaces/" + ws + ".json", "w"))
+    calls.clear()
+    stop(); assert calls == [], (role, calls)
+    open(rd + "/tasks/" + task + ".ship.md", "w").write("a")
+    stop(); assert calls == [ev], (role, calls)
+    stop(); assert calls == [ev], (role, calls)
+    open(rd + "/tasks/" + task + ".ship.md", "w").write("bb")
+    stop(); assert calls == [ev, ev], (role, calls)
+print("ok")
+PY
+
+check "backstop: an undelivered ship report signals; a delivered one does not" <<'PY'
+import importlib.util as u, os, sys, io, json, tempfile
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.realpath(tempfile.mkdtemp())
+s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = u.module_from_spec(s); s.loader.exec_module(c)
+rd = os.path.realpath(tempfile.mkdtemp())
+os.makedirs(rd + "/tasks"); os.makedirs(rd + "/workspaces")
+c.post_wake = lambda *a, **k: "sent"
+p = rd + "/tasks/PROJ-1.ship.md"
+open(p, "w").write("a")
+snap, _ = c.watch_scan(rd, {}, c.BACKSTOP_DIRS)
+assert p in snap, snap
+st = {"pending": {}}
+assert c.backstop_tick(st, {}, snap, c.delivered_records(rd), 1000.0, 120) is False
+assert c.backstop_tick(st, snap, snap, c.delivered_records(rd), 1120.0, 120) is True
+assert c.wake_for_event(rd, "w1", "PROJ-1", "review-stopped", now=2000.0) == "sent"
+st = {"pending": {}}
+assert c.backstop_tick(st, {}, snap, c.delivered_records(rd), 3000.0, 120) is False
+assert c.backstop_tick(st, snap, snap, c.delivered_records(rd), 9000.0, 120) is False
+print('ok')
+PY
+
+check "record sets: the hook, the backstop and the default watch share _RECORD_SUFFIXES" <<'PY'
+import importlib.util as u, os, sys, io, json, tempfile
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.realpath(tempfile.mkdtemp())
+s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = u.module_from_spec(s); s.loader.exec_module(c)
+rd = os.path.realpath(tempfile.mkdtemp())
+os.makedirs(rd + "/tasks"); os.makedirs(rd + "/workspaces")
+assert ".ship.md" in c._RECORD_SUFFIXES, c._RECORD_SUFFIXES
+back = {sfx for sfx, _ in c.BACKSTOP_DIRS["tasks"]}
+watch = {sfx for sfx, _ in c.WATCH_DIRS["tasks"]}
+assert back == set(c._RECORD_SUFFIXES), (back, c._RECORD_SUFFIXES)
+assert set(c._RECORD_SUFFIXES) <= watch and ".spend.jsonl" in watch, watch
+for name in ("PROJ-1.done.json", "PROJ-1.ship.md", "PROJ-2.ship.md"):
+    open(rd + "/tasks/" + name, "w").write("{}")
+fp = c.record_fingerprint(rd, "PROJ-1")
+assert sorted(fp) == [rd + "/tasks/PROJ-1.done.json", rd + "/tasks/PROJ-1.ship.md"], fp
+print('ok')
+PY
+
+check "checkin: wake= names an unsent record over an older delivery" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/workspaces" "$RD/tasks"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"in-progress","base_sha":"'"$BASE"'","workers":[{"phase":"implement","workspace_id":"w1"}]}'
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf 'report\n' > "$RD/tasks/PROJ-1.ship.md"
+printf '%s' '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"review-stopped","reason":"sent","ts":1}}' > "$RD/workspaces/w1.wake.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json" || true)
+printf '%s\n' "$out" | grep '^PROJ-1 ' | grep -q ' wake=unsent:ship.md'
+if printf '%s\n' "$out" | grep '^PROJ-1 ' | grep -q ' wake=sent'; then echo "stale sent shown"; exit 1; fi
+pair=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print("[%d,%d]" % (s.st_mtime_ns, s.st_size))' "$RD/tasks/PROJ-1.ship.md")
+printf '{"v":2,"records":{"%s":%s},"last_push":{},"last_delivery":{"event":"review-stopped","reason":"sent","ts":1}}' "$RD/tasks/PROJ-1.ship.md" "$pair" > "$RD/workspaces/w1.wake.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json" || true)
+printf '%s\n' "$out" | grep '^PROJ-1 ' | grep -q ' wake=sent:review-stopped'
+echo ok
 SH
 
 check "checkin: unverifiable review findings are reported, then clear on byte-identical restore" <<'SH'

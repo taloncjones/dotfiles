@@ -104,10 +104,20 @@ While a task is
 active it refreshes this session's ownership heartbeat itself every
 `BACKSTOP_REFRESH_SECS` (300 s), following the lease this Claude process
 holds across `/clear`, so worker pushes stay deliverable without a wake.
-It prints nothing while pushes are delivered. It exits with one `signal`
+It prints nothing while pushes are delivered. A completion record is a
+task's `.done.json`, `.review.json` or ship report (`.ship.md`). The
+keepalive backstop (armed with `--messaging-socket`) never prints `heartbeat`,
+so an empty output file is its healthy state; `--exit-on-signal` ends it on a
+`signal` line, and it always exits (status 1) after an `owner:` line. It exits
+with one `signal`
 line when a completion record stays undelivered for 120 s, or as soon as
 a worker's `blocked` wake was dropped after this session's last check-in
-(the next check-in row's `wake=<reason>` names why); with
+(the next check-in row's `wake=<reason>:<event>` names why). The wake column
+reads `wake=unsent:<names>` (for example `unsent:ship.md`) when no sent push
+covers the current version of a record: a delivery fact, not an
+acknowledgement, cleared only by a later `sent` push; without a messaging
+socket every record reads `unsent`, because the Monitor watch is the wake
+path there. The backstop also exits with
 `owner: lost` when another process holds the lease; and with
 `owner: holder-gone` when it can no longer see this session's process as
 its ancestor.
@@ -135,7 +145,7 @@ Rules:
   heartbeat and prints `signal`, `owner: lost` or `owner: holder-gone`;
   worst-case wake latency is one `--interval`
   (default 15s) plus one `--debounce-secs` (default 60s) after a burst.
-  The default watch fires on completion-record, think-answer, and
+  The default watch fires on completion-record (done, review and ship report), think-answer, and
   mech-ledger writes; the hook pushes on completion-record changes and
   blocks; an ordinary worker turn end produces neither.
 

@@ -54,3 +54,15 @@ round" dispatches as usual. The delta brief carries these lines:
 `herdr-ship-prior-handoff: <pinned ship.json path>`,
 `herdr-ship-delta-head: <head>`, and
 `herdr-ship-delta-caps: <files>/<lines>`.
+
+## Ship dispatch details (section 6)
+
+Without `--tier`, on a first gate or after an `APPROVE`, the brief carries `herdr-ship-brief: tier=auto` and the
+small-tier caps from `config.json` `ship.small`; co-review picks the tier.
+`dispatch-gate` refuses a live or unknown pinned agent. For a pinned run with no
+`ship.json` (it stopped before the gate wrote it), it relaunches at most
+once per reviewed head: it refuses when `ship_relaunch_head` equals
+`review_head_sha`, otherwise writes `ship_relaunch_head` before launching
+(so an interrupted relaunch parks the task) and forces `tier=full`. It
+launches read-only on `claude`, pins `ship_launch_id`, then settles the old
+pinned row.

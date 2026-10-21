@@ -66,7 +66,7 @@ _worktree_ is a linked `git worktree` checkout; _hydration_ is the
 | 9   | Cloud session missing config                     | SessionStart hook did not run or ran too late                    |
 | 10  | Statusline blank / hooks dead                    | `node` / `python3` absent from PATH                              |
 | 11  | zsh stale-plugin nag or slow start               | 14-day epoch stamp expired; update check spawn                   |
-| 12  | File reformatted after your edit                 | `format_files.py` ran prettier -- re-read before next edit       |
+| 12  | File reformatted after your edit                 | `format_files.py` formats files the repo already formats; re-read|
 | 13  | Worktree missing .todos/.planning                | Hook guards not met, wrong shape, or workspace mode              |
 
 ## 1. Plugin skills/commands missing in a session (retired scenario)
@@ -287,14 +287,19 @@ zsh -i -x -c exit 2>&1 | tail -50   # what ran last/slowest
 ## 12. Prettier reformatting surprises
 
 `format_files.py` (PostToolUse on Edit/Write) runs
-`prettier --write --ignore-unknown <file>` after EVERY edit. Consequences:
+`prettier --write --ignore-unknown <file>` after an edit, but only on files the
+repo already formats with prettier: a prettier config resolves for the path, or
+the committed (`HEAD`) version is already prettier-clean. Files outside a git
+work tree, untracked files in a repo without a config, and tracked files in
+another style are never reformatted. Adding a prettier config opts a repo in.
+Consequences:
 
 - The on-disk file may differ from what you just wrote. Re-read after any
   formatter pass before editing again (operating-principles.md, "Read before
   you edit") -- a stale-content Edit will fail or corrupt.
-- Markdown/JSON/YAML get prettier's opinions (wrapping, quotes). If a file
-  must not be reformatted, that is a repo `.prettierignore` decision, not a
-  reason to disable the hook.
+- Owned Markdown/JSON/YAML get prettier's opinions (wrapping, quotes). If a
+  file must not be reformatted, that is a repo `.prettierignore` decision, not
+  a reason to disable the hook.
 - `prettier` missing from PATH: the hook silently does nothing (fails open).
   Check `command -v prettier` if formatting seems dead.
 

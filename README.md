@@ -505,7 +505,7 @@ inheriting an unverified work account.
 - `cache_jira_url.py` - Cache the linked Jira instance URL after MCP calls
 - `commit_guard.py` - Enforce commit message standards (no attribution, no emojis)
 - `emoji_guard.py` - Block emojis in edited files
-- `format_files.py` - Auto-format edited files with prettier
+- `format_files.py` - Auto-format edited files the repo already formats with prettier
 - `no_ai_attribution_bash.py` - Block AI attribution phrases in shell command bodies (agent names from `git/hooks/agent-tokens`)
 - `no_ai_comments.py` - Block tool-generated comments in code
 - `planning_artifact_guard.py` - Refuse staging or committing private specs, plans, and verification contracts in Claude and native Codex shell events
