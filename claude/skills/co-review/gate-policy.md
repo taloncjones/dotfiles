@@ -230,7 +230,9 @@ arrays are required even when observed empty. Map GraphQL `statusCheckRollup`
 nodes by type, preserving each check/context identity and its actual status,
 conclusion or state; an optional `head_sha` on a record must be its returned
 value. Capture both CheckRun and StatusContext records. An observed empty pair
-may use explicit no-CI evidence. Unavailable or missing provider data is missing
+may use explicit no-CI evidence. Judge only the latest run of each check (grouped by workflow
+and name, ordered by `startedAt`; an unknown or tied start keeps every run);
+list each set-aside run under `superseded_check_runs`, which no gate rule reads. Unavailable or missing provider data is missing
 evidence, not an empty success.
 
 ### Required independent seats

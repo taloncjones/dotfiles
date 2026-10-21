@@ -3204,6 +3204,22 @@ expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(status="IN_PROGR
 expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(conclusion="FAILURE"))
 expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "StatusContext", "context": "x", "state": "PENDING"}]))
 expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "Mystery"}]))
+old_fail = {"__typename": "CheckRun", "name": "tests", "workflowName": "tests", "status": "COMPLETED",
+            "conclusion": "FAILURE", "startedAt": "2026-10-21T10:00:00Z"}
+new_pass = {**old_fail, "conclusion": "SUCCESS", "startedAt": "2026-10-21T11:00:00Z"}
+rerun = copy.deepcopy(pr); rerun["statusCheckRollup"] = [old_fail, new_pass]
+rc, out = run(personal, slug, tid, rerun, rp)
+assert rc == 0 and out["ready"] is True, out
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[
+    {**new_pass, "startedAt": "2026-10-21T09:00:00Z"}, {**old_fail, "startedAt": "2026-10-21T12:00:00Z"}]))
+real_module = c._co_review_module
+class NoFilter:
+    pass
+c._co_review_module = lambda name: NoFilter() if name == "gate_report" else real_module(name)
+try:
+    expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[old_fail, new_pass]))
+finally:
+    c._co_review_module = real_module
 expect("gate", file_edit=lambda: (ld / "claude.txt").write_text("tampered\n"))
 out = expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="../../x"))
 assert any("invalid ship_launch_id" in r["detail"] for r in out["reasons"]), out

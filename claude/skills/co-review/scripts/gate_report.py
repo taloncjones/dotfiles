@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -344,6 +345,56 @@ _ROLLUP_FIELDS = {"CheckRun": ("name", "status", "conclusion"),
                   "StatusContext": ("context", "state")}
 
 
+def _started(node: dict):
+    """The node's startedAt as an aware datetime, or None when unknown."""
+    value = node.get("startedAt")
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None and moment.year > 1 else None
+
+
+def _check_key(node):
+    """(workflowName or "", name) for a complete CheckRun node, else None."""
+    if (not isinstance(node, dict) or node.get("__typename") != "CheckRun"
+            or not all(field in node for field in _ROLLUP_FIELDS["CheckRun"])):
+        return None
+    name = node.get("name")
+    if not isinstance(name, str):
+        return None
+    workflow = node.get("workflowName")
+    return (workflow if isinstance(workflow, str) else "", name)
+
+
+def _newest(rollup: list) -> dict:
+    """check key -> (newest known start, its raw startedAt string)."""
+    newest = {}
+    for node in rollup:
+        key = _check_key(node)
+        start = _started(node) if key is not None else None
+        if start is not None and (key not in newest or start > newest[key][0]):
+            newest[key] = (start, node["startedAt"])
+    return newest
+
+
+def latest_check_runs(rollup: list) -> tuple[list, list]:
+    """(kept, superseded) rollup nodes: a CheckRun is superseded only by a strictly
+    later known start of the same check key; everything else is kept."""
+    newest = _newest(rollup)
+    kept, superseded = [], []
+    for node in rollup:
+        key = _check_key(node)
+        start = _started(node) if key is not None else None
+        if start is not None and start < newest[key][0]:
+            superseded.append(node)
+        else:
+            kept.append(node)
+    return kept, superseded
+
+
 def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
     """(envelope, reasons) from `gh pr view --json headRefOid,statusCheckRollup` (ci-capture);
     envelope is None when the input is unusable."""
@@ -352,7 +403,8 @@ def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
         return None, ["PR JSON needs a headRefOid SHA and a statusCheckRollup list"]
     envelope = {"head": pr["headRefOid"], "check_runs": [], "status_contexts": []}
     reasons = []
-    for node in pr["statusCheckRollup"]:
+    kept, superseded = latest_check_runs(pr["statusCheckRollup"])
+    for node in kept:
         kind = node.get("__typename") if isinstance(node, dict) else None
         fields = _ROLLUP_FIELDS.get(kind)
         if fields is None:
@@ -363,6 +415,15 @@ def ci_envelope(pr: object, head: str) -> tuple[dict | None, list[str]]:
             continue
         target = "check_runs" if kind == "CheckRun" else "status_contexts"
         envelope[target].append({key: node[key] for key in fields})
+    if superseded:
+        newest = _newest(pr["statusCheckRollup"])
+        envelope["superseded_check_runs"] = [
+            {"name": node["name"], "workflow_name": _check_key(node)[0],
+             "status": node["status"], "conclusion": node["conclusion"],
+             "started_at": node["startedAt"],
+             "latest_started_at": newest[_check_key(node)][1],
+             "details_url": node["detailsUrl"] if isinstance(node.get("detailsUrl"), str) else None}
+            for node in superseded]
     reasons.extend(_load_preconditions()._ci_reasons(envelope, None))
     if envelope["head"] != head:
         reasons.append(f"PR head moved: {envelope['head']} is not {head}")
