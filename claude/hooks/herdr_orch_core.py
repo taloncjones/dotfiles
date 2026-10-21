@@ -5719,9 +5719,16 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
         fail("pr-state", f"state={pr.get('state')} isDraft={pr.get('isDraft')}")
     if pr.get("mergeable") != "MERGEABLE":
         fail("not-mergeable", f"mergeable={pr.get('mergeable')}")
-    ci = _ci_reasons(pr.get("statusCheckRollup"))
-    if ci:
-        fail("ci", "; ".join(ci))
+    rollup = pr.get("statusCheckRollup")
+    try:
+        if isinstance(rollup, list):
+            rollup = _co_review_module("gate_report").latest_check_runs(rollup)[0]
+    except Exception as exc:  # the gate fails closed
+        fail("ci", f"latest-run filter failed: {exc}")
+    else:
+        ci = _ci_reasons(rollup)
+        if ci:
+            fail("ci", "; ".join(ci))
     refused = task.get("merge_check")
     if (isinstance(refused, dict) and refused.get("result") == "fail"
             and refused.get("branch_head_sha") == live_head
