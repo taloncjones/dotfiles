@@ -14,6 +14,9 @@ input. Read this file at SKILL.md section 5 (changes-requested path), section 6
   report reason is one of `seat <name> runner status is not success`,
   `seat <name> artifact is empty` or
   `seat <name> structured report is missing`. This covers a seat timeout, a seat with no output and host sleep.
+  A quota stop never matches: the runner moves the notice into `errors`, and
+  `gate_report` then adds `seat <name> result is a usage-limit refusal` beside
+  the status reason, which makes the list mixed.
 - Ship gate lost, gate worker died: a stopped run (a pinned ship launch with
   no `ship.json` whose agent is gone or idle).
 - Review lost, deadline stop: `status: changes-requested`, `review_head_sha`

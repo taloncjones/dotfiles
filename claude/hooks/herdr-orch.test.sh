@@ -13676,6 +13676,26 @@ launch = open(d + "references/director-launch.md", encoding="utf-8").read()
 assert "## Host-sleep re-gate" in launch and "auto-actions.md" in launch
 PY
 
+check "docs: usage-limit seat stop is excluded from the loss class by real runner output" <<'PY'
+import importlib.util, json
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+rt = load("agent_runtime", "claude/hooks/agent_runtime.py")
+gate = load("gate_report", "claude/skills/co-review/scripts/gate_report.py")
+out = json.dumps({"type": "result", "is_error": False, "result": "You've hit your limit - resets 3pm"})
+parsed = rt.parse_runtime_result("claude", out)
+reasons = []
+gate._seat_content_ok(json.dumps(parsed).encode(), "claude.runtime.json", "claude", reasons)
+loss = {"seat claude runner status is not success"}
+assert "seat claude result is a usage-limit refusal" in reasons, reasons
+assert not set(reasons) <= loss, "quota stop must not fit the loss class"
+auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
+assert "moves the notice into `errors`" in auto
+PY
+
 check "docs: verifier-confirmed blockers repair without asking unless a decision or scope conflicts" <<'PY'
 import os
 auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
