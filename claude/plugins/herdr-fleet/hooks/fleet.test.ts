@@ -1,14 +1,15 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import {
-  age, ciCell, classify, fitTitle, labelTitle, ownerToken, prRows, repoName, shipVerdict, summaryLine, taskRow,
+  age, ciCell, classify, fitTitle, labelTitle, ownerToken, prRows, prStacks, repoName, shipVerdict, stackCell,
+  summaryLine, taskRow,
 } from './fleet'
 import { LABEL_CASES } from './label-cases'
 import { STATE_CASES } from './state-cases'
 
 const ROOT = '/h/.claude/herdr-orch'
 const GH = ['gh', 'pr', 'list', '--state', 'open', '--author', '@me', '--json',
-  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews,url',
+  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews,url,baseRefName,isCrossRepository',
   '--limit', '100']
 const OK = { exitCode: 0, stdout: '[]', stderr: '' }
 const OK_VERB = { exitCode: 0, stdout: '', stderr: '' }
@@ -1112,7 +1113,8 @@ const HEAD = 'a'.repeat(40)
 const OLD = 'b'.repeat(40)
 const ghPr = (number: number, over: object = {}) => ({
   number, title: `PR ${number}`, isDraft: false, headRefName: `br${number}`, headRefOid: HEAD,
-  statusCheckRollup: [], reviewDecision: '', reviews: [], ...over,
+  statusCheckRollup: [], reviewDecision: '', reviews: [],
+  baseRefName: 'main', isCrossRepository: false, ...over,
 })
 const approval = (oid: string | null, secAgo = 60) => ({
   author: { login: 'human' }, state: 'APPROVED', submittedAt: iso(secAgo),
@@ -1753,4 +1755,136 @@ test('queue and linked rows fit the pane', async ($, on) => {
     expect([...tasks, ...queue].join('\n')).not.toContain('secret/')
     await ui.unmount()
   }
+})
+
+const FAIL = [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' }]
+// #10 on main, #11 on br10, #12 on br11, and a lone #20 on main.
+const stackPrs = (over: Record<number, object> = {}) => [
+  ghPr(10, over[10]), ghPr(11, { baseRefName: 'br10', ...over[11] }),
+  ghPr(12, { baseRefName: 'br11', ...over[12] }), ghPr(20),
+]
+const stackRows = async (ui: any) => {
+  await ui.press({ key: 'tab-prs' })
+  const rows: Record<string, string> = {}
+  for (const t of (await lines(ui)).filter(l => l.startsWith('#'))) rows[t.slice(0, 5).trim()] = t
+  return rows
+}
+const yellowRows = async (ui: any) =>
+  (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props.color === 'yellow')
+
+test('a three-PR stack shows its positions on the PR tab', async ($, on) => {
+  const w = newWorld(owner('a'))
+  withPrs(w, stackPrs())
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($, 160)
+  const rows = await stackRows(ui)
+  expect(rows['#10']).toContain('1/3 #10')
+  expect(rows['#11']).toContain('2/3 #10')
+  expect(rows['#12']).toContain('3/3 #10')
+  expect(rows['#20']).not.toMatch(/\d+\/\d+/)
+  expect(rows['#10'].slice(6)).toMatch(/^1\/3 #10/)
+  expect(rows['#10'].slice(27)).toMatch(/^PR 10/)
+  const all = await lines(ui)
+  expect(all.join('\n')).not.toContain('br1')
+  expect(all.filter(l => l.startsWith('#')).map(l => l.slice(0, 5).trim())).toEqual(['#10', '#11', '#12', '#20'])
+  expect((await yellowRows(ui)).length).toBe(0)
+  for (const line of all) expect(line.length).toBeLessThanOrEqual(160)
+  await ui.unmount()
+
+  withPrs(w, [ghPr(20)])
+  await clock.advance(300000)
+  await clock.settle()
+  const ui2 = await pane($, 160)
+  const rows2 = await stackRows(ui2)
+  expect(rows2['#20'].slice(6)).toMatch(/^PR 20/)
+})
+
+test('a failing middle PR flags its stack and names it', async ($, on) => {
+  const cases: Array<[string, Record<number, object>]> = [
+    ['failing CI', { 11: { statusCheckRollup: FAIL } }],
+    ['changes requested', { 11: { reviewDecision: 'CHANGES_REQUESTED' } }],
+  ]
+  const w = newWorld(owner('a'))
+  const clock = stub(on, w)
+  await boot($, clock)
+  for (const [, over] of cases) {
+    withPrs(w, stackPrs(over))
+    await clock.advance(300000)
+    await clock.settle()
+    const ui = await pane($, 160)
+    const rows = await stackRows(ui)
+    expect(rows['#11']).toContain('2/3 blocks 1')
+    expect(rows['#12']).toContain('3/3 blocked by #11')
+    expect(rows['#10']).toContain('1/3 #10')
+    const yellow = await yellowRows(ui)
+    expect(yellow.length).toBe(1)
+    expect(yellow[0].text).toContain('2/3 blocks 1')
+    await ui.unmount()
+  }
+  withPrs(w, stackPrs({ 12: { statusCheckRollup: FAIL } }))
+  await clock.advance(300000)
+  await clock.settle()
+  const ui = await pane($, 160)
+  const rows = await stackRows(ui)
+  expect(Object.values(rows).join('\n')).not.toContain('block')
+  expect((await yellowRows(ui)).length).toBe(0)
+})
+
+test('task rows show the stack cell when the pane has room', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    ...task('a', 't11', { title: 'Middle', pr_number: 11, workers: [worker()] }),
+    ...task('a', 't12', { title: 'Top', pr_number: 12, workers: [worker()] }),
+  })
+  withPrs(w, stackPrs({ 11: { statusCheckRollup: FAIL } }))
+  const clock = stub(on, w)
+  await bootAt($, clock)
+  const wide = await pane($, 160)
+  await wide.press({ key: 'tab-tasks' })
+  const wideLines = await lines(wide)
+  expect(wideLines.find(l => l.includes('t12') || l.includes('Top'))).toContain('3/3 blocked by #11')
+  expect(wideLines.find(l => l.includes('Middle'))).toContain('2/3 blocks 1')
+  for (const line of wideLines) expect(line.length).toBeLessThanOrEqual(160)
+  const wideHeaders = await headers(wide)
+  await wide.unmount()
+  const narrow = await pane($, 60)
+  await narrow.press({ key: 'tab-tasks' })
+  const narrowLines = await lines(narrow)
+  expect(narrowLines.some(l => /\d+\/3/.test(l))).toBe(false)
+  for (const line of narrowLines) expect(line.length).toBeLessThanOrEqual(60)
+  expect(await headers(narrow)).toEqual(wideHeaders)
+})
+
+test('stack building covers unseen bases, forks, shared heads and cycles', () => {
+  const cells = (list: object[]) => {
+    const rows = prRows(JSON.stringify(list), [])
+    const stacks = prStacks(rows)
+    return rows.map(r => stackCell(stacks.get(r.number)))
+  }
+  expect(cells([ghPr(1, { baseRefName: 'colleague/x' }), ghPr(2, { baseRefName: 'br1' })]))
+    .toEqual(['1/2 #1', '2/2 #1'])
+  expect(cells([ghPr(3, { headRefName: 'fix', isCrossRepository: true }), ghPr(4, { baseRefName: 'fix' })]))
+    .toEqual(['', ''])
+  expect(cells([
+    ghPr(5, { headRefName: 'dup' }), ghPr(6, { headRefName: 'dup' }), ghPr(7, { baseRefName: 'dup' }),
+  ])).toEqual(['', '', ''])
+  expect(cells([ghPr(8, { baseRefName: 'br9' }), ghPr(9, { baseRefName: 'br8' })])).toEqual(['', ''])
+  expect(cells([
+    ghPr(30, { statusCheckRollup: FAIL }), ghPr(31, { baseRefName: 'br30' }), ghPr(32, { baseRefName: 'br30' }),
+  ])).toEqual(['1/2 blocks 2', '2/2 blocked by #30', '2/2 blocked by #30'])
+
+  const { baseRefName: _base, ...noBase } = ghPr(40)
+  const [bare] = prRows(JSON.stringify([noBase]), [])
+  expect(bare.base).toBe(null)
+  expect(cells([noBase])).toEqual([''])
+  expect(prRows(JSON.stringify([ghPr(41, { isCrossRepository: true })]), [])[0].isFork).toBe(true)
+
+  const old = prRows(JSON.stringify(stackPrs()), [])
+  for (const r of old) {
+    delete (r as any).base
+    delete (r as any).isFork
+  }
+  expect(() => prStacks(old)).not.toThrow()
+  expect(prStacks(old).size).toBe(0)
 })

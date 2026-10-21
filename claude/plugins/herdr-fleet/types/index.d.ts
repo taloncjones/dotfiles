@@ -49,6 +49,8 @@ export type FleetPrRow = {
   reviewAt: number | null
   url: string | null
   human: 'none' | 'changes' | 'required' | 'approved' | 'approved-old'
+  base: string | null
+  isFork: boolean
 }
 export type FleetQueueRow = { id: string; title: string }
 export type FleetQueue =

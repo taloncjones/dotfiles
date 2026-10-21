@@ -17,7 +17,7 @@ export const GH_ARGV = [
   'open',
   '--author', '@me',
   '--json',
-  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews,url',
+  'number,title,isDraft,headRefName,headRefOid,statusCheckRollup,reviewDecision,reviews,url,baseRefName,isCrossRepository',
   '--limit',
   String(GH_LIMIT),
 ] as const
@@ -493,7 +493,7 @@ function place(group: FleetGroup, waits: string, isLate = false): Placed {
   return { group, waits, isLate }
 }
 
-function findPr(row: FleetTaskRow, prs: FleetPrRow[]): FleetPrRow | null {
+export function findPr(row: FleetTaskRow, prs: FleetPrRow[]): FleetPrRow | null {
   return (
     prs.find(pr => row.prNumber !== null && pr.number === row.prNumber) ??
     prs.find(pr => row.branch !== null && pr.branch === row.branch) ??
@@ -701,8 +701,92 @@ export function prRows(text: string, tasks: FleetTaskRow[]): FleetPrRow[] {
       reviewAt: latest(reviews.map(review => isoMs(review?.submittedAt))),
       url: safeHttps(pr.url),
       human: humanState(pr),
+      base: str(pr.baseRefName),
+      isFork: pr.isCrossRepository === true,
     }
   })
+}
+
+export type FleetStack = {
+  pos: number
+  height: number
+  root: number
+  blockedBy: number | null
+  /** PRs above this one when it is a blocker, else 0. */
+  blocks: number
+}
+
+/**
+ * Stacks among the listed PRs: a PR whose base is the head of exactly one other
+ * non-fork listed PR sits above it. Rows from an older module (no `base` or
+ * `isFork`) build no stack.
+ */
+export function prStacks(prs: FleetPrRow[]): Map<number, FleetStack> {
+  const byHead = new Map<string, FleetPrRow[]>()
+  for (const pr of prs) {
+    if (pr.isFork !== false || pr.branch === null) continue
+    byHead.set(pr.branch, [...(byHead.get(pr.branch) ?? []), pr])
+  }
+  const parentOf = (pr: FleetPrRow): FleetPrRow | null => {
+    const found = (pr.base ? (byHead.get(pr.base) ?? []) : []).filter(q => q !== pr)
+    return found.length === 1 ? found[0] : null
+  }
+
+  // Ancestors nearest first; a PR whose walk revisits a PR is unstacked.
+  const ancestors = new Map<FleetPrRow, FleetPrRow[]>()
+  for (const pr of prs) {
+    const chain: FleetPrRow[] = []
+    const seen = new Set<FleetPrRow>([pr])
+    let cyclic = false
+    for (let up = parentOf(pr); up; up = parentOf(up)) {
+      if (seen.has(up)) {
+        cyclic = true
+        break
+      }
+      seen.add(up)
+      chain.push(up)
+    }
+    if (!cyclic) ancestors.set(pr, chain)
+  }
+
+  const members = new Map<FleetPrRow, FleetPrRow[]>()
+  for (const [pr, chain] of ancestors) {
+    const root = chain.length ? chain[chain.length - 1] : pr
+    members.set(root, [...(members.get(root) ?? []), pr])
+  }
+  const descendants = new Map<FleetPrRow, number>()
+  for (const chain of ancestors.values()) {
+    for (const up of chain) descendants.set(up, (descendants.get(up) ?? 0) + 1)
+  }
+  const isBlocker = (pr: FleetPrRow) =>
+    (descendants.get(pr) ?? 0) > 0 && (pr.ci === 'fail' || pr.human === 'changes')
+
+  const stacks = new Map<number, FleetStack>()
+  for (const [root, group] of members) {
+    if (group.length < 2) continue
+    const height = Math.max(...group.map(pr => ancestors.get(pr)!.length + 1))
+    for (const pr of group) {
+      const chain = ancestors.get(pr)!
+      const blocker = [...chain].reverse().find(isBlocker)
+      stacks.set(pr.number, {
+        pos: chain.length + 1,
+        height,
+        root: root.number,
+        blockedBy: blocker ? blocker.number : null,
+        blocks: isBlocker(pr) ? (descendants.get(pr) ?? 0) : 0,
+      })
+    }
+  }
+  return stacks
+}
+
+/** The stack cell text for one PR; empty when it is in no stack. */
+export function stackCell(stack: FleetStack | undefined): string {
+  if (!stack) return ''
+  const place = `${stack.pos}/${stack.height}`
+  if (stack.blockedBy !== null) return `${place} blocked by #${stack.blockedBy}`
+  if (stack.blocks > 0) return `${place} blocks ${stack.blocks}`
+  return `${place} #${stack.root}`
 }
 
 export function ghReason(error: unknown): string {

@@ -13,6 +13,7 @@ import {
   GH_ARGV,
   GH_LIMIT,
   GROUP_ICONS,
+  findPr,
   accountId,
   activeRows,
   age,
@@ -36,11 +37,14 @@ import {
   parseEvents,
   parseJson,
   prRows,
+  prStacks,
+  stackCell,
   repoName,
   statusCell,
   summaryLine,
   taskRow,
 } from './fleet'
+import type { FleetStack } from './fleet'
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
 type Kind = 'tasks' | 'prs' | 'archive' | 'deadlines' | 'board'
@@ -461,10 +465,13 @@ function row(cols: Col[]): Cell[] {
 
 const say = (text: string): Line => ({ cells: [{ text }] })
 
+const STACK_WIDTH = 20
+
 type Links = {
   board: string | null
   jiraUrl: string | null
   prs: FleetPrRow[]
+  stacks: Map<number, FleetStack>
 }
 
 // The PR URL for a record: the matched open PR's, else the record's own.
@@ -510,7 +517,16 @@ function groupLines(
   links: Links,
 ): Line[] {
   const hasKey = grouped.groups.some(g => g.items.some(i => i.row.jiraKey !== null))
-  const titleWidth = Math.max(hasKey ? 12 : 16, width - 6 - 24 - 4 - 3 - (hasKey ? 11 : 0))
+  const minTitle = hasKey ? 12 : 16
+  const baseWidth = width - 6 - 24 - 4 - 3 - (hasKey ? 11 : 0)
+  const stackOf = (r: FleetTaskRow) => {
+    const pr = findPr(r, links.prs)
+    return pr ? links.stacks.get(pr.number) : undefined
+  }
+  const hasStack =
+    baseWidth - STACK_WIDTH - 1 >= minTitle &&
+    grouped.groups.some(g => g.items.some(i => stackOf(i.row)))
+  const titleWidth = Math.max(minTitle, baseWidth - (hasStack ? STACK_WIDTH + 1 : 0))
   const lines: Line[] = []
   for (const { group, items } of grouped.groups) {
     lines.push(say(`${GROUP_ICONS[group]} ${group} (${items.length})`))
@@ -518,9 +534,11 @@ function groupLines(
       const keyCols: Col[] = hasKey
         ? [[r.jiraKey ?? '', 10, jiraHref(links.jiraUrl, r.jiraKey)]]
         : []
+      const stackCols: Col[] = hasStack ? [[stackCell(stackOf(r)), STACK_WIDTH]] : []
       lines.push({
         cells: row([
           [r.prNumber === null ? '' : `#${r.prNumber}`, 6, prHref(r, links.prs)],
+          ...stackCols,
           ...keyCols,
           [fitTitle(plain(r.title), titleWidth), titleWidth, boardHref(links.board, r.todoId)],
           [waits, 24],
@@ -549,7 +567,13 @@ function showEvidence(rows: FleetTaskRow[], width: number): boolean {
   return width >= 105 && rows.some(hasEvidence)
 }
 
-function prLine(r: FleetPrRow, width: number, tasks: FleetTaskRow[], jiraUrl: string | null): Line {
+function prLine(
+  r: FleetPrRow,
+  width: number,
+  tasks: FleetTaskRow[],
+  jiraUrl: string | null,
+  stacks: Map<number, FleetStack>,
+): Line {
   const linked = tasks.find(t => t.id === r.task)
   const fixed: Col[] = [
     [r.isDraft ? 'draft' : 'open', 5],
@@ -558,13 +582,17 @@ function prLine(r: FleetPrRow, width: number, tasks: FleetTaskRow[], jiraUrl: st
     [r.review, 18],
     [r.task ?? 'no task', 30, jiraHref(jiraUrl, linked?.jiraKey ?? null)],
   ]
-  const rest = fixed.reduce((n, [, w]) => n + w + 1, 0) + 6
+  const stack = stacks.get(r.number)
+  const stackCols: Col[] = stacks.size ? [[stackCell(stack), STACK_WIDTH]] : []
+  const rest = fixed.reduce((n, [, w]) => n + w + 1, 0) + 6 + (stacks.size ? STACK_WIDTH + 1 : 0)
   return {
     cells: row([
       [`#${r.number}`, 5, r.url],
+      ...stackCols,
       [r.title, Math.max(12, width - rest)],
       ...fixed,
     ]),
+    color: stack && stack.blockedBy === null && stack.blocks > 0 ? 'yellow' : undefined,
   }
 }
 
@@ -634,7 +662,8 @@ export const register: Register = on => {
     const active = activeRows(live)
     const done = doneRows(live, archived)
     const queued = queue && queue.state === 'ok' ? visibleQueue(queue.rows, [...live, ...archived]) : []
-    const links: Links = { board, jiraUrl: snap.jiraUrl, prs }
+    const stacks = prStacks(prs)
+    const links: Links = { board, jiraUrl: snap.jiraUrl, prs, stacks }
     const tabs: Array<[FleetTab, string, string]> = [
       ['tasks', '1', `tasks (${active.length})`],
       ['prs', '2', `PRs (${prPart ? prs.length : '?'})`],
@@ -693,7 +722,7 @@ export const register: Register = on => {
         if (!prPart) add(ghError ? 'PR list unknown' : 'reading...')
         else if (prs.length) {
           if (prs.length >= GH_LIMIT) add(`showing ${prs.length} (limit reached)`)
-          prs.forEach(r => lines.push(prLine(r, width, [...live, ...archived], snap.jiraUrl)))
+          prs.forEach(r => lines.push(prLine(r, width, [...live, ...archived], snap.jiraUrl, stacks)))
         } else add('no open PRs')
       }
     }
