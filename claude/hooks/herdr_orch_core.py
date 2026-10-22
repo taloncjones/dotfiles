@@ -3016,14 +3016,37 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
         return False
 
 
+# Wait before the second ancestry check: one ps failure (host sleep) must not
+# end the backstop.
+HOLDER_RECHECK_SECS = 3
+
+
+def _pid_alive(pid) -> bool:
+    """True when pid exists. Only a missing process or an invalid pid reads
+    as gone; a permission error means the process is there."""
+    if type(pid) is not int or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def keep_lease_warm(rd, holder_pid) -> str:
     """One backstop keepalive refresh of the launcher lease holder_pid holds:
-    "ok", "holder-gone" (holder_pid is no longer this watch's ancestor) or
-    "lost" (no lease, another pid's lease, or the fenced refresh refused).
-    Uses the lease's current session and fence, so a /clear re-claim by the
-    same process stays warm."""
-    if not _is_ancestor(holder_pid):
+    "ok", "holder-gone" (holder_pid no longer exists, or failed two ancestry
+    checks HOLDER_RECHECK_SECS apart) or "lost" (no lease, another pid's
+    lease, or the fenced refresh refused). Uses the lease's current session
+    and fence, so a /clear re-claim by the same process stays warm."""
+    if not _pid_alive(holder_pid):
         return "holder-gone"
+    if not _is_ancestor(holder_pid):
+        time.sleep(HOLDER_RECHECK_SECS)
+        if not _pid_alive(holder_pid) or not _is_ancestor(holder_pid):
+            return "holder-gone"
     # Two tries: a same-process re-claim landing between the read and the
     # fenced write fails the first; the re-read picks up its new fence.
     for _ in range(2):
@@ -3671,7 +3694,11 @@ _REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"
 
 # Rules that read a live herdr poll. `pending` runs without one, so it skips them.
 POLL_RULES = frozenset({"unknown", "abandoned-candidate", "blocked", "unblocked",
-                        "exit-idle-worker"})
+                        "reprompt-stalled", "exit-idle-worker"})
+
+# Idle time before a worker with no done record counts as stalled; keeps a
+# fresh launch, reprompt or subagent wait quiet.
+STALL_GRACE_SECS = 600
 
 
 def checkin_rules(f):
@@ -3702,6 +3729,7 @@ def checkin_rules(f):
         # Section 9 has no `paused` status, so there is no status gate to add.
         ("paused", f.get("done_outcome") == "paused"),
         ("failed", f.get("done_outcome") == "failed"),
+        ("reprompt-stalled", f.get("stalled")),
         ("exit-idle-worker", f.get("idle_settled")),
         ("ship", f.get("ship_pending")),
     )
@@ -3741,6 +3769,7 @@ NEXT_ACTIONS = {
     "confirm-plan": ("run", "advance"),
     "confirm-review": ("run", "accept-review"),
     "exit-idle-worker": ("run", "settle"),
+    "reprompt-stalled": ("run", "reprompt"),
     "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
     "dispatch-review": ("read", "SKILL.md section 5: write the focus file, then "
                                 "dispatch-gate --phase review"),
@@ -3780,6 +3809,12 @@ def next_line(task, facts, ctx):
         args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
                 "--workspace-id", facts["idle_ws"], "--cwd", task.get("worktree") or "",
                 "--launch-id", facts["idle_launch"], *account]
+    elif template == "reprompt":
+        args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
+                "--workspace-id", facts["stall_ws"], "--launch-id", facts["stall_launch"],
+                "--phase", facts["stall_phase"], "--cwd", task.get("worktree") or "",
+                "--prompt-file", "<prompt-file>", "--runtime", facts["stall_runtime"],
+                *(["--personal"] if ctx["personal"] else [])]
     else:
         args = ["--repo-slug", ctx["repo_slug"], "--repo-path", ctx["repo_path"], *account,
                 *fenced, "--task-id", facts["task_id"]]
@@ -3972,7 +4007,39 @@ def _git_ancestor(worktree, base, head) -> str:
     return "no" if proc.returncode == 1 else "unknown"
 
 
-def checkin_facts(rd, task, poll, payload_root) -> dict:
+def _stalled_row(task, row, poll_agents, done, events, now_ns):
+    """True when the latest plan or implement row sits idle with no done
+    record, and nothing has touched it for STALL_GRACE_SECS (an API error
+    stops a worker without a done record). None otherwise."""
+    if task.get("status") not in ("in-progress", "changes-requested"):
+        return None
+    if row.get("phase") not in ("plan", "implement") or row.get("status") != "launched":
+        return None
+    if row.get("exit_requested") or not all(
+            _nonempty_str(row.get(k))
+            for k in ("agent", "pane_id", "workspace_id", "launch_id", "runtime")):
+        return None
+    if not any(a.get("name") == row["agent"] and a.get("pane_id") == row["pane_id"]
+               and a.get("agent_status") in IDLE_AGENT_STATES
+               for a in poll_agents.get(row["workspace_id"], [])):
+        return None
+    if _attempt_settled(row, done):
+        return None
+    stamps = [row.get("started_ns")]
+    stamps += [r.get("started_ns") for r in row.get("reprompts") or []
+               if isinstance(r, dict) and r.get("status") != "failed"]
+    stamps = [n for n in stamps if type(n) is int]
+    secs = [n / 10**9 for n in stamps]
+    for ev in events:
+        parsed = _parse_iso(ev.get("ts"))
+        if parsed is not None and ev.get("task_id") == task.get("task_id"):
+            secs.append(parsed.timestamp())
+    if secs and now_ns / 10**9 - max(secs) < STALL_GRACE_SECS:
+        return None
+    return True
+
+
+def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
     """One task's check-in line, as a dict. Read-only: no writes, no herdr,
     no verify-contract."""
     tid = task.get("task_id")
@@ -4099,6 +4166,9 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                 continue
     hint = fold_status(events).get("last_hint") or "none"
 
+    stalled = _stalled_row(task, latest, poll_agents, done, events,
+                           time.time_ns() if now_ns is None else now_ns)
+
     stop = task.get("stop_recorded")
     stop_recorded = bool(done and isinstance(stop, dict)
                          and _nonempty_str(stop.get("launch_id"))
@@ -4129,6 +4199,9 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "idle_settled": idle_settled,
         "idle_launch": idle_launch, "idle_ws": idle_ws,
+        "stalled": stalled is not None,
+        "stall_launch": stalled and latest["launch_id"], "stall_ws": stalled and latest["workspace_id"],
+        "stall_phase": stalled and latest["phase"], "stall_runtime": stalled and latest["runtime"],
         "ship_pending": ship_pending(task),
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES

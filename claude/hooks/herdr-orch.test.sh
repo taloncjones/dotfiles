@@ -11999,6 +11999,7 @@ def stale():
     c.coordination.owner_path(rd).write_text(json.dumps(o))
     m=json.loads((rd/"owner.json").read_text());m["heartbeat_ts"]=1.0
     (rd/"owner.json").write_text(json.dumps(m))
+real_alive=c._pid_alive
 c.HOLDER_RECHECK_SECS=0
 c._pid_alive=lambda pid: True
 calls=[]
@@ -12020,7 +12021,7 @@ calls.clear()
 t0=time.monotonic()
 assert c.keep_lease_warm(rd,4242)=="holder-gone" and not calls
 assert time.monotonic()-t0<10 and hb()==1.0
-del c._pid_alive
+c._pid_alive=real_alive
 p=subprocess.Popen(["true"]);p.wait()
 assert c._pid_alive(os.getpid()) is True and c._pid_alive(p.pid) is False
 for bad in (None,0,1,-5,"123",True):
