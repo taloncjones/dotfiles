@@ -220,6 +220,11 @@ turns it into a gated post under `references/posting.md` and a second note:
 "refused by post guard; gated under posting.md". Never decide authorship
 yourself.
 
+### Carry-review
+
+`carry-review` (SKILL.md section 4) runs without asking in every repository.
+It adds no merge authority: the ship gate and the merge prompt are unchanged.
+
 ## Asks that stay
 
 A work-repository merge, a person-aimed post, a Jira write, a force push, a

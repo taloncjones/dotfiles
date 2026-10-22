@@ -2,6 +2,9 @@
 
 ## Carry-forward and delta tier (section 6)
 
+The task-local review approval carries across clean main merges the same way
+(`carry-review`, SKILL.md section 4).
+
 **Merge-main-only commits keep the verdict.** On every check-in whose task
 is `reviewed` with a `stale` handoff of verdict `APPROVE`, before any ship
 dispatch decision, prove the carry-forward against the pinned handoff;

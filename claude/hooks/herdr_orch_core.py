@@ -9,6 +9,7 @@ import calendar
 import contextlib
 import contextvars
 import datetime
+import fcntl
 import fnmatch
 import hashlib
 import importlib.util
@@ -223,15 +224,65 @@ def contract_sha256(path) -> str:
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def run_contract_commands(commands, worktree) -> int:
+def load_contract(wt, rel, expected_sha, task_id):
+    """(exit code, contract record, sha256, message) for the contract file at
+    wt/rel. Exit 3 is a missing file, 4 a digest mismatch with expected_sha;
+    an escaping path or an invalid contract raises through _require."""
+    cf = wt / rel
+    # contained() resolves symlinks, so an in-tree symlink to an outside
+    # file already fails containment; the explicit is_symlink() rejection
+    # also covers a symlink to another file INSIDE the worktree.
+    _require(
+        contained(cf, wt) and not cf.is_symlink(),
+        "contract path escapes the worktree or is a symlink",
+    )
+    if not cf.is_file():
+        return 3, None, None, "contract file missing"
+    # Single read: hash and parse the SAME bytes, so a concurrent
+    # replacement between hash and execution cannot run unhashed commands.
+    try:
+        data = cf.read_bytes()
+    except OSError:
+        return 3, None, None, "contract file missing"
+    actual_sha = hashlib.sha256(data).hexdigest()
+    if expected_sha is not None and actual_sha != expected_sha:
+        return 4, None, actual_sha, "contract hash mismatch (tamper or drift)"
+    try:
+        rec = json.loads(data)
+    except ValueError:
+        rec = None
+    err = validate_contract(rec, task_id)
+    _require(err is None, f"invalid contract: {err}")
+    return 0, rec, actual_sha, ""
+
+
+def load_pinned_contract(task, wt, task_id, rel=None):
+    """load_contract for the contract a task record pins; exit 5 when the
+    record pins none."""
+    pin_path = task.get("contract_path")
+    expected_sha = task.get("contract_sha256")
+    if not isinstance(pin_path, str) or not isinstance(expected_sha, str):
+        return 5, None, None, "no contract pinned for task"
+    _require(
+        rel is None or rel == pin_path,
+        "--contract does not match the pinned contract_path",
+    )
+    return load_contract(wt, pin_path, expected_sha, task_id)
+
+
+def run_contract_commands(commands, worktree, pass_fds=(), output=None) -> int:
     """Run each contract command via /bin/sh -c with the system grep in the
-    worktree, streaming output. Own process group per command; on timeout the
-    whole group is SIGKILLed (best-effort -- a double-forked daemon can
-    escape). First failure stops the run. Returns 0 iff every command exited
-    0."""
+    worktree, streaming output. Own process group per command; on timeout, or
+    when the call exits by an exception, the whole group is SIGKILLed
+    (best-effort -- a double-forked daemon can escape). First failure stops
+    the run. `pass_fds` stay open in each command; `output` (a file object)
+    takes the command output and status lines instead of stdout. Returns 0
+    iff every command exited 0."""
     env = {k: v for k, v in os.environ.items()
            if k != "BASH_ENV" and not k.startswith("BASH_FUNC_")}
     system_grep = shutil.which("grep", path="/usr/bin:/bin")
+    stream = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
+    out = sys.stdout if output is None else output
     with tempfile.TemporaryDirectory() as shim:
         if system_grep:
             os.symlink(system_grep, os.path.join(shim, "grep"))
@@ -240,23 +291,24 @@ def run_contract_commands(commands, worktree) -> int:
             t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
             proc = subprocess.Popen(
                 ["/bin/sh", "-c", cmd["run"]], cwd=worktree,
-                start_new_session=True, env=env
+                start_new_session=True, env=env, pass_fds=pass_fds, **stream
             )
             try:
                 rc = proc.wait(timeout=t)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                proc.wait()
-                print(f"FAIL {cmd['name']} exit=timeout", flush=True)
-                return 1
+                rc = "timeout"
+            finally:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    proc.wait()
             if rc != 0:
-                print(f"FAIL {cmd['name']} exit={rc}", flush=True)
+                print(f"FAIL {cmd['name']} exit={rc}", file=out, flush=True)
                 return 1
-            print(f"ok {cmd['name']} exit=0", flush=True)
-    print(f"PASS {len(commands)} commands", flush=True)
+            print(f"ok {cmd['name']} exit=0", file=out, flush=True)
+    print(f"PASS {len(commands)} commands", file=out, flush=True)
     return 0
 
 
@@ -3406,6 +3458,7 @@ def resolve_task_workers(rec, prior, bound):
 
 
 RETIRED_REVIEWS_KEY = "retired_review_launch_ids"
+REVIEW_CARRY_KEY = "review_carry"
 
 
 def review_retired(task, done) -> bool:
@@ -3468,6 +3521,21 @@ def apply_retired_reviews(rec, prior, workers):
     rec.pop(RETIRED_REVIEWS_KEY, None)
     if retired:
         rec[RETIRED_REVIEWS_KEY] = retired
+
+
+def apply_review_carry(rec, prior) -> None:
+    """Keep review_carry single-writer (carry-review): inherited when
+    omitted, refused when supplied changed, dropped when the pin changes."""
+    prior_rec = prior if isinstance(prior, dict) else {}
+    if rec.get("review_head_sha") != prior_rec.get("review_head_sha"):
+        rec.pop(REVIEW_CARRY_KEY, None)
+        return
+    if REVIEW_CARRY_KEY not in rec:
+        if REVIEW_CARRY_KEY in prior_rec:
+            rec[REVIEW_CARRY_KEY] = prior_rec[REVIEW_CARRY_KEY]
+        return
+    _require(REVIEW_CARRY_KEY in prior_rec and rec[REVIEW_CARRY_KEY] == prior_rec[REVIEW_CARRY_KEY],
+             "review_carry is written only by carry-review")
 
 
 def is_completed(task, done, live_head_sha, workspace) -> bool:
@@ -3685,6 +3753,7 @@ def checkin_rules(f):
                                 and not f.get("completed")),
         ("blocked", f.get("live") == "blocked" and status != "blocked"),
         ("unblocked", status == "blocked" and f.get("live") != "blocked"),
+        ("carry-review", f.get("review_carry_due")),
         ("stale-review-reset", (status in _REVIEW_STATES and f.get("review_stale"))
                                or f.get("review_pin_orphaned")),
         ("confirm-review", f.get("reviewed") and status != "reviewed"),
@@ -3744,6 +3813,7 @@ NEXT_ACTIONS = {
     "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
     "dispatch-review": ("read", "SKILL.md section 5: write the focus file, then "
                                 "dispatch-gate --phase review"),
+    "carry-review": ("read", "SKILL.md section 4 (carry-review)"),
     "stale-review-reset": ("read", "SKILL.md section 4 (stale-review-reset)"),
     "unblocked": ("read", "SKILL.md section 9 (blocked -> in-progress)"),
     "mech-ledger": ("read", "SKILL.md section 4 (run-mech worker)"),
@@ -4057,6 +4127,10 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         and not review_retired(task, review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
+    # An approval still valid at the current pin that HEAD has moved past:
+    # carry-review decides whether a clean main merge keeps it.
+    review_carry_due = bool(status == "reviewed" and review_stale and rev_ws
+                            and is_reviewed(task, review, task["review_head_sha"], rev_ws))
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
     # Section 5 writes review-dispatched only once a launch is accepted, so a
@@ -4116,6 +4190,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "completed": completed, "plan_completed": plan_completed,
         "reviewed": reviewed, "review_correlates": review_correlates,
         "review_stale": review_stale, "review_at_head": review_at_head,
+        "review_carry_due": review_carry_due,
         "review_pin_orphaned": review_pin_orphaned,
         "dispatch_review": bool(head and should_dispatch_review(task, head)),
         "mech_unsettled": mech_unsettled,
@@ -4230,9 +4305,18 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
         return False
     if not _findings_evidence_ok(done):
         return False
-    return task.get("review_head_sha") == head_sha and (
-        done.get("reviewed_head_sha") == head_sha
-    )
+    if task.get("review_head_sha") != head_sha:
+        return False
+    if done.get("reviewed_head_sha") == head_sha:
+        return True
+    # A proven carry (carry-review) re-pins at a later head and names the
+    # review launch and reviewed head it carried the approval from.
+    carry = task.get("review_carry")
+    return (isinstance(carry, dict) and carry.get("head") == head_sha
+            and _nonempty_str(carry.get("reviewed_head_sha"))
+            and done.get("reviewed_head_sha") == carry["reviewed_head_sha"]
+            and _nonempty_str(carry.get("review_launch_id"))
+            and done.get("launch_id") == carry["review_launch_id"])
 
 
 _TERMINAL_TASK = frozenset({"merged", "abandoned", "failed"})
@@ -5044,6 +5128,154 @@ def _fenced_scoped(ns):
         base = rd / "leads" / ns.binding
         _require(contained(base, state_root()), "escapes state root")
         yield rd, base
+
+
+CARRY_EXIT = {"carried": 0, "refused": 3, "inconclusive": 4}
+
+
+def _carry_report(outcome, task_id, head, reasons, audit=None, audit_sha256=None) -> int:
+    print(json.dumps({"outcome": outcome, "task_id": task_id, "head": head,
+                      "reasons": reasons, "audit": audit, "audit_sha256": audit_sha256},
+                     sort_keys=True))
+    return CARRY_EXIT[outcome]
+
+
+def _carry_lock(adir):
+    """An exclusive non-blocking flock on artifacts/<task>/review-carry.lock,
+    or None when another run (or a contract command it left) holds it."""
+    with coordination.payload_parent(adir / "review-carry.lock", create=True) as (parent, name):
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _carry_fetch(wt, branch) -> bool:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        done = subprocess.run(["git", "-C", wt, "fetch", "--no-tags", "origin", branch],
+                              env=env, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def _carry_contract(task, wt, lock_fd):
+    """(exit, sha256, output_tail) of the task's pinned contract run in wt with
+    the run lock inherited by every command. Exit None means no run (the pin
+    is missing or its file is gone); an integrity error raises."""
+    code, rec, sha, message = load_pinned_contract(task, Path(wt), task["task_id"])
+    pinned = task.get("contract_sha256") if isinstance(task.get("contract_sha256"), str) else None
+    if code in (3, 5):
+        return code, pinned, message
+    if code != 0:
+        sys.stderr.write(f"[X] {message}\n")
+        raise SystemExit(2)
+
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        with tempfile.TemporaryFile("w+") as log:
+            rc = run_contract_commands(rec["commands"], wt, pass_fds=(lock_fd,), output=log)
+            log.seek(0)
+            tail = "".join(log.readlines()[-60:])[-8000:]
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    return rc, sha, tail
+
+
+def _carry_review(ns) -> int:
+    """carry-review: keep a task review approval across clean main merges.
+    Exit 0 carried, 3 refused (task reset), 4 inconclusive (nothing written)."""
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    _require(valid_task_id(ns.task_id), "invalid task-id")
+    rd, tid = repo_dir(ns.repo_slug), ns.task_id
+    if not check_fence(rd, ns.session, ns.fence):
+        print("owner: stale-fence")
+        return 1
+    tf, rf = rd / "tasks" / f"{tid}.json", rd / "tasks" / f"{tid}.review.json"
+    adir = rd / "artifacts" / tid
+    _require(all(contained(path, state_root()) for path in (tf, rf, adir)), "escapes state root")
+    lock_fd = _carry_lock(adir)
+    if lock_fd is None:
+        return _carry_report("inconclusive", tid, None, ["another carry-review run holds the lock"])
+    try:
+        task_bytes, review_bytes = read_payload_bytes(tf), read_payload_bytes(rf)
+        task, review = json.loads(task_bytes), json.loads(review_bytes)
+        _require(isinstance(task, dict) and isinstance(review, dict),
+                 "task or review record is malformed")
+        wt, pin = task.get("worktree"), task.get("review_head_sha")
+        _require(isinstance(wt, str) and Path(wt).is_dir(), "task worktree is missing")
+        rev_ws, base_ref = phase_workspace(task, "review"), task.get("base_ref")
+        head = _git(wt, "rev-parse", "HEAD")
+        _require(task.get("status") == "reviewed" and rev_ws and head and head != pin
+                 and is_reviewed(task, review, pin, rev_ws)
+                 and isinstance(base_ref, str) and re.fullmatch(r"origin/[A-Za-z0-9._/-]+", base_ref),
+                 "task is not an approved review with a moved head and an origin/<branch> base_ref")
+        status = ("--no-optional-locks", "status", "--porcelain")
+        if _git(wt, *status) != "":
+            return _carry_report("inconclusive", tid, head, ["worktree is dirty or unreadable"])
+        fetched = _carry_fetch(wt, base_ref[len("origin/"):])
+        try:
+            proof = _co_review_module("gate_report")._load_sibling("branch_delta").carry_forward(
+                Path(wt), review["reviewed_head_sha"], head, base_ref)
+        except Exception as exc:  # a proof that cannot run proves nothing
+            proof = {"pass": False, "reasons": [f"proof failed: {exc}"]}
+        contract = {"exit": None, "contract_sha256": None, "output_tail": ""}
+        reasons = list(proof["reasons"])
+        if proof["pass"]:
+            rc, sha, tail = _carry_contract(task, wt, lock_fd)
+            contract = {"exit": rc, "contract_sha256": sha, "output_tail": tail}
+            if rc != 0:
+                reasons = [f"pinned contract did not pass (exit {rc}): {tail.strip()[-200:]}"]
+        elif not fetched:
+            return _carry_report("inconclusive", tid, head, reasons + ["fetch of origin failed"])
+        outcome = "carried" if not reasons else "refused"
+        audit = {"schema": 1, "task_id": tid, "outcome": outcome, "reasons": reasons,
+                 "reviewed_head_sha": review["reviewed_head_sha"], "from_pin": pin,
+                 "head": head, "upstream": base_ref, "fetch": "ok" if fetched else "failed",
+                 "proof": proof, "contract": contract, "ts": now_iso()}
+        audit_data = (json.dumps(audit, sort_keys=True, indent=2) + "\n").encode()
+        audit_path = adir / "review-carry" / f"{head}.json"
+        with owner_transaction(rd) as tx:
+            if not tx.check(ns.session, ns.fence):
+                print("owner: stale-fence")
+                return 1
+            unchanged = (read_payload_bytes(tf) == task_bytes and read_payload_bytes(rf) == review_bytes
+                         and _git(wt, "rev-parse", "HEAD") == head and _git(wt, *status) == "")
+            if not unchanged:
+                return _carry_report("inconclusive", tid, head,
+                                     ["head, worktree or records changed during the run"])
+            rec = dict(task)
+            if outcome == "carried":
+                rec["review_head_sha"] = head
+                rec[REVIEW_CARRY_KEY] = {
+                    "reviewed_head_sha": review["reviewed_head_sha"], "head": head,
+                    "from_pin": pin, "review_launch_id": _latest_review_launch(task["workers"]),
+                    "upstream": base_ref, "upstream_sha": proof["base"],
+                    "new_base": proof["new_base"], "contract_sha256": contract["contract_sha256"],
+                    "contract_exit": 0, "audit": str(audit_path),
+                    "audit_sha256": hashlib.sha256(audit_data).hexdigest(), "ts": audit["ts"]}
+                rec["note"] = (f"review approval carried from {pin[:7]} to {head[:7]}: "
+                               f"clean merge of {base_ref}, pinned contract passed")
+            else:
+                rec.update(status="completed", review_head_sha=None)
+                rec.pop(REVIEW_CARRY_KEY, None)
+                rec["note"] = f"review carry refused at {head[:7]}: {reasons[0][:200]}"
+                apply_retired_reviews(rec, task, rec["workers"])
+            _require_record_within_reader_limit(rec)
+            write_bytes_atomic(audit_path, audit_data)
+            write_json_atomic(tf, rec)
+        return _carry_report(outcome, tid, head, reasons, str(audit_path),
+                             hashlib.sha256(audit_data).hexdigest())
+    finally:
+        os.close(lock_fd)
 
 
 def _resume_owner(ns) -> int:
@@ -5964,6 +6196,7 @@ def _main(argv=None) -> int:
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
+    add("carry-review", "--task-id", fenced=True)
     cp = add("confirm-plan", "--task-id", "--workspace", "--head-sha")
     cp.add_argument("--payload-root", default=None)
     w = add("watch")
@@ -6114,6 +6347,8 @@ def _main(argv=None) -> int:
         return _retire_decision(ns)
     if ns.cmd == "set-queue":
         return _set_queue(ns)
+    if ns.cmd == "carry-review":
+        return _carry_review(ns)
     if ns.cmd == "write-task":
         _require(not (ns.present and ns.binding is not None),
                  "--present is launcher scope only; drop it with --binding")
@@ -6143,6 +6378,7 @@ def _main(argv=None) -> int:
                          "retired_review_launch_ids is launcher-scope only")
             else:
                 apply_retired_reviews(rec, prior, rec["workers"])
+            apply_review_carry(rec, prior)
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
@@ -6168,6 +6404,7 @@ def _main(argv=None) -> int:
         _require(RETIRED_REVIEWS_KEY not in rec,
                  "a reset opens with no retired review launches")
         _require("reset_from" not in rec, "reset_from is set by the verb")
+        _require(REVIEW_CARRY_KEY not in rec, "review_carry is written only by carry-review")
         with _fenced_scoped(ns) as (rd, base):
             tasks = base / "tasks"
             _require(read_prior_task(tasks / f"{ns.task_id}.json") is not PRIOR_ABSENT,
@@ -8313,9 +8550,10 @@ def _main(argv=None) -> int:
             not ns.allow_unpinned or ns.contract,
             "--allow-unpinned requires --contract",
         )
-        rel = ns.contract
-        expected_sha = None
-        if not ns.allow_unpinned:
+        if ns.allow_unpinned:
+            code, rec, actual_sha, message = load_contract(
+                wt, ns.contract, None, ns.task_id)
+        else:
             tf = repo_dir(ns.repo_slug) / "tasks" / f"{ns.task_id}.json"
             _require(contained(tf, state_root()), "escapes state root")
             # A missing or corrupt task record is an integrity error (exit 2
@@ -8329,44 +8567,11 @@ def _main(argv=None) -> int:
             _require(
                 isinstance(task, dict), "task record missing or unreadable"
             )
-            pin_path = task.get("contract_path")
-            expected_sha = task.get("contract_sha256")
-            if not isinstance(pin_path, str) or not isinstance(expected_sha, str):
-                sys.stderr.write("[X] no contract pinned for task\n")
-                return 5
-            _require(
-                rel is None or rel == pin_path,
-                "--contract does not match the pinned contract_path",
-            )
-            rel = pin_path
-        cf = wt / rel
-        # contained() resolves symlinks, so an in-tree symlink to an outside
-        # file already fails containment; the explicit is_symlink() rejection
-        # also covers a symlink to another file INSIDE the worktree.
-        _require(
-            contained(cf, wt) and not cf.is_symlink(),
-            "contract path escapes the worktree or is a symlink",
-        )
-        if not cf.is_file():
-            sys.stderr.write("[X] contract file missing\n")
-            return 3
-        # Single read: hash and parse the SAME bytes, so a concurrent
-        # replacement between hash and execution cannot run unhashed commands.
-        try:
-            data = cf.read_bytes()
-        except OSError:
-            sys.stderr.write("[X] contract file missing\n")
-            return 3
-        actual_sha = hashlib.sha256(data).hexdigest()
-        if expected_sha is not None and actual_sha != expected_sha:
-            sys.stderr.write("[X] contract hash mismatch (tamper or drift)\n")
-            return 4
-        try:
-            rec = json.loads(data)
-        except ValueError:
-            rec = None
-        err = validate_contract(rec, ns.task_id)
-        _require(err is None, f"invalid contract: {err}")
+            code, rec, actual_sha, message = load_pinned_contract(
+                task, wt, ns.task_id, ns.contract)
+        if code != 0:
+            sys.stderr.write(f"[X] {message}\n")
+            return code
         if ns.validate_only:
             print(actual_sha)
             return 0
