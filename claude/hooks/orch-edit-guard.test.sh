@@ -583,13 +583,54 @@ hook_case "G git log allowed" allow Bash "git log --oneline -3" "$R" "$SID_A"
 hook_case "G git -C repo pull --ff-only denied" deny Bash "git -C $R pull --ff-only" "$N" "$SID_A"
 hook_case "G owner python3 core sync-main allowed" allow Bash "python3 $HOME/.claude/hooks/herdr_orch_core.py sync-main --repo-slug s --repo-path $R --branch main" "$R" "$SID_A"
 hook_case "G git commit outside any work tree allowed" allow Bash "git commit -m x" "$N" "$SID_A"
-hook_case "G git -C variable target allowed (accepted gap)" allow Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
+hook_case "G git -C variable target denied (fail closed)" deny Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
 hook_case "G git commit from .todos cwd denied" deny Bash "git commit -m x" "$R/.todos" "$SID_A"
 hook_case "G git -C .todos reset --hard denied" deny Bash "git -C $R/.todos reset --hard" "$N" "$SID_A"
 hook_case "G git reset --hard from gitignored cwd denied" deny Bash "git reset --hard" "$R/ignored" "$SID_A"
 hook_case "G git -C gitignored dir commit denied" deny Bash "git -C $R/ignored commit -m x" "$N" "$SID_A"
 hook_case "G cd .todos then git commit denied" deny Bash "cd $R/.todos && git commit -m x" "$N" "$SID_A"
 hook_case "G plain session git commit allowed" allow Bash "git commit -m x" "$R" "$SID_C"
+
+# --- M: every SKILL.md writer verb, in the repo and under -C -------------
+hook_case "M git -C repo commit denied" deny Bash "git -C $R commit -m x" "$N" "$SID_A"
+hook_case "M git merge in the repo denied" deny Bash "git merge main" "$R" "$SID_A"
+hook_case "M git cherry-pick in the repo denied" deny Bash "git cherry-pick abc123" "$R" "$SID_A"
+hook_case "M git -C repo cherry-pick denied" deny Bash "git -C $R cherry-pick abc123" "$N" "$SID_A"
+hook_case "M git reset in the repo denied" deny Bash "git reset --hard" "$R" "$SID_A"
+hook_case "M git -C repo reset denied" deny Bash "git -C $R reset --hard" "$N" "$SID_A"
+hook_case "M git rebase in the repo denied" deny Bash "git rebase main" "$R" "$SID_A"
+hook_case "M git -C repo rebase denied" deny Bash "git -C $R rebase main" "$N" "$SID_A"
+hook_case "M git revert in the repo denied" deny Bash "git revert HEAD" "$R" "$SID_A"
+hook_case "M git -C repo revert denied" deny Bash "git -C $R revert HEAD" "$N" "$SID_A"
+hook_case "M git am in the repo denied" deny Bash "git am x.patch" "$R" "$SID_A"
+hook_case "M git -C repo am denied" deny Bash "git -C $R am x.patch" "$N" "$SID_A"
+hook_case "M git stash in the repo denied" deny Bash "git stash" "$R" "$SID_A"
+hook_case "M git -C repo stash denied" deny Bash "git -C $R stash" "$N" "$SID_A"
+hook_case "M git checkout -- path in the repo denied" deny Bash "git checkout -- tracked.txt" "$R" "$SID_A"
+hook_case "M git -C repo checkout -- path denied" deny Bash "git -C $R checkout -- tracked.txt" "$N" "$SID_A"
+hook_case "M git restore in the repo denied" deny Bash "git restore tracked.txt" "$R" "$SID_A"
+hook_case "M git -C repo restore denied" deny Bash "git -C $R restore tracked.txt" "$N" "$SID_A"
+
+# --- U/A: unresolved git targets fail closed ------------------------------
+hook_case "U incident: assigned variable -C merge denied" deny Bash 'W='"$R"'; git -C $W rev-parse HEAD; git -C $W merge --no-ff -m "eol: Merge A into B" main' "$N" "$SID_A"
+U2_CMD='R='"$R"'
+m() {
+    wt=$R/$1
+    git -C $wt merge --no-ff -m "$3" $2 2>&1 | tail -5
+}
+m . main "msg"'
+hook_case "U incident: shell function -C merge denied" deny Bash "$U2_CMD" "$N" "$SID_A"
+hook_case "U cd to a variable then git merge denied" deny Bash 'W='"$R"'; cd $W && git merge main' "$N" "$SID_A"
+hook_case "U -C command substitution commit denied" deny Bash 'git -C "$(git rev-parse --show-toplevel)" commit -m x' "$N" "$SID_A"
+hook_case "U --work-tree variable reset denied" deny Bash 'git --work-tree=$X --git-dir=$X/.git reset --hard' "$N" "$SID_A"
+hook_case "U -C glob commit denied" deny Bash "git -C $FIX/rep* commit -m x" "$N" "$SID_A"
+hook_case "U sh -c variable -C merge denied" deny Bash "sh -c 'git -C \$W merge main'" "$N" "$SID_A"
+hook_case "A git -C variable status allowed" allow Bash 'git -C $W status' "$N" "$SID_A"
+hook_case "A git -C variable merge --abort allowed" allow Bash 'git -C $W merge --abort' "$N" "$SID_A"
+hook_case "A git merge --abort in the repo allowed" allow Bash "git merge --abort" "$R" "$SID_A"
+hook_case "A git -C repo merge --abort allowed" allow Bash "git -C $R merge --abort" "$N" "$SID_A"
+hook_case "A plain session variable -C merge allowed" allow Bash 'git -C $W merge main' "$N" "$SID_C"
+hook_case "A cd to a variable inside a closed subshell does not carry" allow Bash '(cd $W && git status); git merge main' "$N" "$SID_A"
 
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
@@ -612,6 +653,38 @@ second_line_has() {   # LABEL SUBSTRING: second stderr line of the last run
         printf 'FAIL  %s: %s\n' "$1" "$(sed -n 2p "$FIX/err")" >&2; FAIL=$((FAIL + 1))
     fi
 }
+
+U1_CMD='W='"$R"'; git -C $W rev-parse HEAD; git -C $W merge --no-ff -m "eol: Merge A into B" main'
+reset_log
+if run "$(payload Bash "$SID_A" "$U1_CMD" "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] \
+        && grep -qF '"why":"unresolved"' "$AUDIT" && grep -qF '"reason":"unresolved"' "$AUDIT" \
+        && grep -qF '"repo":""' "$AUDIT" && grep -qF '"path":"$W"' "$AUDIT" \
+        && grep -qF "\"session_id\":\"$SID_A\"" "$AUDIT" && grep -qF '"tool_use_id":"toolu_' "$AUDIT"; then
+    printf 'PASS  U unresolved denial is logged once with why unresolved\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U unresolved denial is logged once with why unresolved (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+if run "$(payload Bash "$SID_A" "$U1_CMD" "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-claim)" = 0 ]; then
+    printf 'PASS  U marker does not allow an unresolved target and claims nothing\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U marker does not allow an unresolved target and claims nothing (rc=%s claims=%s)\n' "$rc" "$(audit_count orch-edit-claim)" >&2; FAIL=$((FAIL + 1))
+fi
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
+
+if run "$(payload Bash "$SID_A" "git -C $R merge --abort" "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 0 ] && [ ! -s "$FIX/err" ] && [ "$(audit_count orch-edit-allowed)" = 1 ] \
+        && [ "$(audit_count orch-edit-claim)" = 0 ] \
+        && grep -qF '"reason":"merge-abort"' "$AUDIT" && grep -qF "\"cwd\":\"$N\"" "$AUDIT"; then
+    printf 'PASS  A director merge --abort is logged as allowed\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  A director merge --abort is logged as allowed (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
 
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 if run "$(payload Bash "$SID_A" "git commit -m x" "$R")"; then rc=0; else rc=$?; fi
@@ -1301,6 +1374,15 @@ hook_case "LG lead edit inside its workspace allowed" allow Write "$LWS/wsfile.t
 hook_case "LG lead edit of the main checkout denied" deny Edit "$R/tracked.txt" "$R" "$SID_C"
 hook_case "G lead git commit inside its workspace allowed" allow Bash "git commit -m x" "$LWS" "$SID_C"
 hook_case "G lead git -C main checkout commit denied" deny Bash "git -C $R commit -m x" "$LWS" "$SID_C"
+U10_BEFORE=$(audit_count orch-edit-denied)
+if run "$(payload Bash "$SID_C" 'git -C $W commit -m x' "$LWS")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(wc -l <"$FIX/err" | tr -d ' ')" = 3 ] \
+        && head -n 1 "$FIX/err" | grep -q '^Blocked: orch-edit-guard' \
+        && [ "$(audit_count orch-edit-denied)" = "$U10_BEFORE" ]; then
+    printf 'PASS  U lead variable -C commit denied and not audited\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U lead variable -C commit denied and not audited (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
 hook_case "AC-G lead inside workspace: new nested file allowed" allow Write "$LWS/sub/deep/new.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead inside workspace: nested dir allowed" allow Write "$LWS/nested/x.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead outside: sibling workspace denied" deny Write "$LWS2/wsfile.txt" "$LWS2" "$SID_C"

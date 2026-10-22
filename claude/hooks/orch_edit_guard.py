@@ -30,9 +30,16 @@ reserved claim-then-count in tasks/orch-edits.jsonl so parallel tool calls
 cannot overshoot. Every guarded attempt (allowed or refused) is appended to
 that log, best effort, after the decision.
 
+Git work-tree writers fail closed on a target the guard cannot resolve: a
+`-C`/`--work-tree` word (or a preceding `cd`/`pushd` operand) built from
+`$VAR`/`$(...)`/globs is refused for a launcher or lead, with no marker able
+to lift it. `git merge --abort` is not a work-tree write for the guard; a
+launcher's call is logged as allowed.
+
 Accepted holes (allow): scripts and functions, `python -c`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
-`rsync`, `dd`, editors, `xargs`, process substitution, targets built from
-`$VAR`/`$(...)`/globs, a heredoc with no terminator, git calls past the
+`rsync`, `dd`, editors, `xargs`, process substitution, non-git targets built
+from `$VAR`/`$(...)`/globs, `git --git-dir=<repo>/.git <writer>` with no
+`--work-tree` from a non-repo cwd, a heredoc with no terminator, git calls past the
 10-second budget, NotebookEdit/MultiEdit, `awk`/`gawk -i inplace` (cycle-3
 A-1; only sed/gsed/perl are modeled as in-place editors). This is a guard
 against drift, not evasion.
@@ -1067,10 +1074,27 @@ class GitDir(str):
     repository, so the decision is made on that repository, not this path."""
 
 
-def git_write_targets(words):
+class Unresolved(str):
+    """A git writer's directory word the scanner cannot turn into a path."""
+
+
+class MergeAbort(str):
+    """A `git merge --abort` call's directory word; audit-only, never a target."""
+
+
+def unexpanded(word, home):
+    """True when the shell would still expand `word` ($VAR, backtick, glob)."""
+    w = rm_guard.expand_home(word, home)
+    return "$" in w or "`" in w or rm_guard.has_glob_chars(w)
+
+
+def git_write_targets(words, home, unknown_cd=None):
     """[path] the git invocation writes (--work-tree, else the -C chain, else
-    "."), or [] for a subcommand that does not change a work tree."""
+    "."), or [] for a subcommand that does not change a work tree. An
+    unresolvable directory (or a relative one after an unresolvable `cd`)
+    yields [Unresolved(word)]; `merge --abort` yields [MergeAbort(dir)]."""
     chdir, work_tree, i = "", None, 1
+    bad = None
     while i < len(words):
         word = words[i]
         if word in GIT_VALUE_OPTIONS:
@@ -1078,12 +1102,18 @@ def git_write_targets(words):
                 return []
             if word == "-C":
                 chdir = os.path.join(chdir, words[i + 1])
+                if bad is None and unexpanded(words[i + 1], home):
+                    bad = words[i + 1]
             elif word == "--work-tree":
                 work_tree = words[i + 1]
+                if bad is None and unexpanded(work_tree, home):
+                    bad = work_tree
             i += 2
             continue
         if word.startswith("--work-tree="):
             work_tree = word.split("=", 1)[1]
+            if bad is None and unexpanded(work_tree, home):
+                bad = work_tree
         elif not word.startswith("-"):
             break
         i += 1
@@ -1091,9 +1121,27 @@ def git_write_targets(words):
         return []
     if words[i] == "stash" and i + 1 < len(words) and words[i + 1] in ("list", "show"):
         return []
-    if work_tree is not None:
-        return [GitDir(os.path.join(chdir, work_tree))]
-    return [GitDir(chdir or ".")]
+    where = os.path.join(chdir, work_tree) if work_tree is not None else chdir
+    if words[i] == "merge" and "--abort" in words[i + 1:]:
+        return [MergeAbort(where or ".")]
+    if bad is not None:
+        return [Unresolved(bad)]
+    if unknown_cd is not None and not os.path.isabs(where):
+        return [Unresolved(unknown_cd)]
+    return [GitDir(where or ".")]
+
+
+def cd_operand(words):
+    """The directory operand of a `cd`/`pushd`, or None; skips option flags."""
+    seen_dashdash = False
+    for t in words[1:]:
+        if not seen_dashdash and t == "--":
+            seen_dashdash = True
+            continue
+        if not seen_dashdash and t.startswith("-") and t != "-" and len(t) > 1:
+            continue
+        return t
+    return None
 
 
 def cd_target_candidates(words, cwd, home):
@@ -1110,18 +1158,10 @@ def cd_target_candidates(words, cwd, home):
     `mkdir -p /tmp/x && cd /tmp/x && echo hi > out.txt` can be denied even
     though /tmp/x exists by the time the shell actually runs `cd` -- a
     false-positive deny, never a missed guard."""
-    operand, seen_dashdash = None, False
-    for t in words[1:]:
-        if not seen_dashdash and t == "--":
-            seen_dashdash = True
-            continue
-        if not seen_dashdash and t.startswith("-") and t != "-" and len(t) > 1:
-            continue
-        operand = t
-        break
+    operand = cd_operand(words)
     if operand is None or operand == "-":
         return {cwd}
-    if "$" in operand or "`" in operand or rm_guard.has_glob_chars(operand):
+    if unexpanded(operand, home):
         return {cwd}  # unexpanded target: accepted hole, same as other operands
     # A logical `cd` keeps the lexical path; `cd -P` resolves symlinks
     # physically. The scanner does not know which spelling the shell will use,
@@ -1145,7 +1185,7 @@ def cd_target_candidates(words, cwd, home):
     return cands
 
 
-def bash_targets(command, cwd, home, depth=0):
+def bash_targets(command, cwd, home, depth=0, unknown_cd=None):
     """[(cwd, word)] write targets of one command string. `cwd` is tracked
     as a SET of candidates rather than one string, so an uncertain `cd`
     (a subshell, a failed cd, cd options) fails toward guarding rather
@@ -1163,11 +1203,11 @@ def bash_targets(command, cwd, home, depth=0):
     stack = []
     for kind, tokens, previous, following in segment_groups(rm_guard.tokenize(cleaned)):
         if kind == "push":
-            stack.append(cwds)
+            stack.append((cwds, unknown_cd))
             continue
         if kind == "pop":
             if stack:
-                cwds = stack.pop()
+                cwds, unknown_cd = stack.pop()
             continue
         words = []
         for t in tokens:
@@ -1202,6 +1242,9 @@ def bash_targets(command, cwd, home, depth=0):
                 new_cwds |= cwds
             if following != "|":
                 cwds = new_cwds
+                operand = cd_operand(words)
+                if operand is not None and unexpanded(operand, home):
+                    unknown_cd = operand
             seen_cwds |= cwds
         elif head == "popd":
             cwds |= seen_cwds
@@ -1224,12 +1267,12 @@ def bash_targets(command, cwd, home, depth=0):
                 found.extend((c, w) for w in rm_operands(words))
         elif head == "git":
             for c in cwds:
-                found.extend((c, w) for w in git_write_targets(words))
+                found.extend((c, w) for w in git_write_targets(words, home, unknown_cd))
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:
                 for c in cwds:
-                    found.extend(bash_targets(inner, c, home, depth + 1))
+                    found.extend(bash_targets(inner, c, home, depth + 1, unknown_cd))
     return found
 
 
@@ -1276,10 +1319,10 @@ def resolve_targets(raw, home):
     tracked write hidden past the cap."""
     paths = []
     for c_cwd, w, shell_expands in raw:
+        if isinstance(w, (Unresolved, MergeAbort)):
+            continue
         we = rm_guard.expand_home(w, home)
-        if not we or (
-            shell_expands and ("$" in we or "`" in we or rm_guard.has_glob_chars(we))
-        ):
+        if not we or (shell_expands and unexpanded(w, home)):
             continue
         p = canonical_target(we, c_cwd, home)
         if p is not None and isinstance(w, GitDir):
@@ -1559,6 +1602,28 @@ def refuse_overflow(count):
     return 2
 
 
+def refuse_unresolved(word):
+    """Three-line refusal for a fenced session's git write whose target
+    directory the guard cannot resolve."""
+    print(
+        f"{BLOCKED} -- this session is fenced and a git write targets a "
+        f"directory the guard cannot resolve: {_printable(word)[:PATH_MAX]}.",
+        file=sys.stderr,
+    )
+    print(
+        "A shell variable, command substitution or glob hides which "
+        "repository it changes, and no allow-edit marker can scope it.",
+        file=sys.stderr,
+    )
+    print(
+        "Spell the -C or --work-tree path literally, without a cd to a "
+        "variable first, or dispatch the write to a worker.",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    return 2
+
+
 def under_workspace(path, roots):
     return any(path == r or path.startswith(r + "/") for r in roots)
 
@@ -1621,7 +1686,48 @@ def decide(payload, runtime="claude"):
         # without the scope and fail closed if it is fenced (co-review r9).
         return refuse_crash() if privileged_anywhere(sid, runtime) else 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
-    paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
+    raw = targets_for(payload, tool, cwd, home)
+    unresolved = [w for _c, w, _s in raw if isinstance(w, Unresolved)]
+    aborts = [w for _c, w, _s in raw if isinstance(w, MergeAbort)]
+    if unresolved or aborts:
+        owned = owned_slugs(sid, runtime, caller_scope, {})
+        if unresolved and (owned or lead_authority(sid, runtime, caller_scope)[0]):
+            rc = refuse_unresolved(unresolved[0])
+            for slug in sorted(owned):
+                audit_append(
+                    owned[slug]["rd"],
+                    {
+                        "v": 1,
+                        "ts": core.now_iso(),
+                        "event": "orch-edit-denied",
+                        "session_id": sid,
+                        "tool_name": tool,
+                        "tool_use_id": payload.get("tool_use_id"),
+                        "path": _printable(unresolved[0])[:PATH_MAX],
+                        "repo": "",
+                        "reason": "unresolved",
+                        "why": "unresolved",
+                    },
+                )
+            return rc
+        for slug in sorted(owned):
+            for w in aborts:
+                audit_append(
+                    owned[slug]["rd"],
+                    {
+                        "v": 1,
+                        "ts": core.now_iso(),
+                        "event": "orch-edit-allowed",
+                        "session_id": sid,
+                        "tool_name": tool,
+                        "tool_use_id": payload.get("tool_use_id"),
+                        "path": _printable(w)[:PATH_MAX],
+                        "cwd": _printable(cwd)[:PATH_MAX],
+                        "repo": "",
+                        "reason": "merge-abort",
+                    },
+                )
+    paths = resolve_targets(raw, home)
     if not paths:
         return 0
     if len(paths) > TARGET_CAP:
