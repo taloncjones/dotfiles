@@ -801,5 +801,45 @@ else
     fail "RV10 the shim refuses a reviews events call carrying APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+gh api graphql --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV13 the shim refuses graphql with two --input files"
+else
+    fail "RV13 the shim refuses graphql with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api https://api.github.com/graphql -f "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV14 the shim refuses a full-URL graphql mutation naming APPROVE"
+else
+    fail "RV14 the shim refuses a full-URL graphql mutation naming APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls/5/reviews/" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV15 the shim refuses a reviews call with a trailing slash"
+else
+    fail "RV15 the shim refuses a reviews call with a trailing slash (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls//5/reviews" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV16 the shim refuses a reviews call with a doubled slash"
+else
+    fail "RV16 the shim refuses a reviews call with a doubled slash (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST repos/o/r/issues/5/comments --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV17 the shim refuses an issue comment with two --input files"
+else
+    fail "RV17 the shim refuses an issue comment with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

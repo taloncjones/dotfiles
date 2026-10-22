@@ -688,13 +688,27 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
     return method, path, host, has_field
 
 
+API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
+
+
+def normalize_endpoint(raw: str) -> str | None:
+    """Canonical `gh api` endpoint: scheme, host, query, fragment and empty
+    segments dropped. None when percent escapes, dot segments or a backslash
+    still hide the real path; callers treat that as unknown for any write."""
+    path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
+    segments = path.split("/")
+    if "%" in path or "\\" in path or "." in segments or ".." in segments:
+        return None
+    return "/".join(seg for seg in segments if seg)
+
+
 def classify_api(args: list[str]) -> str:
     normalized = normalize_api_args(args)
     if normalized is None:
         return "write"
     method, path, _host, has_field = parse_api(normalized)
     if path is not None:
-        path = re.split(r"[?#]", path, maxsplit=1)[0]
+        path = normalize_endpoint(path)
     if path == "graphql":
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
             return "reply"
@@ -831,16 +845,19 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
         api = normalize_api_args(args[i + 1:]) or args[i + 1:]
-        raw_path = parse_api(api)[1] or ""
-        path = re.split(r"[?#]", raw_path, maxsplit=1)[0]
+        if repeated_api_flags(api):
+            return "unknown"
+        raw_method, raw_path, _host, has_field = parse_api(api)
+        method = raw_method or ("POST" if has_field else "GET")
+        path = normalize_endpoint(raw_path or "")
+        if path is None:
+            return "unknown" if method != "GET" else None
         if path == "graphql":
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
-            noncanonical = LOOSE_REVIEW_PATH.search(path) or ("%" in path and "reviews" in path.lower())
-            method = parse_api(api)[0] or ("POST" if parse_api(api)[3] else "GET")
-            return "unknown" if noncanonical and method != "GET" else None
-        if path != raw_path or repeated_api_flags(api):
-            return "unknown"
+            return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
+        if path != raw_path:
+            return "unknown" if method != "GET" else None
         values = [
             "@file" if typed and value.startswith("@") else value
             for typed, key, value in api_fields(api) if key == "event"

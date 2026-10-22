@@ -1519,5 +1519,45 @@ bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) !=
 print("ok" if not bad else bad)
 '
 
+expect_py "RE18 review_event reads one normalized endpoint and refuses repeated flags first" ok '
+import json, os, tempfile
+d = tempfile.mkdtemp()
+for name, body in (("gc.json", {"query": "mutation { addPullRequestReview(input: {event: COMMENT}) { clientMutationId } }"}),
+                   ("ga.json", {"query": "mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }"})):
+    with open(os.path.join(d, name), "w") as f:
+        json.dump(body, f)
+mut = "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}"
+rev = ["-f", "commit_id=" + "a" * 40, "-f", "event=COMMENT"]
+cases = [
+    (["api", "graphql", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "graphql", "--input", "gc.json"], None),
+    (["api", "https://api.github.com/graphql", "-f", mut], "unknown"),
+    (["api", "HTTPS://API.GitHub.com/graphql", "-f", mut], "unknown"),
+    (["api", "--hostname", "ghe.example.com", "https://ghe.example.com/graphql", "-f", mut], "unknown"),
+    (["api", "graphql/", "-f", mut], "unknown"),
+    (["api", "/graphql", "-f", mut], "unknown"),
+    (["api", "graphql?x=1", "-f", mut], "unknown"),
+    (["api", "./graphql", "-f", mut], "unknown"),
+    (["api", "%67raphql", "-f", mut], "unknown"),
+    (["api", "https://api.github.com/graphql", "-f", "query=query { viewer { login } }", "-X", "GET"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/?x=1", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls//5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5//reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "https://api.github.com/repos/o/r/pulls/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/./5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", *rev], None),
+    (["api", "repos/o/r/pulls/5/reviews/"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], "unknown"),
+]
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
