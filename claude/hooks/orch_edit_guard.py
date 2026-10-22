@@ -155,6 +155,7 @@ FUNCTION_RE = re.compile(r"(?:^|[\s;&|(){}])function\s|[\w.:-]\s*\(\s*\)")
 QUOTED_GIT_RE = re.compile(
     r"(?m)(?:^|[;&|(])\s*(?:\S*/)?git\s|(?:^|\s)git\s+(?:-C|-c|--)"
 )
+CONTINUATION_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
 FIND_EXEC_OPTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 WRITER_WORD_RE = re.compile(
     r"(?<![\w-])(?:" + "|".join(sorted(GIT_WRITE_SUBCOMMANDS)) + r")(?![\w-])"
@@ -1411,8 +1412,9 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
     command, never narrowed (B-2)."""
     if depth > 1:
         return []
-    # The shell drops a backslash-newline before it splits words.
-    command = command.replace("\\\n", "")
+    # The shell drops a backslash-newline before it splits words; an even
+    # backslash run before the newline is escaped backslashes, not a join.
+    command = CONTINUATION_RE.sub(r"\1", command)
     git_env = dict(git_env or {})
     cleaned, redirs = scan_raw(command)
     if outer_redirs:

@@ -835,6 +835,8 @@ audit_deny "AL seam GIT_WORK_TREE with --git-dir flag and a variable" 'GIT_WORK_
 audit_deny "AL seam line continuation after an export hides reset" "export GIT_WORK_TREE=\$W; git \\
   reset --hard" "$N"
 audit_deny "AL seam at runner quoted command hides writer" "at now <<< 'git -C $R commit -m x'" "$N"
+audit_deny "AL seam escaped backslash before newline still splits the commands" "git -C $R status \\\\
+git -C $R commit -m x" "$N"
 audit_deny "AL literal writer with a variable argument" "git -C $R commit -m \"\$MSG\"" "$N"
 hook_case "AL variable-target status allowed" allow Bash 'git -C "$W" status' "$N" "$SID_A"
 hook_case "AL variable-target log allowed" allow Bash 'git -C "$W" log -1' "$N" "$SID_A"
