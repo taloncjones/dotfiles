@@ -1159,11 +1159,21 @@ def split_substitutions(text):
             i += 2
             continue
         elif text.startswith("$(", i):
-            depth, j = 0, i + 1
+            depth, j, q = 0, i + 1, None
             while j < n:
-                if text[j] == "(":
+                ch = text[j]
+                if q:
+                    if ch == "\\" and q == '"':
+                        j += 1
+                    elif ch == q:
+                        q = None
+                elif ch in "'\"":
+                    q = ch
+                elif ch == "\\":
+                    j += 1
+                elif ch == "(":
                     depth += 1
-                elif text[j] == ")":
+                elif ch == ")":
                     depth -= 1
                     if depth == 0:
                         break
@@ -1232,7 +1242,7 @@ def cd_target_candidates(words, cwd, home):
     return cands
 
 
-def bash_targets(command, cwd, home, depth=0, unknown_cd=None):
+def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None):
     """[(cwd, word)] write targets of one command string. `cwd` is tracked
     as a SET of candidates rather than one string, so an uncertain `cd`
     (a subshell, a failed cd, cd options) fails toward guarding rather
@@ -1244,10 +1254,12 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None):
     if depth > 1:
         return []
     cleaned, redirs = scan_raw(command)
+    if outer_redirs:
+        redirs = {**outer_redirs, **redirs}
     cleaned, inners = split_substitutions(cleaned)
     found = []
     for inner in inners:
-        found.extend(bash_targets(inner, cwd, home, depth, unknown_cd))
+        found.extend(bash_targets(inner, cwd, home, depth, unknown_cd, redirs))
     cwds = {cwd}
     seen_cwds = {cwd}
     stack = []
