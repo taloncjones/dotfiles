@@ -1157,6 +1157,8 @@ def stale():
     c.coordination.owner_path(rd).write_text(json.dumps(o))
     m=json.loads((rd/"owner.json").read_text());m["heartbeat_ts"]=1.0
     (rd/"owner.json").write_text(json.dumps(m))
+c.HOLDER_RECHECK_SECS=0
+c._pid_alive=lambda pid: True
 c._is_ancestor=lambda pid: False
 stale()
 assert c.keep_lease_warm(rd,4242)=="holder-gone"
@@ -11409,7 +11411,7 @@ PY
 check "pending_action: skips the poll rules and otherwise matches checkin_action" <<PY
 $LOAD
 assert c.POLL_RULES == frozenset({"unknown", "abandoned-candidate", "blocked",
-                                  "unblocked", "exit-idle-worker"})
+                                  "unblocked", "exit-idle-worker", "reprompt-stalled"})
 base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
             head="a" * 40, completed=False, plan_completed=False, reviewed=False,
             review_correlates=False, review_stale=False, dispatch_review=False,
@@ -11879,6 +11881,160 @@ task["workers"] = [i0, r, i1]
 open(done, "w").write(json.dumps(dict(i0, task_id="PROJ-1", outcome="paused")))
 facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
 assert facts["done_outcome"] is None and facts["action"] != "paused", facts
+PY
+
+check "checkin_facts: an idle unsettled plan or implement row past the grace reports reprompt-stalled" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 2 * 3600 * 10**9
+row = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "impl-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+def poll(state):
+    return {"live": {"w1": state}, "known": {"w1"}, "worktrees": {},
+            "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": state}]}}
+def act(t, p=None):
+    return c.checkin_facts(rd, t, p or poll("done"), c.state_root().parent, now_ns=now)["action"]
+assert act(task) == "reprompt-stalled"
+assert act(task, poll("idle")) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, phase="plan")])) == "reprompt-stalled"
+assert act(dict(task, status="changes-requested")) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, started_ns=now - 630 * 10**9)])) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, started_ns=now - 570 * 10**9)])) != "reprompt-stalled"
+old_pending = dict(row, reprompts=[{"seq": 0, "started_ns": old, "status": "starting"}])
+assert act(dict(task, workers=[old_pending])) == "reprompt-stalled"
+assert "reprompt-stalled" in c.POLL_RULES
+PY
+
+check "checkin_facts: a done record, a fresh reprompt, a working agent or a fresh stop never reports reprompt-stalled" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 2 * 3600 * 10**9
+row = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "impl-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+def poll(state):
+    return {"live": {"w1": state}, "known": {"w1"}, "worktrees": {},
+            "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": state}]}}
+def act(t, p=None):
+    return c.checkin_facts(rd, t, p or poll("done"), c.state_root().parent, now_ns=now)["action"]
+def reprompted(status, started):
+    return dict(task, workers=[dict(row, reprompts=[{"seq": 0, "started_ns": started,
+                                                     "status": status}])])
+assert act(task, poll("working")) != "reprompt-stalled"
+for status in ("starting", "uncertain", "delivered", "delivered-unrecorded"):
+    assert act(reprompted(status, now)) != "reprompt-stalled", status
+assert act(reprompted("failed", now)) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, exit_requested="x")])) != "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, phase="review")])) != "reprompt-stalled"
+assert act(dict(task, status="blocked")) != "reprompt-stalled"
+assert act(dict(task, status="completed")) != "reprompt-stalled"
+assert act(task, {**poll("done"), "agents": {"w1": [
+    {"name": "impl-y", "pane_id": "w1:p1", "agent_status": "done"}]}}) != "reprompt-stalled"
+assert c.checkin_facts(rd, task, None, c.state_root().parent, now_ns=now)["action"] == "unknown"
+ev = os.path.join(rd, "workspaces", "w1.events.jsonl")
+stamp = c.time.strftime("%Y-%m-%dT%H:%M:%SZ", c.time.gmtime(now / 10**9))
+other = {"v": 1, "ts": stamp, "workspace_id": "w1", "event": "stopped", "task_id": "PROJ-2"}
+open(ev, "w").write(json.dumps(other) + '\n{"v": 1, "ts": "bad", "task_id": "PROJ-1"}\n')
+assert act(task) == "reprompt-stalled"
+open(ev, "w").write(json.dumps(dict(other, task_id="PROJ-1")) + "\n")
+assert act(task) != "reprompt-stalled"
+os.unlink(ev)
+done = {k: row[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(
+    dict(done, task_id="PROJ-1", outcome="completed", head_sha="a" * 40, ts="2026-10-22T00:00:00Z")))
+assert act(task) != "reprompt-stalled"
+PY
+
+check "next: reprompt-stalled prints a reprompt command for the stalled row" <<PY
+$LOAD
+import shlex
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+row = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "impl-x",
+       "status": "launched", "started_ns": 1}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": "/wt", "workers": [row]}
+poll = {"live": {"w1": "done"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": "done"}]}}
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+def argv_for(t, context):
+    f = c.checkin_facts(rd, t, poll, c.state_root().parent)
+    line = c.next_line(t, f, context)
+    assert line.startswith("  next: run "), line
+    return shlex.split(line[len("  next: run "):])
+argv = argv_for(task, ctx)
+assert argv[1].endswith("herdr_dispatch.py") and argv[2] == "reprompt", argv
+opts = dict(zip(argv[3::2], argv[4::2]))
+want = {"--repo-slug": "slug-x", "--task-id": "PROJ-1", "--session": "S", "--fence": "7",
+        "--workspace-id": "w1", "--launch-id": "I", "--phase": "implement", "--cwd": "/wt",
+        "--prompt-file": "<prompt-file>", "--runtime": "claude"}
+assert opts == want, opts
+codex = dict(task, workers=[dict(row, runtime="codex")])
+assert dict(zip(*[iter(argv_for(codex, ctx)[3:])] * 2))["--runtime"] == "codex"
+personal = argv_for(task, dict(ctx, personal=True))
+assert personal[-1] == "--personal" and personal.count("--personal") == 1, personal
+PY
+
+check "keep_lease_warm: one failed ancestor check re-checks and stays ok; a dead holder pid ends it at once" <<PY
+$LOAD
+import subprocess, time
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-recheck");rd.mkdir(parents=True)
+f1=claim_legacy_owner(rd,"A","h",4242)
+def hb():
+    return json.loads((rd/"owner.json").read_text())["heartbeat_ts"]
+def stale():
+    o=json.loads(c.coordination.owner_path(rd).read_text());o["heartbeat_ts"]=1.0
+    c.coordination.owner_path(rd).write_text(json.dumps(o))
+    m=json.loads((rd/"owner.json").read_text());m["heartbeat_ts"]=1.0
+    (rd/"owner.json").write_text(json.dumps(m))
+c.HOLDER_RECHECK_SECS=0
+c._pid_alive=lambda pid: True
+calls=[]
+def flaky(pid):
+    calls.append(pid)
+    return len(calls)>1
+c._is_ancestor=flaky
+stale()
+assert c.keep_lease_warm(rd,4242)=="ok" and calls==[4242,4242]
+assert hb()>time.time()-60 and c.check_fence(rd,"A",f1)
+calls.clear()
+c._is_ancestor=lambda pid: calls.append(pid) or False
+stale()
+assert c.keep_lease_warm(rd,4242)=="holder-gone" and len(calls)==2
+assert hb()==1.0
+c._pid_alive=lambda pid: False
+c.HOLDER_RECHECK_SECS=30
+calls.clear()
+t0=time.monotonic()
+assert c.keep_lease_warm(rd,4242)=="holder-gone" and not calls
+assert time.monotonic()-t0<10 and hb()==1.0
+del c._pid_alive
+p=subprocess.Popen(["true"]);p.wait()
+assert c._pid_alive(os.getpid()) is True and c._pid_alive(p.pid) is False
+for bad in (None,0,1,-5,"123",True):
+    assert c._pid_alive(bad) is False, bad
+real_kill=os.kill
+def raiser(exc):
+    def kill(pid,sig): raise exc
+    return kill
+try:
+    c.os.kill=raiser(PermissionError(1,"no"));assert c._pid_alive(424242) is True
+    c.os.kill=raiser(OSError(22,"bad"));assert c._pid_alive(424242) is True
+finally:
+    c.os.kill=real_kill
+assert 1<=c.HOLDER_RECHECK_SECS<=30
 PY
 
 check "checkin passes each correlation helper its own phase workspace" <<PY
