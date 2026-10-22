@@ -562,6 +562,20 @@ elif args[:2] == ["workspace", "close"]:
               file=sys.stderr)
         raise SystemExit(1)
     print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
+elif args[:2] == ["worktree", "open"]:
+    # Undocumented reply shape: the adapter never reads it, only lists workspaces after.
+    if mode != "open-adds-nothing":
+        new_ws = os.environ.get("FAKE_OPEN_WS", "w7")
+        wpath = Path(os.environ["FAKE_WORKSPACES"])
+        spaces = json.loads(wpath.read_text()) if wpath.exists() else []
+        wpath.write_text(json.dumps(spaces + [{
+            "workspace_id": new_ws, "label": "reopened",
+            "worktree": {"checkout_path": args[args.index("--path") + 1]}}]))
+        ppath = Path(os.environ["FAKE_PANES"])
+        panes = json.loads(ppath.read_text()) if ppath.exists() else []
+        ppath.write_text(json.dumps(panes + [
+            {"pane_id": f"{new_ws}:p1", "workspace_id": new_ws}]))
+    print(json.dumps({"id": "fake", "result": {"type": "worktree_opened"}}))
 elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
     wpath = Path(os.environ["FAKE_WORKSPACES"])
     spaces = (json.loads(wpath.read_text()) if wpath.exists() else
@@ -6572,6 +6586,358 @@ def test_bound_reprompt_refuses_a_reservation_whose_readiness_probe_went_stale()
         fixture.close()
 
 
+def idle_fixture(fx, **fields):
+    """A reviewed task parked at its reviewed head, workspace w1 holding one idle shell pane."""
+    head = core.repository_context(fx.repo)["head"]
+    task = json.loads(fx.task_file.read_text())
+    task.update(status="reviewed", review_head_sha=head, ship_parked_head=head,
+                workspace_id="w1", **fields)
+    fx.task_file.write_text(json.dumps(task))
+    write_workspaces(fx, [ws_entry("w1", "td-a", fx.repo.resolve())])
+    Path(fx.env["FAKE_PANES"]).write_text(json.dumps([pane("w1:p1")]))
+    Path(fx.env["FAKE_AGENTS"]).write_text("[]")
+    return head
+
+
+def stored_task(fx):
+    return json.loads(fx.task_file.read_text())
+
+
+def close_idle(fx, workspace_id="w1"):
+    return herdr_dispatch.close_idle(
+        repo_slug=fx.slug, task_id="td-a", session="S", fence=1, workspace_id=workspace_id,
+        cwd=fx.repo, herdr_cli=str(fx.bin), env=fx.env)
+
+
+def reopen(fx):
+    return herdr_dispatch.reopen(
+        repo_slug=fx.slug, task_id="td-a", session="S", fence=1, cwd=fx.repo,
+        herdr_cli=str(fx.bin), env=fx.env)
+
+
+def expect_dispatch_error(call, text):
+    try:
+        call()
+    except herdr_dispatch.DispatchError as exc:
+        assert text in str(exc), exc
+        return
+    raise AssertionError(f"expected a DispatchError naming {text!r}")
+
+
+def open_calls(fx):
+    return [c for c in fx.calls() if c[:2] == ["worktree", "open"]]
+
+
+def closed_idle_fixture(fx):
+    """idle_fixture after close-idle: the record carries the marker and herdr lists no workspace."""
+    idle_fixture(fx, workspace_closed={"workspace_id": "w1", "ts": "2026-10-22T00:00:00Z"})
+    write_workspaces(fx, [])
+    Path(fx.env["FAKE_PANES"]).write_text("[]")
+
+
+def test_close_idle_closes_a_parked_reviewed_workspace_and_records_it():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        before = stored_task(fx)
+        out = close_idle(fx)
+        assert out == {"status": "closed", "workspace_id": "w1"}, out
+        assert close_calls(fx) == [["workspace", "close", "w1"]], fx.calls()
+        task = stored_task(fx)
+        marker = task.pop("workspace_closed")
+        assert marker["workspace_id"] == "w1" and re.fullmatch(
+            r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", marker["ts"]), marker
+        assert task == before, "close-idle keeps worktree, branch, workspace_id and every other field"
+    finally:
+        fx.close()
+
+
+def test_close_idle_keeps_a_workspace_with_a_live_agent():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        Path(fx.env["FAKE_AGENTS"]).write_text(json.dumps(
+            [{"name": "a", "pane_id": "w1:p1", "workspace_id": "w1"}]))
+        before = fx.task_file.read_text()
+        out = close_idle(fx)
+        assert out == {"status": "kept", "kept": "live-agent", "workspace_id": "w1"}, out
+        assert not close_calls(fx), fx.calls()
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_close_idle_refuses_a_task_that_is_not_parked():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        before = fx.task_file.read_text()
+        for change in ({"ship_parked_head": None}, {"ship_parked_head": "0" * 40},
+                       {"status": "completed"}, {"workspace_id": "w2"}):
+            task = json.loads(before)
+            task.update(change)
+            fx.task_file.write_text(json.dumps(task))
+            expect_dispatch_error(lambda: close_idle(fx), "close-idle")
+            assert not close_calls(fx), (change, fx.calls())
+        fx.task_file.write_text(before)
+        expect_dispatch_error(lambda: close_idle(fx, workspace_id="w2"), "close-idle")
+        gone = json.loads(before)
+        gone["worktree"] = str(fx.root / "gone")
+        fx.task_file.write_text(json.dumps(gone))
+        expect_dispatch_error(lambda: close_idle(fx), "close-idle")
+        assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_close_idle_reports_already_closed_for_a_recorded_closed_workspace():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        before = fx.task_file.read_text()
+        out = close_idle(fx)
+        assert out == {"status": "already-closed", "workspace_id": "w1"}, out
+        assert not close_calls(fx), fx.calls()
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_close_idle_closes_a_workspace_holding_an_orphan_idle_gate_pane():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        Path(fx.env["FAKE_PANES"]).write_text(json.dumps([pane("w1:p1"), pane("w1:p2")]))
+        out = close_idle(fx)
+        assert out == {"status": "closed", "workspace_id": "w1"}, out
+        assert close_calls(fx) == [["workspace", "close", "w1"]], fx.calls()
+        assert stored_task(fx)["workspace_closed"]["workspace_id"] == "w1"
+    finally:
+        fx.close()
+
+
+def test_reopen_reports_open_for_a_listed_task_workspace():
+    fx = Fixture()
+    try:
+        idle_fixture(fx, workspace_closed={"workspace_id": "w1", "ts": "2026-10-22T00:00:00Z"})
+        out = reopen(fx)
+        assert out == {"status": "open", "workspace_id": "w1", "pane_id": None}, out
+        assert "workspace_closed" not in stored_task(fx), "a stale marker is dropped"
+        assert not open_calls(fx), fx.calls()
+        idle_fixture(fx, workspace_root_pane="w1:p1")
+        out = reopen(fx)
+        assert out == {"status": "open", "workspace_id": "w1", "pane_id": "w1:p1"}, out
+        assert not open_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_reopen_opens_the_task_worktree_and_refreshes_workspace_id():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        before = stored_task(fx)
+        out = reopen(fx)
+        assert out == {"status": "reopened", "workspace_id": "w7", "pane_id": "w7:p1"}, out
+        primary = core.repository_context(fx.repo)["primary_root"]
+        assert open_calls(fx) == [["worktree", "open", "--cwd", primary,
+                                   "--path", before["worktree"], "--no-focus"]], fx.calls()
+        task = stored_task(fx)
+        assert task["workspace_id"] == "w7" and task["workspace_root_pane"] == "w7:p1", task
+        assert "workspace_closed" not in task, task
+        for key in ("worktree", "branch", "status", "review_head_sha", "ship_parked_head"):
+            assert task[key] == before[key], key
+        index = json.loads((fx.rd / "workspaces" / "w7.json").read_text())
+        assert index == {"task_id": "td-a", "repo_slug": fx.slug, "role": "impl"}, index
+        again = reopen(fx)
+        assert again == {"status": "open", "workspace_id": "w7", "pane_id": "w7:p1"}, again
+        assert len(open_calls(fx)) == 1, fx.calls()
+    finally:
+        fx.close()
+
+
+def test_reopen_adopts_a_listed_workspace_on_the_task_worktree_without_opening():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        write_workspaces(fx, [ws_entry("w9", "td-a", fx.repo.resolve())])
+        Path(fx.env["FAKE_PANES"]).write_text(json.dumps(
+            [{"pane_id": "w9:p1", "workspace_id": "w9"}]))
+        out = reopen(fx)
+        assert out == {"status": "reopened", "workspace_id": "w9", "pane_id": "w9:p1"}, out
+        assert not open_calls(fx), fx.calls()
+        task = stored_task(fx)
+        assert task["workspace_id"] == "w9" and task["workspace_root_pane"] == "w9:p1", task
+        closed_idle_fixture(fx)
+        write_workspaces(fx, [ws_entry("wa", "td-a", fx.repo.resolve()),
+                              ws_entry("wb", "td-a", fx.repo.resolve())])
+        expect_dispatch_error(lambda: reopen(fx), "ambiguous-workspace")
+        assert not open_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_reopen_refuses_a_workspace_whose_index_names_another_task():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        write_workspaces(fx, [ws_entry("w9", "td-a", fx.repo.resolve())])
+        Path(fx.env["FAKE_PANES"]).write_text(json.dumps(
+            [{"pane_id": "w9:p1", "workspace_id": "w9"}]))
+        (fx.rd / "workspaces").mkdir(exist_ok=True)
+        index_path = fx.rd / "workspaces" / "w9.json"
+        index_path.write_text(json.dumps(
+            {"task_id": "other", "repo_slug": fx.slug, "role": "impl"}))
+        before_task, before_index = fx.task_file.read_text(), index_path.read_text()
+        expect_dispatch_error(lambda: reopen(fx), "index-conflict")
+        assert fx.task_file.read_text() == before_task
+        assert index_path.read_text() == before_index
+    finally:
+        fx.close()
+
+
+def test_reopen_refuses_a_missing_worktree():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        task = stored_task(fx)
+        task["worktree"] = str(fx.root / "gone")
+        fx.task_file.write_text(json.dumps(task))
+        before = fx.task_file.read_text()
+        expect_dispatch_error(lambda: reopen(fx), "worktree-missing")
+        assert not open_calls(fx), fx.calls()
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_reopen_refuses_a_recorded_root_pane_that_is_gone():
+    fx = Fixture()
+    try:
+        idle_fixture(fx, workspace_root_pane="w1:p1")
+        Path(fx.env["FAKE_PANES"]).write_text(json.dumps([pane("w1:p2")]))
+        before = fx.task_file.read_text()
+        expect_dispatch_error(lambda: reopen(fx), "root-pane-gone")
+        assert not open_calls(fx), fx.calls()
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_a_closed_task_workspace():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        expect_dispatch_error(lambda: fx.launch(), "reopen")
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_repair_launch_after_reopen_uses_the_reopened_workspace():
+    fx = Fixture()
+    try:
+        closed_idle_fixture(fx)
+        out = reopen(fx)
+        fx.env.update(FAKE_PANE=out["pane_id"], FAKE_WORKSPACE=out["workspace_id"])
+        launched = herdr_dispatch.launch(
+            repo_slug=fx.slug, task_id="td-a", session="S", fence=1,
+            workspace_id=out["workspace_id"], pane_id=out["pane_id"], phase="implement",
+            agent="impl-td-a", route=codex_route(), cwd=fx.repo, sandbox="workspace-write",
+            prompt="repair brief", herdr_cli=str(fx.bin), env=fx.env,
+            start_timeout_ms=4000, prompt_timeout_ms=1000)
+        assert launched["status"] == "launched", launched
+        task = stored_task(fx)
+        row = task["workers"][-1]
+        assert (row["workspace_id"], row["pane_id"]) == ("w7", "w7:p1"), row
+        assert task["workspace_id"] == "w7" and "workspace_closed" not in task, task
+    finally:
+        fx.close()
+
+
+def test_review_gate_reopens_a_closed_task_workspace_before_splitting():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: calls.append(("sweep", kw["workspace_id"])) or {"status": "swept", "rows": []}
+    herdr_dispatch._gate_split = lambda cli, pane, wt, env: calls.append(("split", pane)) or "w7:p2"
+    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "rev-L1"}
+    try:
+        head, focus = review_ready(fx)
+        write_workspaces(fx, [])
+        out = run_gate(fx, "review", focus)
+        assert out["status"] == "dispatched" and out["pane_id"] == "w7:p2", out
+        assert [c[0] for c in calls] == ["sweep", "split", "launch"], calls
+        assert calls[1] == ("split", "w7:p1"), calls
+        kw = calls[2][1]
+        assert (kw["workspace_id"], kw["pane_id"], kw["phase"]) == ("w7", "w7:p2", "review"), kw
+        assert len(open_calls(fx)) == 1, fx.calls()
+        task = stored_task(fx)
+        assert task["workspace_id"] == "w7" and task["workspace_root_pane"] == "w7:p1", task
+        assert task["status"] == "review-dispatched", task
+        index = json.loads((fx.rd / "workspaces" / "w7.json").read_text())
+        assert index == {"repo_slug": fx.slug, "role": "review", "task_id": "td-a"}, index
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_ship_gate_reopens_a_closed_task_workspace_before_splitting():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._gate_split = lambda cli, pane, wt, env: calls.append(("split", pane)) or "w7:p2"
+    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "ship-td-a-bbbbbbbbbbbb"}
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, [])
+    try:
+        head, focus = ship_ready(fx)
+        write_workspaces(fx, [])
+        out = run_gate(fx, "ship", focus)
+        assert out["status"] == "dispatched" and out["pane_id"] == "w7:p2", out
+        assert calls[0] == ("split", "w7:p1"), calls
+        kw = calls[1][1]
+        assert (kw["workspace_id"], kw["pane_id"], kw["phase"]) == ("w7", "w7:p2", "ship"), kw
+        assert len(open_calls(fx)) == 1, fx.calls()
+        task = stored_task(fx)
+        assert task["workspace_id"] == "w7" and task["ship_launch_id"] == "ship-td-a-bbbbbbbbbbbb", task
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_ship_gate_relaunch_keeps_the_reopened_workspace_id():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    writes = []
+    real_step = originals["_core_step"]
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    gate_fakes(fx, "ship-td-a-bbbbbbbbbbbb")
+    herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+    render = ship_render(real_step, fx, [])
+
+    def step(verb, *args, ctx, stdin=None):
+        if verb == "write-task":
+            writes.append(json.loads(args[args.index("--json") + 1]))
+        return render(verb, *args, ctx=ctx, stdin=stdin)
+    herdr_dispatch._core_step = step
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        write_workspaces(fx, [])
+        out = run_gate(fx, "ship", focus)
+        assert out["status"] == "dispatched", out
+        counted = writes[0]
+        assert counted["ship_relaunch_head"] == head, counted
+        assert counted["workspace_id"] == "w7", "the stopped-run write carries the reopened workspace"
+        assert stored_task(fx)["workspace_id"] == "w7"
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -6817,6 +7183,22 @@ for name, test in (
     ("bound reprompt marks a committed reservation failed when its acknowledgment is lost", test_bound_reprompt_marks_a_committed_reservation_failed_when_its_acknowledgment_is_lost),
     ("bound reprompt reports reprompted when a committed delivered outcome loses its acknowledgment", test_bound_reprompt_reports_reprompted_when_a_committed_delivered_outcome_loses_its_acknowledgment),
     ("bound reprompt refuses a reservation whose readiness probe went stale", test_bound_reprompt_refuses_a_reservation_whose_readiness_probe_went_stale),
+    ("close-idle closes a parked reviewed workspace and records it", test_close_idle_closes_a_parked_reviewed_workspace_and_records_it),
+    ("close-idle keeps a workspace with a live agent", test_close_idle_keeps_a_workspace_with_a_live_agent),
+    ("close-idle refuses a task that is not parked", test_close_idle_refuses_a_task_that_is_not_parked),
+    ("close-idle reports already-closed for a recorded closed workspace", test_close_idle_reports_already_closed_for_a_recorded_closed_workspace),
+    ("reopen reports open for a listed task workspace", test_reopen_reports_open_for_a_listed_task_workspace),
+    ("reopen opens the task worktree and refreshes workspace_id", test_reopen_opens_the_task_worktree_and_refreshes_workspace_id),
+    ("reopen adopts a listed workspace on the task worktree without opening", test_reopen_adopts_a_listed_workspace_on_the_task_worktree_without_opening),
+    ("reopen refuses a workspace whose index names another task", test_reopen_refuses_a_workspace_whose_index_names_another_task),
+    ("reopen refuses a missing worktree", test_reopen_refuses_a_missing_worktree),
+    ("launch refuses a closed task workspace", test_launch_refuses_a_closed_task_workspace),
+    ("repair launch after reopen uses the reopened workspace", test_repair_launch_after_reopen_uses_the_reopened_workspace),
+    ("review gate reopens a closed task workspace before splitting", test_review_gate_reopens_a_closed_task_workspace_before_splitting),
+    ("ship gate reopens a closed task workspace before splitting", test_ship_gate_reopens_a_closed_task_workspace_before_splitting),
+    ("ship gate relaunch keeps the reopened workspace_id", test_ship_gate_relaunch_keeps_the_reopened_workspace_id),
+    ("reopen refuses a recorded root pane that is gone", test_reopen_refuses_a_recorded_root_pane_that_is_gone),
+    ("close-idle closes a workspace holding an orphan idle gate pane", test_close_idle_closes_a_workspace_holding_an_orphan_idle_gate_pane),
 ):
     check(name, test)
 
