@@ -263,6 +263,13 @@ record with `stop_recorded: {"launch_id": <done launch_id>, "ts": <done ts>}`
 (a `failed` that ends the task writes `status: failed`). The next check-in
 reports `exit-idle-worker`; a later stop has a new `ts` and needs a new record.
 
+`reprompt-stalled` means the current plan or implement worker has sat
+idle for 10 minutes since its last launch, stop or reprompt with no done
+record (an API error or an early stop). Read its pane; unless it waits on
+its own subagents, write a resume prompt to a file and run the printed
+`reprompt` line with `--prompt-file` set to it. If the line refuses an
+unresolved prior reprompt, reconcile that first (dispatch-mechanism.md).
+
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
 recorded or retired; ship handoff recorded (`handoff-recorded`);

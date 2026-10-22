@@ -121,8 +121,8 @@ acknowledgement, cleared only by a later `sent` push; without a messaging
 socket every record reads `unsent`, because the Monitor watch is the wake
 path there. The backstop also exits with
 `owner: lost` when another process holds the lease; and with
-`owner: holder-gone` when it can no longer see this session's process as
-its ancestor.
+`owner: holder-gone` when this session's process is gone or fails two
+ancestry checks a few seconds apart.
 
 ## Monitor watch when the socket is unset (section 1 step 7)
 
