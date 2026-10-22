@@ -427,7 +427,7 @@ Correlate these independent facts, all keyed to the same `task_id`/
    still equals the correlated HEAD (an advance during the run discards the
    result; re-correlate next check-in). On exit 1 the task stays
    `in-progress`: surface the failing command output and recommend
-   resuming/re-briefing the implement worker -- never dispatch review. Exit 2
+   resuming/re-briefing the implement worker, or Contract re-pin (`references/auto-actions.md`) -- never dispatch review. Exit 2
    (invalid schema/path or corrupt task record) or 4 (hash mismatch) is an
    integrity halt: surface it and stop advancing this task; never dispatch
    review, never re-pin to clear it. Exit 3 (contract file missing) tries

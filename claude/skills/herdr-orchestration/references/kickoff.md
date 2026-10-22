@@ -41,10 +41,9 @@ kicked off `direct` is a fast-path item; anything else is raw. When unsure,
 treat it as raw -- the PRD phase is one document and one review.
 
 Split before planning: when a raw todo's Solution names two or more
-independent mechanisms (each could ship alone), propose a split to the
-owner with `AskUserQuestion` before dispatching the plan worker,
-recommendation first; dispatch the first slice on a yes, the whole item on
-a no.
+independent mechanisms (each could ship alone), split it without asking
+under `references/auto-actions.md` (Todo split) and dispatch the first
+slice.
 
 Fast-path contract source, in order: (1) a contract already on disk at
 `claude/contracts/<task_id>-contract.json` -> use it; (2) the todo's
