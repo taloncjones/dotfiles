@@ -1122,7 +1122,7 @@ def git_write_targets(words, home, unknown_cd=None):
     if words[i] == "stash" and i + 1 < len(words) and words[i + 1] in ("list", "show"):
         return []
     where = os.path.join(chdir, work_tree) if work_tree is not None else chdir
-    if words[i] == "merge" and "--abort" in words[i + 1:]:
+    if words[i] == "merge" and words[i + 1:] == ["--abort"]:
         return [MergeAbort(where or ".")]
     if bad is not None:
         return [Unresolved(bad)]
