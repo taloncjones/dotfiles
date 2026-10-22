@@ -625,6 +625,14 @@ hook_case "U -C command substitution commit denied" deny Bash 'git -C "$(git rev
 hook_case "U --work-tree variable reset denied" deny Bash 'git --work-tree=$X --git-dir=$X/.git reset --hard' "$N" "$SID_A"
 hook_case "U -C glob commit denied" deny Bash "git -C $FIX/rep* commit -m x" "$N" "$SID_A"
 hook_case "U sh -c variable -C merge denied" deny Bash "sh -c 'git -C \$W merge main'" "$N" "$SID_A"
+hook_case "U unquoted substitution -C merge denied" deny Bash 'git -C $(git rev-parse --show-toplevel) merge main' "$N" "$SID_A"
+hook_case "U assigned substitution then -C merge denied" deny Bash 'W=$(git rev-parse --show-toplevel); git -C $W merge main' "$N" "$SID_A"
+hook_case "U newline-separated substitution -C merge denied" deny Bash 'W=$(git rev-parse --show-toplevel)
+git -C $W merge main' "$N" "$SID_A"
+hook_case "U attached -C variable merge denied" deny Bash 'git -C"$W" merge main' "$N" "$SID_A"
+hook_case "U unquoted substitution --work-tree reset denied" deny Bash 'git --work-tree=$(pwd) --git-dir=$(pwd)/.git reset --hard' "$N" "$SID_A"
+hook_case "A unquoted substitution -C status allowed" allow Bash 'git -C $(git rev-parse --show-toplevel) status' "$N" "$SID_A"
+hook_case "A unquoted substitution -C log allowed" allow Bash 'git -C $(pwd) log -1' "$N" "$SID_A"
 hook_case "A git -C variable status allowed" allow Bash 'git -C $W status' "$N" "$SID_A"
 hook_case "A git -C variable merge --abort allowed" allow Bash 'git -C $W merge --abort' "$N" "$SID_A"
 hook_case "A git merge --abort in the repo allowed" allow Bash "git merge --abort" "$R" "$SID_A"
@@ -665,6 +673,48 @@ if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
     printf 'PASS  U unresolved denial is logged once with why unresolved\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  U unresolved denial is logged once with why unresolved (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+reset_log
+if run "$(payload Bash "$SID_A" 'git -C $(git rev-parse --show-toplevel) merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U unquoted substitution -C denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U unquoted substitution -C denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'W=$(pwd); git -C $W merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U assigned substitution -C denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U assigned substitution -C denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'W=$(pwd)
+git -C $W merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U newline-separated substitution -C denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U newline-separated substitution -C denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'git -C"$W" merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U attached -C variable denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U attached -C variable denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'git --work-tree=$(pwd) reset --hard' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U unquoted substitution --work-tree denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U unquoted substitution --work-tree denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
 fi
 
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10

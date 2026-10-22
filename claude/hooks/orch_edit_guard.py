@@ -1110,7 +1110,11 @@ def git_write_targets(words, home, unknown_cd=None):
                     bad = work_tree
             i += 2
             continue
-        if word.startswith("--work-tree="):
+        if word.startswith("-C") and len(word) > 2:
+            chdir = os.path.join(chdir, word[2:])
+            if bad is None and unexpanded(word[2:], home):
+                bad = word[2:]
+        elif word.startswith("--work-tree="):
             work_tree = word.split("=", 1)[1]
             if bad is None and unexpanded(work_tree, home):
                 bad = work_tree
@@ -1129,6 +1133,49 @@ def git_write_targets(words, home, unknown_cd=None):
     if unknown_cd is not None and not os.path.isabs(where):
         return [Unresolved(unknown_cd)]
     return [GitDir(where or ".")]
+
+
+def split_substitutions(text):
+    """(text, inners): each unquoted `$(...)` becomes the single word
+    `$SUBST` (so its spaces cannot split a git -C/--work-tree value), and
+    inners holds the substitution bodies for a separate scan. Quoted
+    substitutions and unbalanced ones are left alone."""
+    out, inners = [], []
+    quote = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        elif text.startswith("$(", i):
+            depth, j = 0, i + 1
+            while j < n:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j < n:
+                inners.append(text[i + 2:j])
+                out.append("$SUBST")
+                i = j + 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out), inners
 
 
 def cd_operand(words):
@@ -1197,7 +1244,10 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None):
     if depth > 1:
         return []
     cleaned, redirs = scan_raw(command)
+    cleaned, inners = split_substitutions(cleaned)
     found = []
+    for inner in inners:
+        found.extend(bash_targets(inner, cwd, home, depth, unknown_cd))
     cwds = {cwd}
     seen_cwds = {cwd}
     stack = []
