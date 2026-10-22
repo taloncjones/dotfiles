@@ -717,6 +717,41 @@ else
     printf 'FAIL  U unquoted substitution --work-tree denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
 fi
 
+# audit_deny LABEL CMD CWD: the hook denies CMD and writes exactly one denied record.
+audit_deny() {
+    reset_log
+    if run "$(payload Bash "$SID_A" "$2" "$3")"; then rc=0; else rc=$?; fi
+    if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+            && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ]; then
+        printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (rc=%s)\n' "$1" "$rc" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+audit_deny "U substitution after cd to the repo: merge denied" "cd $R && out=\$(git merge main 2>&1)" "$N"
+audit_deny "U substitution after cd to the repo: reset denied" "cd $R && result=\$(git reset --hard HEAD)" "$N"
+audit_deny "U substitution after cd to the repo: redirect denied" "cd $R && x=\$(echo hi > tracked.txt)" "$N"
+audit_deny "U substitution after cd to a variable: merge denied" 'cd $W && out=$(git merge main)' "$N"
+audit_deny "U backtick after cd to the repo: reset denied" "cd $R && out=\`git reset --hard\`" "$N"
+audit_deny "U backtick with arguments as -C target denied" "git -C \`printf %s $R\` reset --hard" "$N"
+audit_deny "U backtick command as -C target denied" 'git -C `git rev-parse --show-toplevel` merge main' "$N"
+audit_deny "U env -u wrapper hides variable -C reset" 'env -u X git -C "$W" reset --hard' "$N"
+audit_deny "U command -p wrapper hides variable -C reset" 'command -p git -C "$W" reset --hard' "$N"
+audit_deny "U env -u wrapper hides literal -C reset" "env -u HERDR_ENV git -C $R reset --hard" "$N"
+audit_deny "U command -p wrapper hides literal -C reset" "command -p git -C $R reset --hard" "$N"
+audit_deny "U env -C wrapper dir hides relative merge" "env -C \$W git merge main" "$N"
+audit_deny "U quoted capture variable -C reset denied" 'out="$(git -C "$W" reset --hard)"' "$N"
+audit_deny "U quoted capture literal -C reset denied" "out=\"\$(git -C $R reset --hard)\"" "$N"
+audit_deny "U quoted backtick capture literal -C reset denied" "out=\"\`git -C $R reset --hard\`\"" "$N"
+hook_case "A git -C variable clean -nd dry run allowed" allow Bash 'git -C "$W" clean -nd' "$N" "$SID_A"
+hook_case "A git -C variable clean --dry-run allowed" allow Bash 'git -C "$W" clean --dry-run -d' "$N" "$SID_A"
+hook_case "A git -C variable clean -fd denied" deny Bash 'git -C "$W" clean -fd' "$N" "$SID_A"
+hook_case "A env -u wrapper git -C literal status allowed" allow Bash "env -u HERDR_ENV git -C $R status" "$N" "$SID_A"
+hook_case "A director substitution without a writer allowed" allow Bash "cd $R && out=\$(git log -1 --format=%H)" "$N" "$SID_A"
+hook_case "A director push of a sha to a branch allowed" allow Bash "git -C $R push origin abc123:refs/heads/br" "$N" "$SID_A"
+hook_case "A director gh and core verbs allowed" allow Bash "gh pr view 1 --json state; python3 $HOME/.claude/hooks/herdr_orch_core.py status" "$N" "$SID_A"
+hook_case "A plain session wrapper variable -C reset allowed" allow Bash 'env -u X git -C "$W" reset --hard' "$N" "$SID_C"
+
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 if run "$(payload Bash "$SID_A" "$U1_CMD" "$N")"; then rc=0; else rc=$?; fi
 if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-claim)" = 0 ]; then

@@ -31,13 +31,19 @@ cannot overshoot. Every guarded attempt (allowed or refused) is appended to
 that log, best effort, after the decision.
 
 Git work-tree writers fail closed on a target the guard cannot resolve: a
-`-C`/`--work-tree` word (or a preceding `cd`/`pushd` operand) built from
-`$VAR`/`$(...)`/globs is refused for a launcher or lead, with no marker able
-to lift it. `git merge --abort` is not a work-tree write for the guard; a
+`-C`/`--work-tree` word (or a preceding `cd`/`pushd`/`env -C` operand) built
+from `$VAR`/`$(...)`/backticks/globs is refused for a launcher or lead, before
+any marker lookup, and no marker can lift it. A substitution body (quoted or
+not) is scanned at the cwd where it runs, and wrapper options (`env -u X`,
+`command -p`, `nice -n 5`) are stripped to find the writer. A dry run
+(`clean -n`, `rm -n`, `mv -n`, `apply --check`) is read-only and never fails
+closed. `git merge --abort` is not a work-tree write for the guard; a
 launcher's call is logged as allowed.
 
 Accepted holes (allow): scripts and functions, `python -c`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
-`rsync`, `dd`, editors, `xargs`, process substitution, non-git targets built
+`rsync`, `dd`, editors, `xargs`, process substitution, shell functions,
+`builtin cd`, the unknown-cd advisory never clearing after a later literal
+`cd` (it only over-refuses), non-git targets built
 from `$VAR`/`$(...)`/globs, `git --git-dir=<repo>/.git <writer>` with no
 `--work-tree` from a non-repo cwd, a heredoc with no terminator, git calls past the
 10-second budget, NotebookEdit/MultiEdit, `awk`/`gawk -i inplace` (cycle-3
@@ -95,6 +101,7 @@ MAX_EDITS_RANGE = (1, 10)
 CORE_CMD = "python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
 BLOCKED = "Blocked: orch-edit-guard"
 SENTINEL_RE = re.compile(r"__ORCH_REDIR_(\d+)__\Z")
+SUBST_RE = re.compile(r"\$ORCHSUBST_(\d+)_")
 WORD_STOP = " \t\n;&|()<>"
 SHELL_WRAPPERS = ("sh", "bash", "zsh", "dash")
 # Subcommands that change a work tree; `stash list|show` are reads.
@@ -1088,6 +1095,22 @@ def unexpanded(word, home):
     return "$" in w or "`" in w or rm_guard.has_glob_chars(w)
 
 
+def is_dry_run(args):
+    """True for a git clean/rm/mv with -n/--dry-run or apply --check/--stat:
+    read-only, so an unresolvable directory never refuses it."""
+    sub, rest = args[0], args[1:]
+    if "--" in rest:
+        rest = rest[:rest.index("--")]
+    if sub == "apply":
+        return any(a in ("--check", "--stat", "--numstat", "--summary") for a in rest)
+    if sub in ("clean", "rm", "mv"):
+        return any(
+            a == "--dry-run" or (a.startswith("-") and not a.startswith("--") and "n" in a)
+            for a in rest
+        )
+    return False
+
+
 def git_write_targets(words, home, unknown_cd=None):
     """[path] the git invocation writes (--work-tree, else the -C chain, else
     "."), or [] for a subcommand that does not change a work tree. An
@@ -1128,64 +1151,140 @@ def git_write_targets(words, home, unknown_cd=None):
     where = os.path.join(chdir, work_tree) if work_tree is not None else chdir
     if words[i] == "merge" and words[i + 1:] == ["--abort"]:
         return [MergeAbort(where or ".")]
-    if bad is not None:
-        return [Unresolved(bad)]
-    if unknown_cd is not None and not os.path.isabs(where):
-        return [Unresolved(unknown_cd)]
+    unresolved = bad
+    if unresolved is None and unknown_cd is not None and not os.path.isabs(where):
+        unresolved = unknown_cd
+    if unresolved is not None:
+        return [] if is_dry_run(words[i:]) else [Unresolved(unresolved)]
     return [GitDir(where or ".")]
 
 
+def substitution_end(text, i):
+    """Index of the `)` closing the `$(` whose `$` is text[i], or -1."""
+    depth, j, q, n = 0, i + 1, None, len(text)
+    while j < n:
+        ch = text[j]
+        if q:
+            if ch == "\\" and q == '"':
+                j += 1
+            elif ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == "\\":
+            j += 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+def backtick_end(text, i):
+    """Index of the backtick closing the one at text[i], or -1."""
+    j = i + 1
+    while j < len(text):
+        if text[j] == "\\":
+            j += 1
+        elif text[j] == "`":
+            return j
+        j += 1
+    return -1
+
+
 def split_substitutions(text):
-    """(text, inners): each unquoted `$(...)` becomes the single word
-    `$SUBST` (so its spaces cannot split a git -C/--work-tree value), and
-    inners holds the substitution bodies for a separate scan. Quoted
-    substitutions and unbalanced ones are left alone."""
+    """(text, inners): each `$(...)` or backtick substitution outside single
+    quotes (inside double quotes too) becomes the single word `$ORCHSUBST_n_`
+    (so its spaces cannot split a git -C/--work-tree value), and inners[n]
+    holds the body for a scan at the cwd where the substitution runs.
+    Unbalanced ones are left alone."""
     out, inners = [], []
     quote = None
     i, n = 0, len(text)
     while i < n:
         c = text[i]
-        if quote:
-            if c == "\\" and quote == '"' and i + 1 < n:
-                out.append(text[i:i + 2])
-                i += 2
-                continue
-            if c == quote:
+        end = -1
+        if quote == "'":
+            if c == "'":
                 quote = None
-        elif c in "'\"":
-            quote = c
         elif c == "\\" and i + 1 < n:
             out.append(text[i:i + 2])
             i += 2
             continue
-        elif text.startswith("$(", i):
-            depth, j, q = 0, i + 1, None
-            while j < n:
-                ch = text[j]
-                if q:
-                    if ch == "\\" and q == '"':
-                        j += 1
-                    elif ch == q:
-                        q = None
-                elif ch in "'\"":
-                    q = ch
-                elif ch == "\\":
-                    j += 1
-                elif ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            if j < n:
-                inners.append(text[i + 2:j])
-                out.append("$SUBST")
-                i = j + 1
-                continue
+        elif c == "$" and text.startswith("$(", i):
+            end = substitution_end(text, i)
+            body = text[i + 2:end]
+        elif c == "`":
+            end = backtick_end(text, i)
+            body = text[i + 1:end]
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        elif c == "'" and quote is None:
+            quote = "'"
+        if end >= 0:
+            out.append(f"$ORCHSUBST_{len(inners)}_")
+            inners.append(body)
+            i = end + 1
+            continue
         out.append(c)
         i += 1
     return "".join(out), inners
+
+
+WRAPPER_VALUE_OPTS = {
+    "env": ("-u", "--unset", "-P"),
+    "sudo": ("-g", "-h", "-p", "-R", "-r", "-t", "-T", "-U", "-u"),
+    "nice": ("-n", "--adjustment"),
+    "time": ("-f", "-o", "--format", "--output"),
+    "exec": ("-a",),
+    "xargs": ("-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"),
+    "command": (),
+    "nohup": (),
+}
+WRAPPER_CHDIR_OPTS = {"env": ("-C", "--chdir"), "sudo": ("-D", "--chdir")}
+
+
+def strip_wrappers(tokens):
+    """(words, chdir): `tokens` without leading keywords, env assignments and
+    wrapper commands WITH their options (`env -u X`, `command -p`,
+    `nice -n 5`). chdir is the operand of a wrapper's own directory option
+    (`env -C DIR`), else None; the wrapped command's relative paths then
+    resolve somewhere the scanner does not track."""
+    tokens, i, chdir = list(tokens), 0, None
+    while i < len(tokens):
+        tok = tokens[i]
+        name = rm_guard.basename(tok)
+        if rm_guard.is_env_assignment(tok) or tok in rm_guard.LEADING_KEYWORDS:
+            i += 1
+            continue
+        if name not in WRAPPER_VALUE_OPTS:
+            break
+        i += 1
+        while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
+            opt = tokens[i]
+            if opt == "--":
+                i += 1
+                break
+            if name == "env" and opt in ("-S", "--split-string") and i + 1 < len(tokens):
+                try:
+                    tokens[i:i + 2] = shlex.split(tokens[i + 1])
+                except ValueError:
+                    i += 2
+                break
+            if opt in WRAPPER_CHDIR_OPTS.get(name, ()) and i + 1 < len(tokens):
+                chdir = tokens[i + 1]
+                i += 2
+            elif opt.split("=")[0] in WRAPPER_CHDIR_OPTS.get(name, ()) and "=" in opt:
+                chdir = opt.split("=", 1)[1]
+                i += 1
+            elif opt in WRAPPER_VALUE_OPTS[name] and i + 1 < len(tokens):
+                i += 2
+            else:
+                i += 1
+    return tokens[i:], chdir
 
 
 def cd_operand(words):
@@ -1258,8 +1357,7 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
         redirs = {**outer_redirs, **redirs}
     cleaned, inners = split_substitutions(cleaned)
     found = []
-    for inner in inners:
-        found.extend(bash_targets(inner, cwd, home, depth, unknown_cd, redirs))
+    visited = set()
     cwds = {cwd}
     seen_cwds = {cwd}
     stack = []
@@ -1271,6 +1369,17 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
             if stack:
                 cwds, unknown_cd = stack.pop()
             continue
+        # A substitution runs at its position in the command: scan its body
+        # with the cwds and unknown-cd state the shell has reached here.
+        for t in tokens:
+            for m in SUBST_RE.finditer(t):
+                idx = int(m.group(1))
+                if idx < len(inners):
+                    visited.add(idx)
+                    for c in cwds:
+                        found.extend(
+                            bash_targets(inners[idx], c, home, depth, unknown_cd, redirs)
+                        )
         words = []
         for t in tokens:
             if SENTINEL_RE.match(t):
@@ -1284,15 +1393,7 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
                     found.extend((c, w) for c in cwds)
             else:
                 words.append(t)
-        # Accepted gap (cycle-3 A-2): rm_guard.strip_prefixes only skips a
-        # wrapper name, not its own flag argument (`nice -n 10 sed -i ...`,
-        # `time -p ...`, `env -i ...`, `sudo -u x ...`), so the loop below
-        # breaks on the flag token and the wrapped sed/perl/tee/cp/mv/rm
-        # operand is never inspected. Redirects are unaffected (the
-        # sentinel scan above is head-independent); only operand-writers
-        # behind a flagged wrapper are missed, a rare shape for an
-        # orchestrator edit.
-        words = rm_guard.strip_prefixes(words)
+        words, wrapper_cd = strip_wrappers(words)
         if not words:
             continue
         head = rm_guard.basename(words[0])
@@ -1329,12 +1430,21 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
                 found.extend((c, w) for w in rm_operands(words))
         elif head == "git":
             for c in cwds:
-                found.extend((c, w) for w in git_write_targets(words, home, unknown_cd))
+                found.extend(
+                    (c, w)
+                    for w in git_write_targets(words, home, wrapper_cd or unknown_cd)
+                )
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:
                 for c in cwds:
                     found.extend(bash_targets(inner, c, home, depth + 1, unknown_cd))
+    # A substitution in a word the walk never saw (a redirect target) runs
+    # somewhere in the command: scan it at every cwd reached.
+    for idx, inner in enumerate(inners):
+        if idx not in visited:
+            for c in seen_cwds:
+                found.extend(bash_targets(inner, c, home, depth, unknown_cd, redirs))
     return found
 
 
