@@ -196,7 +196,7 @@ untracked and git-ignored on disk, and the planning-artifact guard refuses
 `git add` of it. 1-32 commands, each `{"name", "run"[, "timeout_secs"
 1-3600]}`, that are falsifiable (a broken implementation must fail at least
 one), repo-local, deterministic, and worktree-safe (no STATE_ROOT writes,
-no machine-state mutation, no network, no secret echo). `verify-contract` runs each command under `/bin/sh -c` with the system grep; check commands through `verify-contract`, not in your own shell. The PRD's
+no machine-state mutation, no network, no secret echo). `verify-contract` runs each command under `/bin/sh -c` with the system grep; check commands through `verify-contract`, not in your own shell. Scope and path checks compute the base at run time with `git merge-base <base_ref> HEAD`, never a commit literal and never `git fetch`, and name only paths the PR owns (see references/contract-pinning.md, Scope and path checks). The PRD's
 acceptance mapping pairs each acceptance criterion with its contract
 command (or an explicit "human-verify" entry). Validate it --
 `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path> --contract claude/contracts/<task_id>-contract.json --allow-unpinned --validate-only`

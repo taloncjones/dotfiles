@@ -516,6 +516,95 @@ PY
 ok "kickoff section documents the fast-path designation, PRD raw path, and contract source" fastpath_kickoff_ok
 ok "state layout documents no fast_path config" "! grep -q 'fast_path' claude/skills/herdr-orchestration/references/state-layout.md"
 
+scope_snippet_py() {
+python3 - "$1" <<'PY'
+import os, re, shutil, subprocess, sys, tempfile
+mode = sys.argv[1]
+t = open("claude/skills/herdr-orchestration/references/contract-pinning.md").read()
+i = t.index("## Scope and path checks")
+j = t.find("\n## ", i + 3)
+s = t[i:] if j < 0 else t[i:j]
+blocks = re.findall(r"```sh\n(.*?)\n```", s, re.S)
+own = [b for b in blocks if "<owned-path>" in b][0]
+forb = [b for b in blocks if "<forbidden-path>" in b][0]
+own = own.replace("<base_ref>", "origin/main").replace("<owned-path>", "own/a.txt -e own/b.txt")
+forb = forb.replace("<base_ref>", "origin/main").replace("<forbidden-path>", "guarded.txt")
+env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_AUTHOR_NAME="t",
+           GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+root = tempfile.mkdtemp()
+w = os.path.join(root, "w")
+def git(*a, cwd=None):
+    subprocess.run(["git", *a], cwd=cwd or w, env=env, check=True, capture_output=True)
+def put(path, text):
+    p = os.path.join(w, path)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(text)
+def run(snippet):
+    return subprocess.run(["/bin/sh", "-c", snippet], cwd=w, env=env, capture_output=True).returncode
+errs = []
+def want(name, snippet, ok):
+    rc = run(snippet)
+    if (rc == 0) != ok:
+        errs.append("%s: rc=%d" % (name, rc))
+git("init", "-q", "--bare", "-b", "main", os.path.join(root, "origin.git"), cwd=root)
+git("clone", "-q", os.path.join(root, "origin.git"), w, cwd=root)
+put("old.txt", "x\n"); put("guarded.txt", "g\n")
+git("add", "."); git("commit", "-qm", "init"); git("push", "-q", "origin", "HEAD:main")
+git("checkout", "-qb", "task")
+put("own/a.txt", "a\n"); git("add", "."); git("commit", "-qm", "task")
+if mode == "own":
+    want("fresh", own, True)
+else:
+    want("fresh", forb, True)
+git("checkout", "-q", "-b", "m", "origin/main")
+put("z.txt", "z\n"); put("guarded.txt", "main edit\n"); git("mv", "old.txt", "new.txt")
+git("add", "."); git("commit", "-qm", "main2"); git("push", "-q", "origin", "HEAD:main")
+git("checkout", "-q", "task"); git("branch", "-qD", "m")
+git("fetch", "-q", "origin"); git("merge", "-q", "--no-edit", "origin/main")
+if mode == "own":
+    want("after main merge", own, True)
+    put("stray.txt", "q\n"); git("add", "."); git("commit", "-qm", "stray")
+    want("out-of-scope commit", own, False)
+    git("reset", "-q", "--hard", "HEAD~1")
+    git("mv", "new.txt", "own/b.txt"); git("commit", "-qm", "rename into owned")
+    want("rename unowned into owned path", own, False)
+    git("reset", "-q", "--hard", "HEAD~1")
+    git("update-ref", "-d", "refs/remotes/origin/main")
+    want("missing origin/main", own, False)
+else:
+    want("main edits guarded file", forb, True)
+    put("guarded.txt", "task edit\n"); git("add", "."); git("commit", "-qm", "touch guarded")
+    want("task edit", forb, False)
+    git("reset", "-q", "--hard", "HEAD~1")
+    git("mv", "guarded.txt", "moved.txt"); git("commit", "-qm", "rename guarded")
+    want("task rename away", forb, False)
+    git("reset", "-q", "--hard", "HEAD~1")
+    git("update-ref", "-d", "refs/remotes/origin/main")
+    want("missing origin/main", forb, False)
+shutil.rmtree(root, ignore_errors=True)
+print("\n".join(errs), file=sys.stderr)
+sys.exit(1 if errs else 0)
+PY
+}
+ok "contract-pinning scope snippet passes after a main merge and fails closed" "scope_snippet_py own"
+ok "contract-pinning forbidden-path snippet ignores main's own edits" "scope_snippet_py forb"
+
+scope_guidance_ok() {
+python3 - <<'PY'
+import re, sys
+b = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+m = re.search(r"^```brief:plan-produce\n(.*?)\n```$", b, re.M | re.S)
+plan = " ".join(m.group(1).split()) if m else ""
+k = " ".join(open("claude/skills/herdr-orchestration/references/kickoff.md").read().split())
+fp = k[k.index("Fast-path contract source"):k.index("**Mech item**")]
+ok = (all(n in plan for n in ("git merge-base <base_ref> HEAD", "git fetch", "owns", "Scope and path checks"))
+      and "Scope and path checks" in fp)
+sys.exit(0 if ok else 1)
+PY
+}
+ok "brief and kickoff guidance point at run-time scope checks" scope_guidance_ok
+
 fastpath_brief_ok() {
 python3 - <<'PY'
 import sys
