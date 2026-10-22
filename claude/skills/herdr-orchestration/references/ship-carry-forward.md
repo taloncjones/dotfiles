@@ -5,6 +5,18 @@
 The task-local review approval carries across clean main merges the same way
 (`carry-review`, SKILL.md section 4).
 
+Run `$CORE carry-review --repo-slug <slug> --task-id <id> --session <s>
+--fence <f>` without asking, as a long background run (it runs the pinned
+contract; wait on the `EXIT` line), and start no second run for a task while
+one runs. It proves every commit since the reviewed head is a clean main
+merge, runs the contract at HEAD, and records the proof in
+`artifacts/<task>/review-carry/`. Exit 0: re-pinned at HEAD with
+`review_carry`; the next check-in reports `ship`. Exit 3: the task is reset as
+the stale-verdict reset does and the next check-in reports `dispatch-review`.
+Exit 4: nothing written; for a held lock wait for the earlier run, else the
+next check-in offers it again, and repeated exit 4 goes to the user. Exit 2:
+integrity halt; surface it.
+
 **Merge-main-only commits keep the verdict.** On every check-in whose task
 is `reviewed` with a `stale` handoff of verdict `APPROVE`, before any ship
 dispatch decision, prove the carry-forward against the pinned handoff;

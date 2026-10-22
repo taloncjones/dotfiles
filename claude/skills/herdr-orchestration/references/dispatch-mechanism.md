@@ -137,3 +137,10 @@ surface and treat cross-session teardown+resume as the fallback.
   accept one cache re-write; never keep-alive ping to stay warm (pure waste).
 - Same-worker incorporation is the cheap path precisely because it appends to a
   warm cache instead of rebuilding context in a fresh worker.
+
+## Reprompt a stalled worker
+
+For `reprompt-stalled` (SKILL.md section 4): unless the worker waits on its
+own subagents, write a resume prompt to a file and run the printed `reprompt`
+line with `--prompt-file` set to it. If the line refuses an unresolved prior
+reprompt, reconcile that first (above).
