@@ -147,7 +147,9 @@ VALUE_FLAGS = FIELD_FLAGS + (
     "--hostname", "--cache", "-p", "--preview",
 )
 
-REVIEW_EVENT_PATH = re.compile(r"pulls/\d+/reviews(?:/\d+/events)?$")
+REVIEW_EVENT_PATH = re.compile(r"pulls/[1-9]\d*/reviews(?:/[1-9]\d*/events)?$")
+# Any reviews or events path, including PR segments gh would normalize (`+5`, `%35`, `05`).
+LOOSE_REVIEW_PATH = re.compile(r"pulls/[^/]*/reviews(?:/[^/]*/events)?$|%.*reviews")
 REVIEW_POST_PATH = re.compile(r"repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews")
 SHA40_RE = re.compile(r"[0-9a-f]{40}")
 GRAPHQL_EVENT_RE = re.compile(r"\b(?:APPROVE|REQUEST_CHANGES)\b")
@@ -814,6 +816,14 @@ def _json_strings(node) -> list[str]:
     return []
 
 
+def repeated_api_flags(api: list[str]) -> bool:
+    """True when a gh api argv repeats --input or the method flag, so the
+    guard and gh could read different occurrences."""
+    inputs = sum(1 for t in api if t == "--input" or t.startswith("--input="))
+    methods = sum(1 for t in api if t in ("-X", "--method") or t.startswith(("--method=", "-X")))
+    return inputs > 1 or methods > 1
+
+
 def review_event(args: list[str], cwd: str | None = None) -> str | None:
     """Review event a gh call submits: "approve", "request-changes",
     "unknown" (an event this cannot read or name) or None for any other call."""
@@ -826,8 +836,10 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
         if path == "graphql":
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
-            return None
-        if path != raw_path:
+            noncanonical = LOOSE_REVIEW_PATH.search(path) or ("%" in path and "reviews" in path.lower())
+            method = parse_api(api)[0] or ("POST" if parse_api(api)[3] else "GET")
+            return "unknown" if noncanonical and method != "GET" else None
+        if path != raw_path or repeated_api_flags(api):
             return "unknown"
         values = [
             "@file" if typed and value.startswith("@") else value

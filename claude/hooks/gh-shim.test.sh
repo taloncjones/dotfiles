@@ -740,6 +740,23 @@ else
 fi
 
 fresh_gate
+printf '{"event":"COMMENT","body":"x"}' >"$T/c.json"; printf '{"event":"APPROVE","body":"x"}' >"$T/a.json"
+gh api -X POST repos/o/r/pulls/5/reviews --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV11 the shim refuses a reviews call with two --input files"
+else
+    fail "RV11 the shim refuses a reviews call with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls/%35/reviews" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV12 the shim refuses a reviews call with an encoded PR number"
+else
+    fail "RV12 the shim refuses a reviews call with an encoded PR number (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
 (cd "$HOME/Git/personal/repo" && FAKE_PR_HEAD=$HEAD_B gh api -X POST repos/me/repo/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >/dev/null 2>"$T/err"); rc=$?
 if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "head moved" "$T/err"; then
     pass "RV6 a personal repository refuses an event review on a moved head"
@@ -761,9 +778,9 @@ approve "$hrc" "$(printf "$RV_LABEL_CHANGES" "$hrc")"
 rv_run APPROVE; rc1=$?
 rv_run REQUEST_CHANGES; rc2=$?
 if [ "$rc1" = 1 ] && [ "$rc2" = 0 ] && [ "$(log_lines)" = 1 ] && grep -q "REQUEST_CHANGES" "$FAKE_LOG"; then
-    pass "RV8 a request-changes-approved draft covers only its REQUEST_CHANGES call"
+    pass "RV8b a request-changes-approved draft covers only its REQUEST_CHANGES call"
 else
-    fail "RV8 a request-changes-approved draft covers only its call (rc=$rc1/$rc2 log=$(cat "$FAKE_LOG"))"
+    fail "RV8b a request-changes-approved draft covers only its call (rc=$rc1/$rc2 log=$(cat "$FAKE_LOG"))"
 fi
 
 fresh_gate

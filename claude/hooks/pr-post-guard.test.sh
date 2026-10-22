@@ -1451,6 +1451,23 @@ refused "RE14 and a reviews events call with an event in the query string" "must
 case_gate re14c
 refused "RE14 and a reviews call with a fragment" "must be" api -X POST "repos/o/r/pulls/5/reviews#x" -f commit_id=$H40 -f event=APPROVE -F body=@body.md
 
+printf '{"event":"COMMENT","body":"x"}' >"$FIX/comment.json"
+printf '{"event":"APPROVE","body":"x"}' >"$FIX/approve.json"
+case_gate re16a
+refused "RE16 draft registration refuses two --input files" "must be" api -X POST repos/o/r/pulls/5/reviews --input "$FIX/comment.json" --input "$FIX/approve.json"
+case_gate re16b
+refused "RE16 and an --input file with a disagreeing -f event" "must be" api -X POST repos/o/r/pulls/5/reviews --input "$FIX/comment.json" -f event=APPROVE
+case_gate re16c
+refused "RE16 and a repeated -X" "must be" api -X GET -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=APPROVE -F body=@body.md
+case_gate re16d
+refused "RE16 and a repeated -f event" "must be" api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=COMMENT -f event=APPROVE -F body=@body.md
+case_gate re17a
+refused "RE17 draft registration refuses a +5 PR segment" "must be" api -X POST repos/o/r/pulls/+5/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+case_gate re17b
+refused "RE17 and a %35 PR segment" "must be" api -X POST repos/o/r/pulls/%35/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+case_gate re17c
+refused "RE17 and a zero-padded PR segment" "must be" api -X POST repos/o/r/pulls/05/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+
 case_gate re15
 HR=$(reg $REVIEW_APPROVE)
 expect_out "RE15 an Approve label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Approve #6 at aaaaaaa with this text (draft $HR)" 'review text')"
