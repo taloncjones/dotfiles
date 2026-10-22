@@ -5919,6 +5919,293 @@ def test_dispatch_gate_ship_render_failure_leaves_the_budget_unspent():
         fx.close()
 
 
+def deadline_stop(fx):
+    """A review_ready task whose review hit its deadline at HEAD: changes-requested, launch retired."""
+    head, focus = review_ready(fx)
+    task = json.loads(fx.task_file.read_text())
+    task["workers"].append(settle_row("review", "R0", "w1:p2", head))
+    task.update(status="changes-requested", review_head_sha=head,
+                retired_review_launch_ids=["R0"])
+    fx.task_file.write_text(json.dumps(task))
+    return head, focus
+
+
+def gate_fakes(fx, launch_id="rev-L9"):
+    herdr_dispatch._gate_split = lambda *a: "w1:p9"
+    herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": launch_id}
+
+
+def expect_refusal(fx, phase, focus, text, **kw):
+    try:
+        run_gate(fx, phase, focus, **kw)
+    except herdr_dispatch.DispatchError as exc:
+        assert text in str(exc), exc
+        return str(exc)
+    raise AssertionError("the dispatch was not refused")
+
+
+def test_dispatch_gate_review_infra_rerun_resets_a_deadline_stop_in_one_write():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    writes = []
+    real_step = originals["_core_step"]
+
+    def step(verb, *args, ctx, stdin=None):
+        if verb == "write-task":
+            writes.append(json.loads(args[args.index("--json") + 1]))
+        return real_step(verb, *args, ctx=ctx, stdin=stdin)
+
+    def sweeping(**kw):
+        task = json.loads(fx.task_file.read_text())
+        for row in task["workers"]:
+            if row["launch_id"] == "R0":
+                row.update(status="settled", exit_requested=True)
+        fx.task_file.write_text(json.dumps(task))
+        return {"status": "swept", "rows": [{"launch_id": "R0", "status": "settled"}]}
+    herdr_dispatch.sweep = sweeping
+    herdr_dispatch._core_step = step
+    gate_fakes(fx)
+    try:
+        head, focus = deadline_stop(fx)
+        out = run_gate(fx, "review", focus, infra_rerun=True)
+        assert out["status"] == "dispatched", out
+        assert out["infra_rerun"] == {"phase": "review", "head": head, "count": 1}, out
+        counted = writes[0]
+        assert (counted["status"], counted["review_head_sha"]) == ("completed", None), counted
+        assert counted["infra_reruns"] == {"review": {"head": head, "count": 1}}, counted
+        row = next(w for w in counted["workers"] if w["launch_id"] == "R0")
+        assert row["status"] == "settled" and row["exit_requested"] is True, row
+        task = json.loads(fx.task_file.read_text())
+        assert task["status"] == "review-dispatched" and task["review_head_sha"] == head, task
+        assert task["retired_review_launch_ids"] == ["R0"], task
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_third_infra_rerun_refuses_before_any_herdr_call():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: calls.append("sweep") or {"status": "swept", "rows": []}
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    herdr_dispatch._row_agent = lambda *a: calls.append("agent") or ("gone", None)
+    try:
+        head, focus = deadline_stop(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["infra_reruns"] = {"review": {"head": head, "count": 2}}
+        fx.task_file.write_text(json.dumps(task))
+        before = fx.task_file.read_text()
+        message = expect_refusal(fx, "review", focus, "infrastructure re-run budget spent",
+                                 infra_rerun=True)
+        assert "--owner-approved" in message, message
+        assert calls == [] and fx.task_file.read_text() == before, calls
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_third_infra_rerun_refuses_and_writes_nothing():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "idle"})
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded="INCOMPLETE")
+        task = json.loads(fx.task_file.read_text())
+        task["infra_reruns"] = {"ship": {"head": head, "count": 2}}
+        fx.task_file.write_text(json.dumps(task))
+        before = fx.task_file.read_text()
+        message = expect_refusal(fx, "ship", focus, "infrastructure re-run budget spent",
+                                 infra_rerun=True)
+        assert "--owner-approved" in message, message
+        assert calls == [] and fx.task_file.read_text() == before, calls
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_a_spent_budget_refuses_an_unflagged_dispatch_until_owner_approved():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: {"status": "swept", "rows": []}
+    gate_fakes(fx)
+    try:
+        head, focus = review_ready(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["infra_reruns"] = {"review": {"head": head, "count": 2}}
+        fx.task_file.write_text(json.dumps(task))
+        expect_refusal(fx, "review", focus, "infrastructure re-run budget spent")
+        out = run_gate(fx, "review", focus, owner_approved=True)
+        assert out["status"] == "dispatched" and "infra_rerun" not in out, out
+        task = json.loads(fx.task_file.read_text())
+        assert task["infra_reruns"] == {"review": {"head": head, "count": 2}}, task
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_a_new_head_or_the_other_phase_starts_a_fresh_re_run_budget():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: {"status": "swept", "rows": []}
+    gate_fakes(fx)
+    try:
+        head, focus = deadline_stop(fx)
+        task = json.loads(fx.task_file.read_text())
+        task["infra_reruns"] = {"review": {"head": "0" * 40, "count": 2},
+                                "ship": {"head": head, "count": 2}}
+        fx.task_file.write_text(json.dumps(task))
+        out = run_gate(fx, "review", focus, infra_rerun=True)
+        assert out["infra_rerun"] == {"phase": "review", "head": head, "count": 1}, out
+        task = json.loads(fx.task_file.read_text())
+        assert task["infra_reruns"]["ship"] == {"head": head, "count": 2}, task
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_infra_rerun_relaunches_a_pinned_incomplete_gate_at_tier_full():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("present", {"agent_status": "idle"})
+    gate_fakes(fx, "ship-td-a-aaaaaaaaaaaa")
+    herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+    renders = []
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded="INCOMPLETE")
+        out = run_gate(fx, "ship", focus, infra_rerun=True)
+        assert renders[0][renders[0].index("--tier") + 1] == "full", renders
+        assert out["status"] == "dispatched", out
+        assert out["infra_rerun"] == {"phase": "ship", "head": head, "count": 1}, out
+        task = json.loads(fx.task_file.read_text())
+        assert task["ship_launch_id"] == "ship-td-a-aaaaaaaaaaaa", task
+        assert "ship_relaunch_head" not in task, task
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_a_live_unpinned_ship_row_refuses_a_relaunch():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    orphan = "ship-td-a-" + "9" * 12
+
+    def agent(cli, row, env):
+        if row["launch_id"] == orphan:
+            return "present", {"agent_status": "working"}
+        return "present", {"agent_status": "idle"}
+    herdr_dispatch._row_agent = agent
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD, recorded="INCOMPLETE")
+        task = json.loads(fx.task_file.read_text())
+        row = settle_row("ship", orphan, "w1:p4", head)
+        task["workers"].append(row)
+        task["infra_reruns"] = {"ship": {"head": head, "count": 2}}
+        fx.task_file.write_text(json.dumps(task))
+        before = fx.task_file.read_text()
+        for flags in ({}, {"infra_rerun": True}, {"owner_approved": True}):
+            message = expect_refusal(fx, "ship", focus, "a ship agent may still be running",
+                                     **flags)
+            assert "budget" not in message, message
+        assert calls == [] and fx.task_file.read_text() == before, calls
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_a_stopped_run_relaunch_writes_both_fields_in_one_write():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    writes = []
+    real_step = originals["_core_step"]
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    gate_fakes(fx, "ship-td-a-bbbbbbbbbbbb")
+    herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+    render = ship_render(real_step, fx, [])
+
+    def step(verb, *args, ctx, stdin=None):
+        if verb == "write-task":
+            writes.append(json.loads(args[args.index("--json") + 1]))
+        return render(verb, *args, ctx=ctx, stdin=stdin)
+    herdr_dispatch._core_step = step
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        out = run_gate(fx, "ship", focus, infra_rerun=True)
+        assert out["status"] == "dispatched", out
+        counted = writes[0]
+        assert counted["ship_relaunch_head"] == head, counted
+        assert counted["infra_reruns"] == {"ship": {"head": head, "count": 1}}, counted
+        assert "ship_launch_id" in counted and counted["ship_launch_id"] == SHIP_OLD, counted
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_review_infra_rerun_refuses_a_task_that_is_not_a_deadline_stop():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch.sweep = lambda **kw: calls.append("sweep") or {"status": "swept", "rows": []}
+    herdr_dispatch._gate_split = lambda *a: calls.append("split") or "w1:p9"
+    try:
+        head, focus = deadline_stop(fx)
+        cases = {
+            "latest review launch not retired": {"retired_review_launch_ids": []},
+            "moved head": {"review_head_sha": "1" * 40},
+            "not changes-requested": {"status": "completed"},
+        }
+        base = json.loads(fx.task_file.read_text())
+        for label, change in cases.items():
+            fx.task_file.write_text(json.dumps({**base, **change}))
+            before = fx.task_file.read_text()
+            expect_refusal(fx, "review", focus, "stopped at its deadline", infra_rerun=True)
+            assert calls == [] and fx.task_file.read_text() == before, label
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_dispatch_gate_ship_owner_approved_relaunches_a_stopped_run_past_a_spent_budget():
+    fx = Fixture()
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    herdr_dispatch._row_agent = lambda cli, row, env: ("gone", None)
+    gate_fakes(fx, "ship-td-a-cccccccccccc")
+    herdr_dispatch.settle = lambda **kw: {"launch_id": kw["launch_id"], "status": "settled"}
+    renders = []
+    herdr_dispatch._core_step = ship_render(originals["_core_step"], fx, renders)
+    try:
+        head, focus = ship_ready(fx, pinned=SHIP_OLD)
+        task = json.loads(fx.task_file.read_text())
+        task["ship_relaunch_head"] = head
+        task["infra_reruns"] = {"ship": {"head": head, "count": 2}}
+        fx.task_file.write_text(json.dumps(task))
+        expect_refusal(fx, "ship", focus, "infrastructure re-run budget spent")
+        out = run_gate(fx, "ship", focus, owner_approved=True)
+        assert out["status"] == "dispatched" and "infra_rerun" not in out, out
+        assert renders[0][renders[0].index("--tier") + 1] == "full", renders
+        task = json.loads(fx.task_file.read_text())
+        assert task["ship_relaunch_head"] == head and task["ship_launch_id"] == "ship-td-a-cccccccccccc", task
+        assert task["infra_reruns"] == {"ship": {"head": head, "count": 2}}, task
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
 def test_dispatch_gate_cli_reaches_the_function():
     fx = Fixture()
     try:
@@ -6500,6 +6787,16 @@ for name, test in (
     ("dispatch-gate ship refuses an unknown pinned agent state", test_dispatch_gate_ship_refuses_when_herdr_cannot_say_the_pinned_agent_state),
     ("dispatch-gate ship: a render failure leaves ship_relaunch_head unchanged", test_dispatch_gate_ship_render_failure_leaves_the_budget_unspent),
     ("dispatch-gate CLI reaches the function", test_dispatch_gate_cli_reaches_the_function),
+    ("dispatch-gate review: --infra-rerun resets a deadline stop and records the budget in one write", test_dispatch_gate_review_infra_rerun_resets_a_deadline_stop_in_one_write),
+    ("dispatch-gate review: a third infrastructure re-run at one head refuses and names --owner-approved", test_dispatch_gate_review_third_infra_rerun_refuses_before_any_herdr_call),
+    ("dispatch-gate ship: a third infrastructure re-run at one head refuses and names --owner-approved", test_dispatch_gate_ship_third_infra_rerun_refuses_and_writes_nothing),
+    ("dispatch-gate: a spent budget refuses an unflagged dispatch until --owner-approved", test_dispatch_gate_a_spent_budget_refuses_an_unflagged_dispatch_until_owner_approved),
+    ("dispatch-gate: a new head or the other phase starts a fresh re-run budget", test_dispatch_gate_a_new_head_or_the_other_phase_starts_a_fresh_re_run_budget),
+    ("dispatch-gate ship: --infra-rerun relaunches a pinned INCOMPLETE gate at tier full", test_dispatch_gate_ship_infra_rerun_relaunches_a_pinned_incomplete_gate_at_tier_full),
+    ("dispatch-gate ship: a live unpinned ship row refuses a relaunch", test_dispatch_gate_ship_a_live_unpinned_ship_row_refuses_a_relaunch),
+    ("dispatch-gate ship: a stopped-run relaunch writes ship_relaunch_head and infra_reruns in one write", test_dispatch_gate_ship_a_stopped_run_relaunch_writes_both_fields_in_one_write),
+    ("dispatch-gate review: --infra-rerun refuses a task that is not a deadline stop", test_dispatch_gate_review_infra_rerun_refuses_a_task_that_is_not_a_deadline_stop),
+    ("dispatch-gate ship: --owner-approved relaunches a stopped run past a spent relaunch budget", test_dispatch_gate_ship_owner_approved_relaunches_a_stopped_run_past_a_spent_budget),
     ("archive-task closes an emptied merged workspace, then archives", test_archive_task_closes_an_emptied_merged_workspace_then_archives),
     ("archive-task refuses worktree-present and closes nothing", test_archive_task_refuses_worktree_present_and_closes_nothing),
     ("archive-task keeps a workspace with a live agent and names it", test_archive_task_keeps_a_workspace_with_a_live_agent_and_names_it),

@@ -57,7 +57,7 @@ Dispatch selector, gate policy, review incorporation and cache rules:
 `python3 "$RUNTIME" route --step <step> --runtime <claude|codex>` (the role is
 derived from the step; do not hand-pick a role for a pipeline step).
 
-On-demand references (read each at the point of use named below): `references/kickoff.md`, `references/contract-pinning.md`, `references/phase-advance.md`, `references/codex-ui-specialist.md`, `references/triage.md`, `references/dispatch-adapter.md`, `references/legacy-wrappers.md`, `references/workflow-routing.md`, `references/jira-writeback.md`, `references/task-leads.md`, `references/director-launch.md`, `references/review-dispatch-details.md`, `references/ship-carry-forward.md`, `references/lesson-harvest.md`, `references/posting.md`, `references/rollover.md`; step-to-worker defaults: `references/pipeline-worker-mapping.md`.
+On-demand references (read each at the point of use named below): `references/kickoff.md`, `references/contract-pinning.md`, `references/phase-advance.md`, `references/codex-ui-specialist.md`, `references/triage.md`, `references/dispatch-adapter.md`, `references/legacy-wrappers.md`, `references/workflow-routing.md`, `references/jira-writeback.md`, `references/task-leads.md`, `references/director-launch.md`, `references/review-dispatch-details.md`, `references/ship-carry-forward.md`, `references/lesson-harvest.md`, `references/posting.md`, `references/rollover.md`, `references/auto-actions.md`; step-to-worker defaults: `references/pipeline-worker-mapping.md`.
 
 ## Runtime boundary
 
@@ -573,7 +573,7 @@ Helper sessions a reviewer spawns, and which of them may emit: read
    fresh review dispatches. Only when all three SHAs agree:
    - `changes-requested` or blocking findings -> `status: changes-requested`,
      event `changes-requested`, and surface the findings or incomplete evidence
-     for deliberate development repair; render the repair brief (section 2
+     for deliberate development repair (`references/auto-actions.md`); render the repair brief (section 2
      step 7) with `--phase repair --findings <the review record's findings_ref
      or the ship handoff's report_path>`. Run a scoped `review-change` only when
      the repair needs fresh evidence; structural repairs return to design. An
@@ -688,8 +688,8 @@ every such relaunch brief carries `herdr-ship-brief: tier=full`: `dispatch-gate`
 forces it for a stopped run and whenever the handoff of the row `ship_launch_id`
 pins, on this head or an earlier one, has a verdict other than `APPROVE`, whatever `--tier` says. Never on a `current` non-APPROVE handoff
 (section 6a step 0 owns it), except rule (c). Dispatch with
-`python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>]`.
-Read `references/ship-carry-forward.md` (section "Ship dispatch details") for the tier briefs and relaunch limits before dispatching.
+`python3 "$DISPATCH" dispatch-gate ... --phase ship --focus-file <file> [--tier full|delta --prior-handoff <ship.json>] [--infra-rerun|--owner-approved]`
+(`references/auto-actions.md`). Read `references/ship-carry-forward.md` (section "Ship dispatch details") for the tier briefs and relaunch limits before dispatching.
 Every ship brief is the text `dispatch-gate` renders from the `brief:ship`
 block of `references/brief-template.md`; never hand-write a ship brief or
 copy one from another task.
@@ -757,12 +757,9 @@ section 4; `<ship_ws>` is the ship row's `workspace_id`; report non-`settled`.
    section 6 rule (c) dispatches a full gate. Current handoff verdict
    `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
    report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff
-   turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
-   moves it on: then `write-task` the record with `ship_launch_id: null`
-   (every other field carried), and section 6 dispatches afresh.
-   Host-sleep re-gate, else the human: same HEAD, ship launch `started_ns` / 1e9 before
-   the `sec` of `sysctl -n kern.waketime`, all reasons `runner status is not success` with
-   `timed_out` and the seat result written at or after wake (`references/director-launch.md`).
+   turns `stale`. A `CHANGES` repair needs no ask; an infrastructure-lost `INCOMPLETE`
+   re-runs without asking; any other `INCOMPLETE`: surface it; a human
+   re-gate request writes `ship_launch_id: null`. Rules: `references/auto-actions.md`.
 1. `APPROVE`: write `gh pr view <n> --json number,state,isDraft,mergeable,headRefOid,baseRefName,baseRefOid,statusCheckRollup`
    and `gh repo view --json nameWithOwner,defaultBranchRef` to the
    scratchpad, then

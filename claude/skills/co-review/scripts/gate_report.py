@@ -121,7 +121,11 @@ def _seat_content_ok(content: bytes, artifact: str, name: str, reasons: list[str
         return None
     if payload["status"] != "success":
         reasons.append(f"seat {name} runner status is not success")
-    if refusal(payload.get("result")):
+    # The runner moves a limit notice from result into errors on failure.
+    errors = payload.get("errors")
+    if refusal(payload.get("result")) or (
+        isinstance(errors, list) and any(refusal(e) for e in errors)
+    ):
         reasons.append(f"seat {name} result is a usage-limit refusal")
     result = payload.get("result")
     return result if isinstance(result, str) else ""
