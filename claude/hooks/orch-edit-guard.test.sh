@@ -837,6 +837,31 @@ audit_deny "AL seam line continuation after an export hides reset" "export GIT_W
 audit_deny "AL seam at runner quoted command hides writer" "at now <<< 'git -C $R commit -m x'" "$N"
 audit_deny "AL seam escaped backslash before newline still splits the commands" "git -C $R status \\\\
 git -C $R commit -m x" "$N"
+audit_deny "AL B1 echo comment ending in a backslash hides the next line" "echo hi # note \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 comment-only first line ending in a backslash" "# note \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 git status comment ending in a backslash" "git -C $R status # see \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 cd comment ending in a backslash then reset" "cd $R # go \\
+git reset --hard" "$N"
+audit_deny "AL B1 semicolon comment ending in a backslash" "true; # c \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 comment inside a subshell ending in a backslash" "( echo hi # c \\
+git -C $R commit -m x )" "$N"
+audit_deny "AL B1 comment inside a substitution ending in a backslash" "x=\$(echo hi # c \\
+git -C $R commit -m x)" "$N"
+audit_deny "AL B1 comment before a variable target ending in a backslash" "echo hi # c \\
+git -C \"\$W\" commit -m x" "$N"
+audit_deny "AL B1 comment ending in an odd backslash run" "echo hi # c \\\\\\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 comment ending in an even backslash run" "echo hi # c \\\\
+git -C $R commit -m x" "$N"
+audit_deny "AL A1 flock -c time prefix hides writer" "flock /tmp/l -c 'time git commit -m x'" "$N"
+audit_deny "AL A1 flock -c brace form hides writer" "flock /tmp/l -c '{ git commit -m x; }'" "$N"
+audit_deny "AL A1 su -c GIT_WORK_TREE assignment hides writer" "su -c 'GIT_WORK_TREE=$R git reset --hard'" "$N"
+audit_deny "AL A1 ssh while loop hides writer" "ssh host 'while true; do git commit; done'" "$N"
+hook_case "AL A2 alias option with a read-only verb allowed" allow Bash 'git -c alias.foo=bar -C "$W" status' "$N" "$SID_A"
 audit_deny "AL literal writer with a variable argument" "git -C $R commit -m \"\$MSG\"" "$N"
 hook_case "AL variable-target status allowed" allow Bash 'git -C "$W" status' "$N" "$SID_A"
 hook_case "AL variable-target log allowed" allow Bash 'git -C "$W" log -1' "$N" "$SID_A"

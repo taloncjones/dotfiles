@@ -40,25 +40,32 @@ exec, nohup, xargs, builtin, eval, timeout, a shell -c string and the like),
 and the command has no heredoc, here-string or function definition. A `cd <literal>`
 before it sets the cwd; a non-literal `cd` makes a later relative writer fail
 closed. When unsure whether a word is a writer (`$GIT commit`, `git $VERB`)
-the call is refused. Read-only verbs (`status`, `log`, `diff`, `fetch`) pass in
-any form, including `-C "$W"`. There is no dry-run exemption; a literal
+the call is refused. Read-only verbs (`status`, `log`, `diff`, `fetch`) pass
+with `-C "$W"`; a writer word as an argument of a wrapped or option-prefixed
+read-only call (`timeout 5 git log --grep=merge`) is refused. There is no dry-run exemption; a literal
 `clean -n` takes the normal marker path. `env -C`/`sudo -D` ahead of a
 non-git writer (`sed -i`, `tee`) is refused too. `git merge --abort` in plain
 form is not a work-tree write for the guard; a launcher's call is logged as
 allowed.
 
 Accepted holes (allow), listed exactly and mirrored in install-layout.md:
-- Verbs outside GIT_WRITE_SUBCOMMANDS pass in any form, including the ref and
-  tree writers `read-tree`, `checkout-index`, `submodule update`, `worktree
-  add`, `branch -f`/`-D`, `update-ref`, `symbolic-ref`, `tag -f`, `reflog
-  expire`, `gc --prune`, `filter-branch` and `sparse-checkout`.
+- Verbs outside GIT_WRITE_SUBCOMMANDS pass in any form: `read-tree`,
+  `checkout-index`, `submodule update`, `worktree add`, `branch -f`/`-D`,
+  `update-ref`, `symbolic-ref`, `tag -f`, `reflog expire`, `gc --prune`,
+  `filter-branch`, `sparse-checkout`.
 - Git alias verbs (`git ci`, from ~/.gitconfig) read as non-writers.
-- `git --git-dir=<repo>/.git <writer>` or `GIT_DIR=<repo>/.git <writer>`
-  with no work tree, from a non-repo cwd.
-- Shell functions defined in an earlier Bash call, command strings built
-  wholly from variables (`eval "$CMD"`), scripts, `python -c`, process
+- Work-tree retargeting without a work-tree flag: `--git-dir=<repo>/.git` or
+  `GIT_DIR=<repo>/.git` from a non-repo cwd, `-c core.worktree=<repo>`, and
+  the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` env.
+- Commands built or run outside the scanner: shell functions defined in an
+  earlier Bash call, strings built wholly from variables (`eval "$CMD"`,
+  `bash -c "$CMD"`, `sh -c "$VAR"`), scripts, inline interpreters (`python -c`,
+  `perl -e`, `ruby -e`, `node -e`, `awk 'BEGIN{system()}'`), process
   substitution, `builtin cd`, a heredoc with no terminator, and git calls past
   the 10-second budget.
+- A quoted git command line given to a head outside ARGUMENT_RUNNERS (`flock`,
+  `su`, `ssh`, `tmux`, `screen`, `parallel`, `script`, `at`, `watch`, `runuser`,
+  `sg`, `systemd-run`, `mosh`).
 - Non-git writers: `patch`, `truncate`, `touch`, `mkdir`, `ln`, `rsync`, `dd`,
   editors, NotebookEdit/MultiEdit, and `awk`/`gawk -i inplace`; non-git
   targets built from `$VAR`/`$(...)`/globs (redirects, `sed -i`, `tee` keep
@@ -67,15 +74,18 @@ Accepted holes (allow), listed exactly and mirrored in install-layout.md:
   over-refuses).
 This is a guard against drift, not evasion.
 
-Scanner seams that fail closed: a backslash-newline is joined before
-tokenizing; a GIT_DIR/GIT_WORK_TREE prefix assignment or earlier `export`/
-`declare` counts as the matching flag (non-literal value refused); a git
-global option other than `-C`, `-c` (not `alias.*`), the `--git-dir`/
-`--work-tree`/`--namespace` forms and `--no-pager -P --bare
---literal-pathspecs --no-optional-locks` is refused before a writer verb; a
-quoted multi-word argument that is a git command line (`su -c`, `flock -c`,
-`ssh`, `parallel`) and `find -exec/-execdir/-ok/-okdir` with a writer are
-refused under any head.
+Scanner seams that fail closed: scan_raw drops a backslash-newline as the
+shell does (an even backslash run is escaped backslashes, and a comment still
+ends at its newline); a GIT_DIR/GIT_WORK_TREE prefix assignment or earlier
+`export`/`declare` counts as the matching flag (non-literal value refused); a
+git global option other than `-C`, `-c`, the `--git-dir`/`--work-tree`/
+`--namespace` forms and `--no-pager -P --bare --literal-pathspecs
+--no-optional-locks` is refused before a writer verb; a `-c alias.*` option is
+refused when any word names a writer; a quoted argument that is a git command
+line (`su -c`, `flock -c`, `ssh`, `parallel`) and `find -exec/-execdir/-ok/
+-okdir` with a writer are refused. Under an ARGUMENT_RUNNERS head, any `git`
+token plus a writer word in one argument is refused, as is a commit message
+that names both.
 
 A command naming more than TARGET_CAP (20) distinct canonical targets is an
 overflow the guard cannot scan within its git budget. Nothing is silently
@@ -155,7 +165,12 @@ FUNCTION_RE = re.compile(r"(?:^|[\s;&|(){}])function\s|[\w.:-]\s*\(\s*\)")
 QUOTED_GIT_RE = re.compile(
     r"(?m)(?:^|[;&|(])\s*(?:\S*/)?git\s|(?:^|\s)git\s+(?:-C|-c|--)"
 )
-CONTINUATION_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
+# Heads that run a quoted argument as a command line.
+ARGUMENT_RUNNERS = frozenset({
+    "flock", "su", "ssh", "tmux", "screen", "parallel", "script", "at", "watch",
+    "runuser", "sg", "systemd-run", "mosh",
+})
+GIT_TOKEN_RE = re.compile(r"(?<![\w.-])git(?![\w-])")
 FIND_EXEC_OPTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 WRITER_WORD_RE = re.compile(
     r"(?<![\w-])(?:" + "|".join(sorted(GIT_WRITE_SUBCOMMANDS)) + r")(?![\w-])"
@@ -760,11 +775,16 @@ def scan_raw(text):
     arith_paren = 0  # open '(' still needed to close a $(( ... )) we're in
     arith_bracket = 0  # open '[' still needed to close a $[ ... ] we're in
     i = 0
+    join_end = -1  # index just past the last backslash-newline join
     quote = None
     while i < n:
         c = text[i]
         if quote:
             if quote == '"' and c == "\\" and i + 1 < n:
+                if text[i + 1] == "\n":
+                    i += 2
+                    join_end = i
+                    continue
                 out.append(text[i : i + 2])
                 i += 2
                 continue
@@ -779,10 +799,15 @@ def scan_raw(text):
             i += 1
             continue
         if c == "\\" and i + 1 < n:
+            if text[i + 1] == "\n":  # the shell drops a backslash-newline
+                i += 2
+                join_end = i
+                continue
             out.append(text[i : i + 2])
             i += 2
             continue
-        if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+        prev = (out[-1][-1:] if out else "") if i == join_end else text[i - 1 : i]
+        if c == "#" and (prev == "" or prev in " \t\n;&|("):
             j = text.find("\n", i)
             i = n if j < 0 else j
             continue
@@ -1164,7 +1189,9 @@ def git_write_targets(words, home, unknown_cd=None, env=None):
                 return []
             opt, value, step = word, words[i + 1], 2
             if opt == "-c" and value.lower().startswith("alias."):
-                return [Unresolved(value)]
+                # an alias may expand to a writer; read-only verbs still pass
+                if any(WRITER_WORD_RE.search(w) for w in words[1:]):
+                    return [Unresolved(value)]
         elif word.startswith("-C") and len(word) > 2:
             opt, value, step = "-C", word[2:], 1
         elif word.startswith("--work-tree="):
@@ -1316,6 +1343,10 @@ def hidden_git_writer(words, home):
         return head
     if any(QUOTED_GIT_RE.search(w) and WRITER_WORD_RE.search(w) for w in words[1:]):
         return head
+    if name in ARGUMENT_RUNNERS and any(
+        GIT_TOKEN_RE.search(w) and WRITER_WORD_RE.search(w) for w in words[1:]
+    ):
+        return head
     if name == "find" and any(w in FIND_EXEC_OPTIONS for w in words[1:]):
         if "git" in text.lower() or "$" in text:
             return head
@@ -1412,9 +1443,6 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
     command, never narrowed (B-2)."""
     if depth > 1:
         return []
-    # The shell drops a backslash-newline before it splits words; an even
-    # backslash run before the newline is escaped backslashes, not a join.
-    command = CONTINUATION_RE.sub(r"\1", command)
     git_env = dict(git_env or {})
     cleaned, redirs = scan_raw(command)
     if outer_redirs:
