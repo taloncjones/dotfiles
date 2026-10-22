@@ -24,6 +24,6 @@ rules`. Then run
 invalid contract blocks the dispatch exactly like a missing plan.
 
 Write the validated pin with the task before dispatch. Preserve it on every
-status update. A later hash mismatch is an integrity halt; never silently
-re-pin. A deliberate contract change requires the user's task authorization
-and a fresh reviewed pin.
+status update. A later hash mismatch (`verify-contract` exit 4) is an
+integrity halt, never re-pinned by the director on its own. A deliberate
+contract change follows `references/auto-actions.md` (Contract re-pin).

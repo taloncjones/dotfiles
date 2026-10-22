@@ -13729,5 +13729,62 @@ for text in ("work-repository merge", "person-aimed post", "Jira write", "force 
     assert text in section, text
 PY
 
+check "docs: contract re-pin, todo split, delta round and carry-forward marker run without asking" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+def rd(name):
+    return open(d + name, encoding="utf-8").read()
+auto = rd("references/auto-actions.md")
+pin = rd("references/contract-pinning.md")
+kick = rd("references/kickoff.md")
+ship = rd("references/ship-carry-forward.md")
+assert "requires the user's task authorization" not in pin and "auto-actions.md" in pin
+assert "propose a split to the owner" not in kick and "auto-actions.md" in kick
+for text in ("Delta round (Recommended)", "a work repository asks the owner once",
+             "a work repository\nasks the owner with `AskUserQuestion`",
+             "a work repository asks the owner with `AskUserQuestion`"):
+    assert text not in ship, text
+assert "never dispatch a gate for that head" in ship
+for text in ("herdr-ship-brief: tier=delta", "herdr-ship-prior-handoff:",
+             "herdr-ship-delta-head:", "herdr-ship-delta-caps:"):
+    assert text in ship, text
+def sub(title):
+    start = auto.index("### " + title)
+    nxt = auto.find("\n#", start + 4)
+    return auto[start:nxt]
+for text in ("plan_artifacts", "herdr agent list", "--validate-only", "byte-for-byte",
+             "--kind contract", "--output-dir", "write-task", "review_head_sha: null",
+             "note-decision", "focus file", "diff -u", "not pinned"):
+    assert text in sub("Contract re-pin"), text
+for text in ("## Split plan", "word for word", "todos.sh list --all", "todos.sh new",
+             "--depends-on", "split from", "note-decision", "Reversal"):
+    assert text in sub("Todo split"), text
+for text in ("delta-class", "exit 0"):
+    assert text in sub("Delta round"), text
+for text in ("green evidence", "post guard", "posting.md", "posted co-review marker", "attempt"):
+    assert text in sub("Carry-forward marker"), text
+section = auto[auto.index("## Doc-rule actions"):auto.index("## Asks that stay")]
+for text in ("turn summary", "decision note", "before"):
+    assert text in section, text
+skill = rd("SKILL.md")
+assert len(skill.encode("utf-8")) <= 67000 and "Contract re-pin" in skill
+PY
+
+check "docs: an unexplained contract hash mismatch (verify-contract exit 4) stays an integrity halt" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+skill = open(d + "SKILL.md", encoding="utf-8").read()
+auto = open(d + "references/auto-actions.md", encoding="utf-8").read()
+flat = " ".join(skill.split())
+assert "or 4 (hash mismatch) is an integrity halt" in flat and "never re-pin to clear it" in flat
+start = auto.index("### Contract re-pin")
+sub = auto[start:auto.index("### Todo split")]
+for text in ("exit 4", "integrity halt", "interrupted", "Finish the re-pin",
+             "Restore the pinned contract", "herdr agent list"):
+    assert text in sub, text
+stay = auto[auto.index("## Asks that stay"):]
+assert "exit 4" in stay and "integrity halt" in stay
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
