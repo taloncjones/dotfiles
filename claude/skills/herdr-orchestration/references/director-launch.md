@@ -50,10 +50,12 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   (`zsh/claude-account.zsh`), which runs `claude --agent director
 --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' --permission-mode auto`
   through the account-routing wrapper and refuses outside a herdr pane.
-  When `caffeinate` is on PATH the launch runs under `caffeinate -i -w
-  <launch subshell pid>`, so the host does not idle-sleep for exactly the
-  life of the director (`-i` blocks idle sleep only, not lid-close or a
-  forced sleep).
+  When `caffeinate` is on PATH the launch runs under `caffeinate -is -w
+  <launch subshell pid>` for exactly the life of the director: `-i` blocks
+  idle sleep and `-s` blocks system sleep while the Mac runs on AC power.
+  On battery only idle sleep is blocked. A forced sleep still sleeps, and so
+  does a closed lid unless the Mac runs in clamshell mode (AC power and an
+  external display); the host-sleep re-gate rule below is the backstop.
   Auto mode is the documented launch; an explicit `--permission-mode`
   argument overrides it. Nothing in the director flow assumes a
   permission mode; the rollover hook runs in every mode.
