@@ -796,7 +796,22 @@ def _graphql_event(api: list[str], cwd: str) -> str | None:
         if state != "text":
             return "unknown"
         texts.append(text)
+        try:
+            texts.extend(_json_strings(json.loads(text)))
+        except ValueError:
+            pass
     return "unknown" if any(GRAPHQL_EVENT_RE.search(t) for t in texts) else None
+
+
+def _json_strings(node) -> list[str]:
+    """Every decoded string in a JSON value, keys included."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [t for k, v in node.items() for t in _json_strings(k) + _json_strings(v)]
+    if isinstance(node, list):
+        return [t for v in node for t in _json_strings(v)]
+    return []
 
 
 def review_event(args: list[str], cwd: str | None = None) -> str | None:
@@ -806,11 +821,14 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
         api = normalize_api_args(args[i + 1:]) or args[i + 1:]
-        path = re.split(r"[?#]", parse_api(api)[1] or "", maxsplit=1)[0]
+        raw_path = parse_api(api)[1] or ""
+        path = re.split(r"[?#]", raw_path, maxsplit=1)[0]
         if path == "graphql":
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
             return None
+        if path != raw_path:
+            return "unknown"
         values = [
             "@file" if typed and value.startswith("@") else value
             for typed, key, value in api_fields(api) if key == "event"
@@ -844,7 +862,7 @@ def pinned_review(args: list[str]) -> tuple[str, str, str, str, str | None] | No
     if api is None or input_path(api) is not None:
         return None
     method, path, host, has_field = parse_api(api)
-    hit = REVIEW_POST_PATH.fullmatch(re.split(r"[?#]", path or "", maxsplit=1)[0])
+    hit = REVIEW_POST_PATH.fullmatch(path or "")
     if (method or ("POST" if has_field else "GET")) != "POST" or not hit:
         return None
     shas = {value for _typed, key, value in api_fields(api) if key == "commit_id"}
@@ -1072,7 +1090,23 @@ def shown(text, question: str) -> bool:
     return len(question) <= SHOWN_LIMIT and " ".join(text.split()) in " ".join(question.split())
 
 
-def approval_problem(directory: Path, sid: str, digest: str, question: str, verb: str = "Post") -> str | None:
+def label_binding_problem(argv: list[str], label: str | None) -> str | None:
+    """Why an Approve or Request changes label does not name its draft's PR and
+    pinned head (`#<n>` and the first 7 characters of commit_id); None when it does."""
+    pin = pinned_review(argv)
+    if pin is None:
+        return "its review is not a pinned reviews call"
+    text = normalize_label(label or "")
+    if not re.search(rf"#{pin[2]}(?!\d)", text):
+        return f"its option must name the PR as `#{pin[2]}`"
+    if pin[3][:7] not in text.lower():
+        return f"its option must name the pinned head `{pin[3][:7]}`"
+    return None
+
+
+def approval_problem(
+    directory: Path, sid: str, digest: str, question: str, verb: str = "Post", label: str | None = None
+) -> str | None:
     """Why choosing the `verb` option for `draft <digest>` on `question` cannot approve the
     draft now; None when it can. Shared by the answer and the pre-check."""
     if not draft_path(directory, sid, digest, "pending").exists():
@@ -1095,6 +1129,10 @@ def approval_problem(directory: Path, sid: str, digest: str, question: str, verb
         return f"draft {digest} not approved: its review event cannot be read or pinned; register a pinned review"
     if needed != verb:
         return f"draft {digest} not approved: its option must start with `{needed}`, not `{verb}`"
+    if needed != "Post":
+        bound = label_binding_problem(record.get("argv") or [], label)
+        if bound:
+            return f"draft {digest} not approved: {bound}"
     if isinstance(record["text"], str) and len(record["text"]) > SHOWN_LIMIT:
         return (
             f"draft {digest} not approved: its text is over {SHOWN_LIMIT} characters; "
@@ -1113,10 +1151,12 @@ def approval_problem(directory: Path, sid: str, digest: str, question: str, verb
     return None
 
 
-def approve_draft(directory: Path, sid: str, digest: str, question: str, verb: str = "Post") -> str:
+def approve_draft(
+    directory: Path, sid: str, digest: str, question: str, verb: str = "Post", label: str | None = None
+) -> str:
     """Approve a pending draft the owner chose to post (spec R3 step 5);
     returns the context line."""
-    problem = approval_problem(directory, sid, digest, question, verb)
+    problem = approval_problem(directory, sid, digest, question, verb, label)
     if problem:
         return problem
     pending = draft_path(directory, sid, digest, "pending")
@@ -1344,6 +1384,7 @@ def handle_answer(payload: dict, directory: Path) -> str | None:
     if not isinstance(response, dict):
         return None
     decisions = answer_decisions(response)
+    answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
         decisions = [(verb, digest, question, why or "no valid session id", group)
@@ -1361,7 +1402,7 @@ def handle_answer(payload: dict, directory: Path) -> str | None:
         elif verb == "Skip":
             lines.append(dismiss_draft(directory, sid, digest))
         else:
-            line = approve_draft(directory, sid, digest, question, verb)
+            line = approve_draft(directory, sid, digest, question, verb, answers.get(question))
             lines.append(line)
             if line.startswith("approved draft"):
                 for other in group:
@@ -1453,7 +1494,7 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
             digest = digests[0]
             if verb == "Skip" or draft_path(directory, sid, digest, "approved").exists():
                 continue
-            problem = approval_problem(directory, sid, digest, text, verb)
+            problem = approval_problem(directory, sid, digest, text, verb, option['label'])
             if problem:
                 problems[(digest, text)] = problem
     if not problems:

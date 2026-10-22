@@ -57,7 +57,9 @@ leave the draft in the report.
 
 When a co-review finishes on a PR this account did not author, in a work or
 personal repository, the owner can leave a GitHub review whose event matches
-the verdict instead of a plain comment. `gh pr review --approve` approves
+the verdict instead of a plain comment. In a personal repository the shim posts
+a correctly pinned review without an owner answer, as it does for other posts
+there. `gh pr review --approve` approves
 whatever head is live when it runs, so the draft guard refuses it; the review
 goes through the reviews API with the gated head pinned.
 

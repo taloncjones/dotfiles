@@ -1444,6 +1444,22 @@ payload_alt s1 "$L_REVIEW" "$L_REVIEW" "$L_COMMENT" 'review text' | python3 "$HO
 expect_out "RE11 a later question naming the dismissed sibling cannot approve it" "post gate: draft $HC not decided (the question names more than one draft)" "$(payload_alt s1 "$L_COMMENT" "$L_REVIEW" "$L_COMMENT" 'review text')"
 expect_file "RE11 the sibling stays unapproved" "$GATE/s1.draft-$HC.approved" absent
 
+case_gate re14
+refused "RE14 draft registration refuses a reviews call with an event in the query string" "must be" api -X POST "repos/o/r/pulls/5/reviews?event=APPROVE&commit_id=$H40" -F body=@body.md
+case_gate re14b
+refused "RE14 and a reviews events call with an event in the query string" "must be" api -X POST "repos/o/r/pulls/5/reviews/9/events?event=APPROVE" -F body=@body.md
+case_gate re14c
+refused "RE14 and a reviews call with a fragment" "must be" api -X POST "repos/o/r/pulls/5/reviews#x" -f commit_id=$H40 -f event=APPROVE -F body=@body.md
+
+case_gate re15
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE15 an Approve label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Approve #6 at aaaaaaa with this text (draft $HR)" 'review text')"
+expect_file "RE15 the draft stays pending" "$GATE/s1.draft-$HR.pending" present
+expect_out "RE15 an Approve label naming another head is refused" "must name the pinned head \`aaaaaaa\`" "$(payload_a s1 "Approve #5 at bbbbbbb with this text (draft $HR)" 'review text')"
+expect_file "RE15 the draft still stays pending" "$GATE/s1.draft-$HR.pending" present
+HRC=$(reg $REVIEW_CHANGES)
+expect_out "RE15 a Request changes label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Request changes on #15 at aaaaaaa with this text (draft $HRC)" 'review text')"
+
 expect_py "RE12 review_event classifies each argv branch" ok '
 cases = [
     (["pr", "review", "5", "--approve", "-b", "x"], "approve"),
@@ -1468,6 +1484,9 @@ cases = [
     (["api", "graphql", "-f", "query=mutation { x(event: REQUEST_CHANGES) }"], "unknown"),
     (["api", "graphql", "-f", "query=mutation { x }"], None),
     ([], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews?event=APPROVE&commit_id=" + "a" * 40], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/9/events?event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews#frag", "-f", "event=COMMENT"], "unknown"),
 ]
 import json, os, tempfile
 d = tempfile.mkdtemp()
@@ -1476,6 +1495,9 @@ for name, body, want in (("a.json", {"event": "APPROVE"}, "approve"), ("c.json",
         json.dump(body, f)
     cases.append((["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", name], want))
 cases.append((["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", "missing.json"], "unknown"))
+with open(os.path.join(d, "g.json"), "w") as f:
+    f.write(json.dumps({"variables": {"e": "APPROVE"}}).replace("A", "\\u0041"))
+cases.append((["api", "graphql", "--input", "g.json"], "unknown"))
 bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
 print("ok" if not bad else bad)
 '
