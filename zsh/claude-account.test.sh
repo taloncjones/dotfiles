@@ -590,12 +590,12 @@ if [ "$rc" = 7 ]; then
 else
     fail "director returns claude's exit status (rc=$rc)"
 fi
-if [ "$(sed -n 1p "$CAFF")" = -i ] && [ "$(sed -n 2p "$CAFF")" = -w ] \
+if [ "$(sed -n 1p "$CAFF")" = -is ] && [ "$(sed -n 2p "$CAFF")" = -w ] \
     && [ "$(wc -l <"$CAFF" | tr -d ' ')" = 3 ] && grep -qx "$wpid" "$TMP/chain" \
     && [ "$wpid" != "$(cat "$TMP/top")" ]; then
-    pass "director binds caffeinate -i -w to the launch subshell"
+    pass "director binds caffeinate -is -w to the launch subshell"
 else
-    fail "director binds caffeinate -i -w to the launch subshell (caff='$(tr '\n' ' ' <"$CAFF")')"
+    fail "director binds caffeinate -is -w to the launch subshell (caff='$(tr '\n' ' ' <"$CAFF")')"
 fi
 
 # Without caffeinate on PATH: same argv, empty stderr, status propagated.
