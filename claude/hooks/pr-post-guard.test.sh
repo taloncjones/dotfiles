@@ -1535,6 +1535,7 @@ cases = [
     (["api", "HTTPS://API.GitHub.com/graphql", "-f", mut], "unknown"),
     (["api", "--hostname", "ghe.example.com", "https://ghe.example.com/graphql", "-f", mut], "unknown"),
     (["api", "graphql/", "-f", mut], "unknown"),
+    (["api", "https://ghe.example.com/api/graphql", "-f", mut], "unknown"),
     (["api", "/graphql", "-f", mut], "unknown"),
     (["api", "graphql?x=1", "-f", mut], "unknown"),
     (["api", "./graphql", "-f", mut], "unknown"),
