@@ -45,9 +45,10 @@ and refreshes the owner heartbeat while a task is active; without
 `confirm-completion`, `confirm-plan`, `dispatch-review`, `confirm-review`,
 `changes-requested`, `carry-review`, `stale-review-reset`, `blocked`, `unblocked`,
 `abandoned-candidate`, `mech-ledger`, `paused`, `failed`,
-`reprompt-stalled`, `exit-idle-worker`, `unknown`, `none`. `exit-idle-worker` ranks last and
-names housekeeping, not a status transition; it appends no event and does
-not change the watch vocabulary.
+`reprompt-stalled`, `exit-idle-worker`, `close-idle`, `unknown`, `none`.
+`exit-idle-worker` ranks before `ship`; `close-idle` ranks last of all. Both
+name housekeeping, not a status transition; neither appends an event or
+changes the watch vocabulary.
 
 `tasks/<task_id>.spend.jsonl` (the mech spend ledger, written by `$CORE
 run-mech`) is watched like the completion sidecars so an append wakes the
