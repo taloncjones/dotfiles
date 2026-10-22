@@ -263,8 +263,8 @@ record with `stop_recorded: {"launch_id": <done launch_id>, "ts": <done ts>}`
 (a `failed` that ends the task writes `status: failed`). The next check-in
 reports `exit-idle-worker`; a later stop has a new `ts` and needs a new record.
 
-`reprompt-stalled` means the current plan or implement worker has sat idle
-10 minutes with no done record. Read its pane, then reprompt it
+`reprompt-stalled` means the current plan or implement worker has sat idle for 10 minutes
+with no done record. Read its pane, then reprompt it
 (`references/dispatch-mechanism.md`).
 
 `exit-idle-worker` means a worker's agent is idle or done and its row is
@@ -315,7 +315,8 @@ launch (`retired_review_launch_ids`), and the next check-in reports
 **`carry-review`.** A `reviewed` task whose HEAD moved, with an approval that
 still verifies at its pin, reports `carry-review` ahead of
 `stale-review-reset`. Run it without asking, as a long background run; the
-command, exit codes and artifacts are in `references/ship-carry-forward.md`.
+command, exit codes and artifacts are in
+`references/ship-carry-forward.md` (Task review carry).
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
