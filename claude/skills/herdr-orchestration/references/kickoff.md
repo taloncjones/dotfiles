@@ -56,8 +56,9 @@ that list exists. When no contract is on disk, a todo with no
 rules below. Before writing (2), apply
 the plan-phase contract rules (references/brief-template.md): every command
 repo-local, deterministic, and worktree-safe (no STATE_ROOT
-writes, no machine-state mutation, no network, no secret echo), and at most
-32 commands. Every `verify-*` command must also be falsifiable (it passes
+writes, no machine-state mutation, no network, no secret echo), at most
+32 commands, and the `Scope and path checks` in references/contract-pinning.md
+(run-time merge-base, no commit literal). Every `verify-*` command must also be falsifiable (it passes
 once the stated fix lands); the appended `config.mech.contract_commands`
 regression commands are exempt. Falsifiability is observed, not judged, not
 just claimed: at least one `verify-*` command expected to fail until the
