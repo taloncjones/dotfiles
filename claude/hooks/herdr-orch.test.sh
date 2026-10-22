@@ -13786,5 +13786,368 @@ stay = auto[auto.index("## Asks that stay"):]
 assert "exit 4" in stay and "integrity halt" in stay
 PY
 
+# Real-repo fixture for the task-local review carry: a bare origin, main, a
+# branch with one commit reviewed at H, main advanced, then merged into the
+# branch. build() returns a dict; every carry check prefixes this with $LOAD.
+CARRY='import subprocess, hashlib, time
+GENV = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+            GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+def git(cwd, *a, check=True):
+    return subprocess.run(["git", "-C", cwd, *a], check=check, env=GENV,
+                          capture_output=True, text=True).stdout.strip()
+def put(cwd, name, text, msg):
+    open(os.path.join(cwd, name), "w").write(text)
+    git(cwd, "add", name); git(cwd, "commit", "-q", "-m", msg)
+def cli(fx, verb, *a):
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=fx["cfg"])
+    return subprocess.run(["python3", "claude/hooks/herdr_legacy_fixture.py", verb,
+                           "--repo-slug", "slug-x", *a], env=env,
+                          capture_output=True, text=True)
+def carry(fx):
+    return cli(fx, "carry-review", "--task-id", "PROJ-1", "--session", "S",
+               "--fence", fx["fence"])
+def build(contract_run="exit 0", merge="clean"):
+    cfg = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = cfg
+    root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+    tmp = tempfile.mkdtemp(); origin = tmp + "/origin.git"; wt = tmp + "/wt"; other = tmp + "/other"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True, env=GENV)
+    subprocess.run(["git", "clone", "-q", origin, wt], check=True, env=GENV, capture_output=True)
+    git(wt, "checkout", "-q", "-b", "main")
+    put(wt, ".gitignore", "claude/contracts/\n", "ignore"); put(wt, "a.txt", "a\n", "a")
+    git(wt, "push", "-q", "-u", "origin", "main"); base = git(wt, "rev-parse", "HEAD")
+    git(wt, "checkout", "-q", "-b", "feat"); put(wt, "a.txt", "branch\n", "branch work")
+    H = git(wt, "rev-parse", "HEAD")
+    os.makedirs(wt + "/claude/contracts")
+    rd = str(c.repo_dir("slug-x"))
+    contract_run = contract_run.replace("{TASK}", rd + "/tasks/PROJ-1.json").replace("{TMP}", tmp)
+    contract = json.dumps({"v": 1, "task_id": "PROJ-1", "commands": [
+        {"name": "c", "run": contract_run, "timeout_secs": 60}]})
+    open(wt + "/claude/contracts/c.json", "w").write(contract)
+    subprocess.run(["git", "clone", "-q", origin, other], check=True, env=GENV, capture_output=True)
+    if merge == "clean":
+        put(other, "c.txt", "c\n", "main work")
+    elif merge == "conflict":
+        put(other, "a.txt", "main\n", "main work")
+    if merge != "none":
+        git(other, "push", "-q", "origin", "main"); git(wt, "fetch", "-q", "origin")
+        git(wt, "merge", "--no-edit", "origin/main", check=False)
+        if git(wt, "diff", "--name-only", "--diff-filter=U"):
+            put(wt, "a.txt", "resolved\n", "resolve")
+    findings = os.path.join(root, "findings.md")
+    open(findings, "w").write("No findings. Inspected: fixture.\n")
+    digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+    impl = {"phase": "implement", "workspace_id": "w2", "runtime": "claude",
+            "launch_id": "I1", "pane_id": "pane0", "source_head_sha": base}
+    row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+           "launch_id": "L1", "pane_id": "pane1", "source_head_sha": H}
+    done = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+                blocking_count=0, findings_ref=findings, findings_sha256=digest)
+    task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": base,
+            "base_ref": "origin/main", "review_head_sha": H, "worktree": wt,
+            "workers": [impl, row], "contract_path": "claude/contracts/c.json",
+            "contract_sha256": hashlib.sha256(contract.encode()).hexdigest()}
+    fx = {"cfg": cfg, "wt": wt, "origin": origin, "other": other, "H": H, "base": base,
+          "rd": rd, "tmp": tmp, "task": task, "done": done}
+    fx["fence"] = cli(fx, "claim-owner", "--session", "S", "--host", "h", "--pid", "1").stdout.strip()
+    r = cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S", "--fence", fx["fence"],
+            "--json", json.dumps(task))
+    assert r.returncode == 0, r.stderr
+    open(fx["rd"] + "/tasks/PROJ-1.review.json", "w").write(json.dumps(done))
+    return fx
+def task_file(fx):
+    return open(fx["rd"] + "/tasks/PROJ-1.json").read()
+def facts(fx):
+    poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+    return c.checkin_facts(fx["rd"], json.loads(task_file(fx)), poll, c.state_root().parent)
+'
+
+check "checkin_action: carry-review outranks stale-review-reset only for a due carry" <<PY
+$LOAD
+base = dict(status="reviewed", poll_ok=True, live="idle", worktree_exists=True,
+            head="b" * 40, completed=False, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=True, review_at_head=False,
+            review_pin_orphaned=False, dispatch_review=False, mech_unsettled=False,
+            plan_advanced=True, done_outcome=None, idle_settled=False, ship_pending=True)
+assert c.checkin_action({**base, "review_carry_due": True}) == "carry-review"
+assert c.checkin_action({**base, "review_carry_due": False}) == "stale-review-reset"
+assert c.checkin_action(base) == "stale-review-reset"
+# Only an approved, parked-in-reviewed task carries; an orphaned pin still resets.
+assert c.checkin_action({**base, "status": "completed", "review_carry_due": False,
+                         "review_pin_orphaned": True}) == "stale-review-reset"
+names = [n for n, _ in c.checkin_rules({})]
+assert names.index("carry-review") + 1 == names.index("stale-review-reset"), names
+assert c.NEXT_ACTIONS["carry-review"][0] == "read", c.NEXT_ACTIONS["carry-review"]
+assert "carry-review" not in c.POLL_RULES
+PY
+
+check "is_reviewed: a carried head verifies only through a matching review_carry" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+H, M, X = "a" * 40, "b" * 40, "c" * 40
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L1", "pane_id": "pane1", "source_head_sha": H}
+done = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+carry = {"reviewed_head_sha": H, "head": M, "from_pin": H, "review_launch_id": "L1"}
+task = {"task_id": "PROJ-1", "status": "reviewed", "review_head_sha": M,
+        "workers": [row], "review_carry": carry}
+assert c.is_reviewed(task, done, M, "w3") is True
+assert c.is_reviewed(dict(task, review_carry=None), done, M, "w3") is False
+assert c.is_reviewed({k: v for k, v in task.items() if k != "review_carry"}, done, M, "w3") is False
+assert c.is_reviewed(dict(task, review_carry=dict(carry, head=X)), done, M, "w3") is False
+assert c.is_reviewed(dict(task, review_carry=dict(carry, reviewed_head_sha=X)), done, M, "w3") is False
+assert c.is_reviewed(dict(task, review_carry=dict(carry, review_launch_id="L0")), done, M, "w3") is False
+assert c.is_reviewed(dict(task, retired_review_launch_ids=["L1"]), done, M, "w3") is False
+assert c.is_reviewed(task, dict(done, outcome="changes-requested"), M, "w3") is False
+assert c.is_reviewed(task, dict(done, blocking_count=1), M, "w3") is False
+assert c.is_reviewed(task, done, X, "w3") is False
+assert c.is_reviewed(dict(task, review_head_sha=H, review_carry=None), done, H, "w3") is True
+PY
+
+check "checkin: a carried head never reports stale-review-reset" <<PY
+$LOAD
+$CARRY
+fx = build()
+f = facts(fx)
+assert f["action"] == "carry-review", f["action"]
+assert f["review_carry_due"] is True and f["reviewed"] is False, f
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+f = facts(fx)
+assert f["action"] == "ship", f["action"]
+assert f["reviewed"] is True, f
+head = git(fx["wt"], "rev-parse", "HEAD")
+r = cli(fx, "confirm-review", "--task-id", "PROJ-1", "--workspace", "w3", "--head-sha", head)
+assert r.returncode == 0, (r.returncode, r.stderr)
+PY
+
+check "carry-review: a clean main merge keeps the approval at the new head" <<PY
+$LOAD
+$CARRY
+fx = build()
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+out = json.loads(r.stdout)
+head = git(fx["wt"], "rev-parse", "HEAD")
+task = json.loads(task_file(fx))
+rc = task["review_carry"]
+assert task["review_head_sha"] == head and rc["head"] == head and out["outcome"] == "carried"
+assert rc["reviewed_head_sha"] == fx["H"] and rc["from_pin"] == fx["H"]
+assert rc["review_launch_id"] == "L1" and rc["upstream"] == "origin/main"
+assert rc["contract_sha256"] == task["contract_sha256"] and rc["contract_exit"] == 0
+for key in ("upstream_sha", "new_base", "audit", "audit_sha256", "ts"):
+    assert rc[key], key
+assert "retired_review_launch_ids" not in task and task["status"] == "reviewed"
+audit_bytes = open(rc["audit"], "rb").read()
+assert hashlib.sha256(audit_bytes).hexdigest() == rc["audit_sha256"] == out["audit_sha256"]
+audit = json.loads(audit_bytes)
+assert audit["outcome"] == "carried" and audit["head"] == head and audit["proof"]["pass"] is True
+assert audit["contract"]["exit"] == 0 and "PASS 1 commands" in audit["contract"]["output_tail"]
+PY
+
+check "carry-review: a conflicted main merge resets the task for a fresh review" <<PY
+$LOAD
+$CARRY
+fx = build(merge="conflict")
+r = carry(fx)
+assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+assert task["status"] == "completed" and task["review_head_sha"] is None, task
+assert "review_carry" not in task and task["retired_review_launch_ids"] == ["L1"], task
+assert facts(fx)["action"] == "dispatch-review"
+audit = json.load(open(fx["rd"] + "/artifacts/PROJ-1/review-carry/%s.json" % json.loads(r.stdout)["head"]))
+assert audit["outcome"] == "refused" and audit["contract"]["exit"] is None, audit
+PY
+
+check "carry-review: a branch-authored commit after the approval resets the task" <<PY
+$LOAD
+$CARRY
+fx = build()
+put(fx["wt"], "d.txt", "d\n", "more branch work")
+r = carry(fx)
+assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+assert task["status"] == "completed" and task["review_head_sha"] is None, task
+assert "branch-authored" in json.loads(r.stdout)["reasons"][0]
+assert facts(fx)["action"] == "dispatch-review"
+PY
+
+check "carry-review: a failing contract resets the task for a fresh review" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="echo contract-said-no; exit 1")
+r = carry(fx)
+assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+assert task["status"] == "completed" and task["review_head_sha"] is None, task
+assert task["retired_review_launch_ids"] == ["L1"] and facts(fx)["action"] == "dispatch-review"
+audit = json.load(open(json.loads(r.stdout)["audit"]))
+assert audit["contract"]["exit"] == 1 and "contract-said-no" in audit["contract"]["output_tail"]
+assert audit["contract"]["contract_sha256"] == task["contract_sha256"]
+PY
+
+check "carry-review: a head that moves during the contract run writes nothing" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="git -c user.email=t@t -c user.name=t commit --allow-empty -q -m moved")
+before = task_file(fx)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+PY
+
+check "carry-review: a second main merge carries from the reviewed head" <<PY
+$LOAD
+$CARRY
+fx = build()
+assert carry(fx).returncode == 0
+m1 = git(fx["wt"], "rev-parse", "HEAD")
+put(fx["other"], "e.txt", "e\n", "more main work")
+git(fx["other"], "push", "-q", "origin", "main"); git(fx["wt"], "fetch", "-q", "origin")
+git(fx["wt"], "merge", "--no-edit", "origin/main")
+m2 = git(fx["wt"], "rev-parse", "HEAD")
+f = facts(fx)
+assert f["review_carry_due"] is True and f["action"] == "carry-review", f
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+rc = task["review_carry"]
+assert task["review_head_sha"] == m2 and rc["head"] == m2 and rc["from_pin"] == m1
+assert rc["reviewed_head_sha"] == fx["H"], rc
+for sha in (m1, m2):
+    assert os.path.isfile(fx["rd"] + "/artifacts/PROJ-1/review-carry/%s.json" % sha)
+assert facts(fx)["action"] == "ship"
+PY
+
+check "write-task: review_carry is inherited, never changed, and dropped on a re-pin" <<PY
+$LOAD
+$CARRY
+fx = build()
+assert carry(fx).returncode == 0
+task = json.loads(task_file(fx))
+def write(rec):
+    return cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+               "--fence", fx["fence"], "--json", json.dumps(rec))
+omitted = {k: v for k, v in task.items() if k != "review_carry"}
+assert write(omitted).returncode == 0
+assert json.loads(task_file(fx))["review_carry"] == task["review_carry"]
+assert write(task).returncode == 0
+before = task_file(fx)
+for bad in (dict(task, review_carry=None), dict(task, review_carry=dict(task["review_carry"], head="f" * 40))):
+    r = write(bad)
+    assert r.returncode == 2 and "carry-review" in r.stderr, (r.returncode, r.stderr)
+assert task_file(fx) == before
+r = write(dict(omitted, review_head_sha="f" * 40, review_carry=task["review_carry"]))
+assert r.returncode == 0, r.stderr
+assert "review_carry" not in json.loads(task_file(fx))
+fresh = {k: v for k, v in task.items() if k != "review_carry"}
+r = cli(fx, "reset-task", "--task-id", "PROJ-1", "--new-task-id", "PROJ-2", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(dict(fresh, task_id="PROJ-2", workers=[], review_carry={})))
+assert r.returncode == 2 and "carry-review" in r.stderr, (r.returncode, r.stderr)
+PY
+
+check "carry-review: a task changed during the run writes nothing" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="printf '\n' >> {TASK}")
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx).endswith("\n\n")
+assert "review_carry" not in json.loads(task_file(fx))
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+PY
+
+check "carry-review: a tree the contract dirties writes nothing" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="echo x > stray.txt")
+before = task_file(fx)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+PY
+
+check "carry-review: a held run lock writes nothing" <<PY
+$LOAD
+$CARRY
+import fcntl
+fx = build()
+before = task_file(fx)
+os.makedirs(fx["rd"] + "/artifacts/PROJ-1", exist_ok=True)
+fd = os.open(fx["rd"] + "/artifacts/PROJ-1/review-carry.lock", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+os.close(fd)
+assert carry(fx).returncode == 0
+PY
+
+check "carry-review: a contract command left by a killed run holds the run lock" <<PY
+$LOAD
+$CARRY
+import signal
+fx = build(contract_run="[ -e {TMP}/go ] && exit 0; echo \$\$ > {TMP}/pid; sleep 60")
+before = task_file(fx)
+env = dict(os.environ, CLAUDE_CONFIG_DIR=fx["cfg"])
+verb = subprocess.Popen(["python3", "claude/hooks/herdr_legacy_fixture.py", "carry-review",
+                         "--repo-slug", "slug-x", "--task-id", "PROJ-1", "--session", "S",
+                         "--fence", fx["fence"]], env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for _ in range(300):
+    if os.path.exists(fx["tmp"] + "/pid"):
+        break
+    time.sleep(0.1)
+pid = int(open(fx["tmp"] + "/pid").read())
+verb.kill(); verb.wait()
+os.kill(pid, 0)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+os.killpg(pid, signal.SIGKILL)
+open(fx["tmp"] + "/go", "w").close()
+for _ in range(100):
+    r = carry(fx)
+    if r.returncode != 4:
+        break
+    time.sleep(0.1)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+PY
+
+check "run_contract_commands: an interrupted run kills the running command group" <<PY
+$LOAD
+import signal, time
+tmp = tempfile.mkdtemp()
+cmds = [{"name": "hang", "run": "echo \$\$ > %s/pid; sleep 60" % tmp, "timeout_secs": 60}]
+def boom(signum, frame):
+    raise RuntimeError("interrupted")
+signal.signal(signal.SIGALRM, boom)
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+with tempfile.TemporaryFile("w+") as log:
+    try:
+        c.run_contract_commands(cmds, tmp, output=log)
+        raise AssertionError("expected the interrupt")
+    except RuntimeError:
+        pass
+pid = int(open(tmp + "/pid").read())
+for _ in range(50):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        break
+    time.sleep(0.1)
+else:
+    raise AssertionError("the command group survived the interrupt")
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

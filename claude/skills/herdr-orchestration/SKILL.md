@@ -308,6 +308,20 @@ null` and the status unchanged. That write retires the latest review
 launch (`retired_review_launch_ids`), and the next check-in reports
 `dispatch-review`; run section 5's `dispatch-gate` again.
 
+**`carry-review`.** A `reviewed` task whose HEAD moved, with an approval that
+still verifies at its pin, reports `carry-review` ahead of
+`stale-review-reset`. Run `$CORE carry-review --repo-slug <slug> --task-id <id>
+--session <s> --fence <f>` without asking, as a long background run (it runs
+the pinned contract; wait on the `EXIT` line), and start no second run for a
+task while one runs. It proves every commit since the reviewed head is a clean
+main merge, runs the contract at HEAD, and records the proof in
+`artifacts/<task>/review-carry/`. Exit 0: re-pinned at HEAD with
+`review_carry`; the next check-in reports `ship`. Exit 3: the task is reset as
+the stale-verdict reset does and the next check-in reports `dispatch-review`.
+Exit 4: nothing written; for a held lock wait for the earlier run, else the
+next check-in offers it again, and repeated exit 4 goes to the user. Exit 2:
+integrity halt; surface it.
+
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
 TURN. No polling while idle, no periodic "still waiting" check-ins, no
@@ -840,6 +854,8 @@ too.
 | completed                                    | human/orch dispatch (guard: not already dispatched for this `review_head_sha`)                                                                                                                         | `review-dispatched`                            | review-dispatched       | no        |
 | review-dispatched                            | exact review evidence at dispatched/live HEAD: `outcome: changes-requested`, blockers, or incomplete evidence (including a sized-review-deadline stop, then the section 5 step 6 re-dispatch question) | `changes-requested`                            | changes-requested       | no        |
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
+| reviewed                                     | approval valid at `review_head_sha`; HEAD past it only by clean main merges (`carry-review` exit 0)                                                                                                    | (carry: re-pin at HEAD, set `review_carry`)    | reviewed                | no        |
+| reviewed                                     | `carry-review` exit 3 (conflicted merge, branch commit or failing contract)                                                                                                                            | (stale: clear `review_head_sha`)               | completed               | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
 | reviewed                                     | `merge-authority` human: one `AskUserQuestion` merge prompt, then section 6a; `/post-merge`                                                                                                            | `merged`                                       | merged                  | yes       |
