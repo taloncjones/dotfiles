@@ -774,6 +774,17 @@ class GateReportTests(unittest.TestCase):
              "seat codex runner status is not success"],
         )
 
+    def test_parsed_limit_seat_reports_usage_limit_reason(self):
+        # Real runner output: _fail_usage_limit moves the notice into errors.
+        runner = gate._load_runner()
+        stdout = json.dumps({"type": "result", "is_error": False, "result": LIMIT_NOTICE})
+        parsed = runner.parse_runtime_result("claude", stdout)
+        self.assertEqual((parsed["status"], parsed["result"]), ("error", None))
+        reasons = []
+        gate._seat_content_ok(json.dumps(parsed).encode(), "claude.runtime.json",
+                              "claude", reasons)
+        self.assertIn("seat claude result is a usage-limit refusal", reasons)
+
     def test_failed_runner_seat_is_incomplete(self):
         body = json.dumps({"runtime": "codex", "status": "error",
                            "result": None, "errors": ["boom"]})

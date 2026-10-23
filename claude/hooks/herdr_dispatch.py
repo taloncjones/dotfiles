@@ -2314,16 +2314,49 @@ def _gate_incomplete(phase, task_id, step, detail, **extra):
             "detail": str(detail)[:200], **extra}
 
 
+INFRA_RERUN_LIMIT = 2
+
+
+def _infra_budget(task, phase, head, infra_rerun, owner_approved):
+    """The infra_reruns map to write for a counted re-run, or None; refuses a spent budget."""
+    reruns = task.get("infra_reruns") if isinstance(task.get("infra_reruns"), dict) else {}
+    entry = reruns.get(phase) if isinstance(reruns.get(phase), dict) else {}
+    seen = entry.get("count") if entry.get("head") == head and isinstance(entry.get("count"), int) else 0
+    if owner_approved:
+        return None
+    if seen >= INFRA_RERUN_LIMIT:
+        raise DispatchError(
+            f"infrastructure re-run budget spent for the {phase} gate at this head; "
+            "ask the owner, then pass --owner-approved")
+    if not infra_rerun:
+        return None
+    return {**reruns, phase: {"head": head, "count": seen + 1}}
+
+
+def _is_deadline_stop(task, head):
+    """A review stopped at its deadline: changes-requested at HEAD, latest review launch retired."""
+    latest = _last_row(task, "review")
+    return (task.get("status") == "changes-requested" and task.get("review_head_sha") == head
+            and latest is not None
+            and latest.get("launch_id") in (task.get("retired_review_launch_ids") or []))
+
+
 def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
-                          focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
+                          focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env,
+                          infra_rerun=False, owner_approved=False):
+    _infra_budget(task, "review", head, infra_rerun, owner_approved)
     if tier or prior_handoff:
         raise DispatchError("--tier and --prior-handoff apply to the ship gate only")
     worktree = task.get("worktree") or ""
-    _core_ok("should-dispatch-review", "--task-id", task_id, "--head-sha", head, ctx=ctx)
-    if task.get("review_head_sha"):
-        # launch() runs before the new pin is written; a kept pin would retire
-        # the fresh reviewer as the prior pin's review.
-        raise DispatchError("review_head_sha is set; clear it (stale-review-reset) first")
+    if infra_rerun:
+        if not _is_deadline_stop(task, head):
+            raise DispatchError("--infra-rerun needs a review stopped at its deadline at this head")
+    else:
+        _core_ok("should-dispatch-review", "--task-id", task_id, "--head-sha", head, ctx=ctx)
+        if task.get("review_head_sha"):
+            # launch() runs before the new pin is written; a kept pin would retire
+            # the fresh reviewer as the prior pin's review.
+            raise DispatchError("review_head_sha is set; clear it (stale-review-reset) first")
     porcelain = core._git(worktree, "status", "--porcelain")
     if porcelain is None or porcelain:
         raise DispatchError("worktree is dirty")
@@ -2353,6 +2386,19 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
     if live:
         return _gate_incomplete("review", task_id, "sweep",
                                 "a review row is still live: " + ", ".join(map(str, live)))
+    if infra_rerun:
+        # The sweep rewrites the record, so re-read it before the combined write.
+        current = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+        if not _is_deadline_stop(current, head):
+            raise DispatchError("--infra-rerun needs a review stopped at its deadline at this head")
+        reruns = _infra_budget(current, "review", head, True, False)
+        record = {**current, "status": "completed", "review_head_sha": None,
+                  "infra_reruns": reruns}
+        ok, detail = _core_step("write-task", "--task-id", task_id, "--present",
+                                "--session", session, "--fence", str(fence),
+                                "--json", json.dumps(record), ctx=ctx)
+        if not ok:
+            return _gate_incomplete("review", task_id, "write-task", detail)
     ok, rendered = _core_step("render-brief", "--task-id", task_id, "--phase", "review",
                               "--focus-file", str(focus_file), ctx=ctx)
     if not ok:
@@ -2399,7 +2445,8 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
 
 
 def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fence,
-                        focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env):
+                        focus_file, tier, prior_handoff, runtime, personal, herdr_cli, env,
+                        infra_rerun=False, owner_approved=False):
     if runtime != "claude":
         raise DispatchError("the ship gate runs on the claude runtime")
     if task.get("status") != "reviewed" or task.get("review_head_sha") != head:
@@ -2426,8 +2473,16 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
         launch_dir = core.ship_launch_dir(rd, task_id, pinned_id)
         handoff = core.read_ship_handoff(launch_dir, pinned_id) if launch_dir is not None else None
         stopped = handoff is None
+    for other in task.get("workers", []):
+        if (not isinstance(other, dict) or other.get("phase") != "ship"
+                or other.get("launch_id") == pinned_id or other.get("status") == "settled"):
+            continue
+        state, record = _row_agent(herdr_cli, other, env)
+        if state == "unknown" or (state == "present" and record.get("agent_status") == "working"):
+            raise DispatchError("a ship agent may still be running (an unpinned ship row)")
+    reruns = _infra_budget(task, "ship", head, infra_rerun, owner_approved)
     if stopped:
-        if task.get("ship_relaunch_head") == task["review_head_sha"]:
+        if not owner_approved and task.get("ship_relaunch_head") == task["review_head_sha"]:
             raise DispatchError("relaunch budget spent for this head; park the task")
         if tier == "delta":
             raise DispatchError("a stopped-run relaunch is a full gate; drop --tier delta")
@@ -2445,8 +2500,12 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
     if not ok:
         return _gate_incomplete("ship", task_id, "render-brief", rendered)
     brief = json.loads(rendered)
-    if stopped:
-        record = {**task, "ship_relaunch_head": task["review_head_sha"]}
+    if stopped or reruns is not None:
+        record = dict(task)
+        if stopped:
+            record["ship_relaunch_head"] = task["review_head_sha"]
+        if reruns is not None:
+            record["infra_reruns"] = reruns
         ok, detail = _core_step("write-task", "--task-id", task_id, *fenced,
                                 "--json", json.dumps(record), ctx=ctx)
         if not ok:
@@ -2489,8 +2548,11 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
 
 
 def dispatch_gate(*, repo_slug, repo_path, runtime, task_id, session, fence, phase, focus_file,
-                  tier=None, prior_handoff=None, personal=False, herdr_cli="herdr", env=None):
+                  tier=None, prior_handoff=None, personal=False, herdr_cli="herdr", env=None,
+                  infra_rerun=False, owner_approved=False):
     """Dispatch or re-dispatch a review or ship gate (references/dispatch-adapter.md)."""
+    if infra_rerun and owner_approved:
+        raise DispatchError("--infra-rerun and --owner-approved are mutually exclusive")
     if not core.valid_task_id(task_id):
         raise DispatchError("invalid task identity")
     gates = {"review": _dispatch_review_gate, "ship": _dispatch_ship_gate}
@@ -2506,10 +2568,17 @@ def dispatch_gate(*, repo_slug, repo_path, runtime, task_id, session, fence, pha
     head = core._git(task.get("worktree") or "", "rev-parse", "HEAD")
     if not head:
         raise DispatchError("cannot read the task worktree HEAD")
-    return gates[phase](ctx=ctx, rd=rd, task=task, head=head, repo_slug=repo_slug,
-                        task_id=task_id, session=session, fence=fence, focus_file=focus_file,
-                        tier=tier, prior_handoff=prior_handoff, runtime=runtime,
-                        personal=personal, herdr_cli=herdr_cli, env=child_env)
+    result = gates[phase](ctx=ctx, rd=rd, task=task, head=head, repo_slug=repo_slug,
+                          task_id=task_id, session=session, fence=fence, focus_file=focus_file,
+                          tier=tier, prior_handoff=prior_handoff, runtime=runtime,
+                          personal=personal, herdr_cli=herdr_cli, env=child_env,
+                          infra_rerun=infra_rerun, owner_approved=owner_approved)
+    if infra_rerun:
+        fresh = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+        entry = (fresh.get("infra_reruns") or {}).get(phase) or {}
+        if entry.get("head") == head:
+            result["infra_rerun"] = {"phase": phase, "head": head, "count": entry.get("count")}
+    return result
 
 
 def runtime_main(argv: list[str] | None = None) -> int:

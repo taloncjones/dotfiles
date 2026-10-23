@@ -54,14 +54,14 @@ is the staging tier, not an archive.
   the target's .gitignore covers it instead of calling it "untracked".
 - (2026-09) Never brief a Claude substitute on a recorded Codex quota premise:
   run one live Codex probe first; a stale exhaustion note cost two real seats.
-- (2026-09) Run a test you expect to fail with retries off (`--reruns 0` or the
-  equivalent): a rerun plugin in ini addopts turns a red mutation check green.
+- (2026-10) Mutation check: copy the whole tree, run `--reruns 0`, print the
+  mutated module's `__file__`, and confirm the mutation is not clamped away.
 - (2026-10) Poll `gh run view` when `gh run watch` dies on a transient API
   error; a dead watch is not a failed run.
 - (2026-10) Launch each review seat as its own detached job and poll its result
   file; one shared background wrapper loses every seat at its tool limit.
-- (2026-10) Build a scratch or mutation copy from the whole tree (`git archive`
-  or a detached worktree); a partial `cp` misses the files a test imports.
+- (2026-10) Re-pin the task contract in the same step as any base change or
+  behavior-changing owner decision; a stale pin stalls verify-contract.
 - (2026-10) Re-grep anchors after a Markdown Write/Edit: the formatter reflows.
 - (2026-10) Never pass `-c commit.gpgsign=false`; a locked signer means pause.
 - (2026-10) A suite outside the brief that fails in a worker pane: rerun it on

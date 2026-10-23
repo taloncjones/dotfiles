@@ -50,10 +50,12 @@ on every `gh`-mentioning Bash call from it, including read-only queries.
   (`zsh/claude-account.zsh`), which runs `claude --agent director
 --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' --permission-mode auto`
   through the account-routing wrapper and refuses outside a herdr pane.
-  When `caffeinate` is on PATH the launch runs under `caffeinate -i -w
-  <launch subshell pid>`, so the host does not idle-sleep for exactly the
-  life of the director (`-i` blocks idle sleep only, not lid-close or a
-  forced sleep).
+  When `caffeinate` is on PATH the launch runs under `caffeinate -is -w
+  <launch subshell pid>` for exactly the life of the director: `-i` blocks
+  idle sleep and `-s` blocks system sleep while the Mac runs on AC power.
+  On battery only idle sleep is blocked. A forced sleep still sleeps, and so
+  does a closed lid unless the Mac runs in clamshell mode (AC power and an
+  external display); the host-sleep re-gate rule below is the backstop.
   Auto mode is the documented launch; an explicit `--permission-mode`
   argument overrides it. Nothing in the director flow assumes a
   permission mode; the rollover hook runs in every mode.
@@ -119,8 +121,8 @@ acknowledgement, cleared only by a later `sent` push; without a messaging
 socket every record reads `unsent`, because the Monitor watch is the wake
 path there. The backstop also exits with
 `owner: lost` when another process holds the lease; and with
-`owner: holder-gone` when it can no longer see this session's process as
-its ancestor.
+`owner: holder-gone` when this session's process is gone or fails two
+ancestry checks a few seconds apart.
 
 ## Monitor watch when the socket is unset (section 1 step 7)
 
@@ -151,14 +153,8 @@ Rules:
 
 ## Host-sleep re-gate (section 6a step 0)
 
-Host-sleep re-gate (owner standing request, 2026-10-12): treat an
-`INCOMPLETE` handoff as if the human asked for a re-gate, with the same
-`write-task`, only when all of these hold: (a) the task's live HEAD
-equals the gate's reviewed head; (b) the gate's ship launch `started_ns`
-(Unix nanoseconds) divided by 1000000000 is earlier than the `sec` field
-of `sysctl -n kern.waketime` (seconds); (c) every report reason
-is `seat <name> runner status is not success`, and each named seat's
-runner JSON has `timed_out: true` and a file write time at or after that
-wake. Anything else waits for the human: any other reason, a seat that
-failed without `timed_out`, a seat result written before the wake, or an
-unreadable wake time, launch time or seat result.
+Host sleep is one infrastructure loss among several. A ship gate whose
+seats timed out, returned no output or died with the host re-runs without
+asking, at most twice per gate per head: see `references/auto-actions.md`.
+The wake-time comparison (`sysctl -n kern.waketime`) is no longer needed to
+qualify.

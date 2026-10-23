@@ -178,7 +178,7 @@ function claude() {    # claude() will launch Claude Code with the work account 
     fi
 }
 
-function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(), under caffeinate -i when available. ex: $ director
+function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(), under caffeinate -is when available. ex: $ director
     emulate -L zsh
     if [[ "${HERDR_ENV:-}" != 1 ]]; then
         echo "[X] director: run inside a herdr pane (HERDR_ENV is not 1)." >&2
@@ -203,10 +203,13 @@ function director() {    # director() launches the herdr director with inbound m
         guard=(--allowedTools 'Read(/**)' 'Edit(/**)' 'Read(~/.herdr/worktrees/dotfiles/**)' 'Edit(~/.herdr/worktrees/dotfiles/**)')
     fi
     (
+        # -i blocks idle sleep; -s blocks system sleep, but only on AC power.
+        # A closed lid still sleeps unless the Mac runs in clamshell mode
+        # (AC power and an external display).
         if (( $+commands[caffeinate] )); then
             zmodload zsh/system
             local launcher=$sysparams[pid]
-            caffeinate -i -w "$launcher" &!
+            caffeinate -is -w "$launcher" &!
         fi
         claude --agent director "${guard[@]}" --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "$@"
     )

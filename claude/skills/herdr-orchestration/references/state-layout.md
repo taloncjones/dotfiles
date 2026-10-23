@@ -574,6 +574,15 @@ A write that changes a non-null `review_head_sha` retires the latest
 review launch on its own. The director adds the stopped launch at a
 sized-deadline stop. Bound `write-task` and `reset-task` refuse the key.
 
+`review_carry` (launcher scope) is written only by `carry-review`: it holds
+`reviewed_head_sha`, `head`, `from_pin`, `review_launch_id`, `upstream`,
+`upstream_sha`, `new_base`, `contract_sha256`, `contract_exit`, `audit`,
+`audit_sha256` and `ts`. `is_reviewed` accepts a review record whose head and
+launch it names when `head` equals `review_head_sha`. `write-task` inherits it
+when omitted, refuses a changed value, and drops it when the pin changes. The
+audit file is `artifacts/<task_id>/review-carry/<head>.json`, one per proved
+head, read by no decision.
+
 `stop_recorded` (`{"launch_id", "ts"}`, or absent) names the done record of
 a paused or failed plan or implement attempt the director has recorded.
 While it equals the current done record's `launch_id` and `ts`, check-in

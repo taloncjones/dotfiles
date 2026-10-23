@@ -185,14 +185,26 @@ labelled.
 
 ## Gate dispatch (sections 5 and 6)
 
-`python3 "$DISPATCH" dispatch-gate --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> [--personal] --session <id> --fence <fence> --task-id <task> --phase review|ship --focus-file <file> [--tier full|delta] [--prior-handoff <ship.json>]`
+`python3 "$DISPATCH" dispatch-gate --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> [--personal] --session <id> --fence <fence> --task-id <task> --phase review|ship --focus-file <file> [--tier full|delta] [--prior-handoff <ship.json>] [--infra-rerun | --owner-approved]`
 dispatches a first gate or a re-dispatch in one command.
 
 - Guards (exit 2, nothing written, no herdr call):
   - review: `should-dispatch-review`, a clean worktree, HEAD ahead of
     `base_sha`, an implement row and a ready `implementation-review` route;
   - ship: `status: reviewed` at HEAD, a ready `reviewer` route, a pinned agent
-    that is gone or not `working`, and the once-per-head relaunch budget.
+    that is gone or not `working`, no live unpinned ship row
+    (`a ship agent may still be running`), and the once-per-head relaunch budget.
+- Flags (mutually exclusive, `references/auto-actions.md`): `--infra-rerun`
+  counts an automatic re-run in `infra_reruns` (per phase per head, at most
+  2) and refuses the third with `infrastructure re-run budget spent`; an
+  unflagged dispatch at a spent head refuses the same way. `--owner-approved`
+  skips that refusal and the stopped-run relaunch refusal, and leaves
+  `infra_reruns` unchanged. A flagged review replaces `should-dispatch-review`
+  with the deadline-stop check and writes the stale-verdict reset
+  (`completed`, `review_head_sha: null`) with `infra_reruns` in one
+  `write-task` after the sweep. A flagged ship writes `infra_reruns` with
+  `ship_relaunch_head` (stopped run) or alone, before the pane split. The
+  result gains `infra_rerun: {phase, head, count}`.
 - Review steps: `sweep`, `render-brief`, `pane split --no-focus` off the
   implement pane, `launch --sandbox read-only`, one `write-task --present`
   (`review-dispatched` and `review_head_sha`), then `write-index` (role

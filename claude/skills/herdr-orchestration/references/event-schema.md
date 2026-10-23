@@ -43,9 +43,9 @@ and refreshes the owner heartbeat while a task is active; without
 
 `checkin` prints one row per task with an `action` field. Values:
 `confirm-completion`, `confirm-plan`, `dispatch-review`, `confirm-review`,
-`changes-requested`, `stale-review-reset`, `blocked`, `unblocked`,
+`changes-requested`, `carry-review`, `stale-review-reset`, `blocked`, `unblocked`,
 `abandoned-candidate`, `mech-ledger`, `paused`, `failed`,
-`exit-idle-worker`, `unknown`, `none`. `exit-idle-worker` ranks last and
+`reprompt-stalled`, `exit-idle-worker`, `unknown`, `none`. `exit-idle-worker` ranks last and
 names housekeeping, not a status transition; it appends no event and does
 not change the watch vocabulary.
 

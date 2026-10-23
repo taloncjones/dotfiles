@@ -1157,6 +1157,8 @@ def stale():
     c.coordination.owner_path(rd).write_text(json.dumps(o))
     m=json.loads((rd/"owner.json").read_text());m["heartbeat_ts"]=1.0
     (rd/"owner.json").write_text(json.dumps(m))
+c.HOLDER_RECHECK_SECS=0
+c._pid_alive=lambda pid: True
 c._is_ancestor=lambda pid: False
 stale()
 assert c.keep_lease_warm(rd,4242)=="holder-gone"
@@ -11409,7 +11411,7 @@ PY
 check "pending_action: skips the poll rules and otherwise matches checkin_action" <<PY
 $LOAD
 assert c.POLL_RULES == frozenset({"unknown", "abandoned-candidate", "blocked",
-                                  "unblocked", "exit-idle-worker"})
+                                  "unblocked", "exit-idle-worker", "reprompt-stalled"})
 base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
             head="a" * 40, completed=False, plan_completed=False, reviewed=False,
             review_correlates=False, review_stale=False, dispatch_review=False,
@@ -11879,6 +11881,161 @@ task["workers"] = [i0, r, i1]
 open(done, "w").write(json.dumps(dict(i0, task_id="PROJ-1", outcome="paused")))
 facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
 assert facts["done_outcome"] is None and facts["action"] != "paused", facts
+PY
+
+check "checkin_facts: an idle unsettled plan or implement row past the grace reports reprompt-stalled" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 2 * 3600 * 10**9
+row = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "impl-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+def poll(state):
+    return {"live": {"w1": state}, "known": {"w1"}, "worktrees": {},
+            "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": state}]}}
+def act(t, p=None):
+    return c.checkin_facts(rd, t, p or poll("done"), c.state_root().parent, now_ns=now)["action"]
+assert act(task) == "reprompt-stalled"
+assert act(task, poll("idle")) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, phase="plan")])) == "reprompt-stalled"
+assert act(dict(task, status="changes-requested")) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, started_ns=now - 630 * 10**9)])) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, started_ns=now - 570 * 10**9)])) != "reprompt-stalled"
+old_pending = dict(row, reprompts=[{"seq": 0, "started_ns": old, "status": "starting"}])
+assert act(dict(task, workers=[old_pending])) == "reprompt-stalled"
+assert "reprompt-stalled" in c.POLL_RULES
+PY
+
+check "checkin_facts: a done record, a fresh reprompt, a working agent or a fresh stop never reports reprompt-stalled" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 2 * 3600 * 10**9
+row = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "impl-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+def poll(state):
+    return {"live": {"w1": state}, "known": {"w1"}, "worktrees": {},
+            "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": state}]}}
+def act(t, p=None):
+    return c.checkin_facts(rd, t, p or poll("done"), c.state_root().parent, now_ns=now)["action"]
+def reprompted(status, started):
+    return dict(task, workers=[dict(row, reprompts=[{"seq": 0, "started_ns": started,
+                                                     "status": status}])])
+assert act(task, poll("working")) != "reprompt-stalled"
+for status in ("starting", "uncertain", "delivered", "delivered-unrecorded"):
+    assert act(reprompted(status, now)) != "reprompt-stalled", status
+assert act(reprompted("failed", now)) == "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, exit_requested="x")])) != "reprompt-stalled"
+assert act(dict(task, workers=[dict(row, phase="review")])) != "reprompt-stalled"
+assert act(dict(task, status="blocked")) != "reprompt-stalled"
+assert act(dict(task, status="completed")) != "reprompt-stalled"
+assert act(task, {**poll("done"), "agents": {"w1": [
+    {"name": "impl-y", "pane_id": "w1:p1", "agent_status": "done"}]}}) != "reprompt-stalled"
+assert c.checkin_facts(rd, task, None, c.state_root().parent, now_ns=now)["action"] == "unknown"
+ev = os.path.join(rd, "workspaces", "w1.events.jsonl")
+stamp = c.time.strftime("%Y-%m-%dT%H:%M:%SZ", c.time.gmtime(now / 10**9))
+other = {"v": 1, "ts": stamp, "workspace_id": "w1", "event": "stopped", "task_id": "PROJ-2"}
+open(ev, "w").write(json.dumps(other) + '\n{"v": 1, "ts": "bad", "task_id": "PROJ-1"}\n')
+assert act(task) == "reprompt-stalled"
+open(ev, "w").write(json.dumps(dict(other, task_id="PROJ-1")) + "\n")
+assert act(task) != "reprompt-stalled"
+os.unlink(ev)
+done = {k: row[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(
+    dict(done, task_id="PROJ-1", outcome="completed", head_sha="a" * 40, ts="2026-10-22T00:00:00Z")))
+assert act(task) != "reprompt-stalled"
+PY
+
+check "next: reprompt-stalled prints a reprompt command for the stalled row" <<PY
+$LOAD
+import shlex
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+row = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "impl-x",
+       "status": "launched", "started_ns": 1}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": "/wt", "workers": [row]}
+poll = {"live": {"w1": "done"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": "done"}]}}
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+def argv_for(t, context):
+    f = c.checkin_facts(rd, t, poll, c.state_root().parent)
+    line = c.next_line(t, f, context)
+    assert line.startswith("  next: run "), line
+    return shlex.split(line[len("  next: run "):])
+argv = argv_for(task, ctx)
+assert argv[1].endswith("herdr_dispatch.py") and argv[2] == "reprompt", argv
+opts = dict(zip(argv[3::2], argv[4::2]))
+want = {"--repo-slug": "slug-x", "--task-id": "PROJ-1", "--session": "S", "--fence": "7",
+        "--workspace-id": "w1", "--launch-id": "I", "--phase": "implement", "--cwd": "/wt",
+        "--prompt-file": "<prompt-file>", "--runtime": "claude"}
+assert opts == want, opts
+codex = dict(task, workers=[dict(row, runtime="codex")])
+assert dict(zip(*[iter(argv_for(codex, ctx)[3:])] * 2))["--runtime"] == "codex"
+personal = argv_for(task, dict(ctx, personal=True))
+assert personal[-1] == "--personal" and personal.count("--personal") == 1, personal
+PY
+
+check "keep_lease_warm: one failed ancestor check re-checks and stays ok; a dead holder pid ends it at once" <<PY
+$LOAD
+import subprocess, time
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-recheck");rd.mkdir(parents=True)
+f1=claim_legacy_owner(rd,"A","h",4242)
+def hb():
+    return json.loads((rd/"owner.json").read_text())["heartbeat_ts"]
+def stale():
+    o=json.loads(c.coordination.owner_path(rd).read_text());o["heartbeat_ts"]=1.0
+    c.coordination.owner_path(rd).write_text(json.dumps(o))
+    m=json.loads((rd/"owner.json").read_text());m["heartbeat_ts"]=1.0
+    (rd/"owner.json").write_text(json.dumps(m))
+real_alive=c._pid_alive
+c.HOLDER_RECHECK_SECS=0
+c._pid_alive=lambda pid: True
+calls=[]
+def flaky(pid):
+    calls.append(pid)
+    return len(calls)>1
+c._is_ancestor=flaky
+stale()
+assert c.keep_lease_warm(rd,4242)=="ok" and calls==[4242,4242]
+assert hb()>time.time()-60 and c.check_fence(rd,"A",f1)
+calls.clear()
+c._is_ancestor=lambda pid: calls.append(pid) or False
+stale()
+assert c.keep_lease_warm(rd,4242)=="holder-gone" and len(calls)==2
+assert hb()==1.0
+c._pid_alive=lambda pid: False
+c.HOLDER_RECHECK_SECS=30
+calls.clear()
+t0=time.monotonic()
+assert c.keep_lease_warm(rd,4242)=="holder-gone" and not calls
+assert time.monotonic()-t0<10 and hb()==1.0
+c._pid_alive=real_alive
+p=subprocess.Popen(["true"]);p.wait()
+assert c._pid_alive(os.getpid()) is True and c._pid_alive(p.pid) is False
+for bad in (None,0,1,-5,"123",True):
+    assert c._pid_alive(bad) is False, bad
+real_kill=os.kill
+def raiser(exc):
+    def kill(pid,sig): raise exc
+    return kill
+try:
+    c.os.kill=raiser(PermissionError(1,"no"));assert c._pid_alive(424242) is True
+    c.os.kill=raiser(OSError(22,"bad"));assert c._pid_alive(424242) is True
+finally:
+    c.os.kill=real_kill
+assert 1<=c.HOLDER_RECHECK_SECS<=30
 PY
 
 check "checkin passes each correlation helper its own phase workspace" <<PY
@@ -13694,6 +13851,480 @@ check "docs: SKILL.md stays at or under 67000 bytes" <<'SH'
 n=$(wc -c < claude/skills/herdr-orchestration/SKILL.md)
 [ "$n" -le 67000 ]
 SH
+
+check "docs: lost gates re-run without asking, at most 2 per gate per head" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+auto = open(d + "references/auto-actions.md", encoding="utf-8").read()
+for text in ("runner status is not success", "artifact is empty", "structured report is missing",
+             "usage-limit refusal", "retired_review_launch_ids", "--infra-rerun", "--owner-approved",
+             "infrastructure re-run budget spent", "at most twice", "Ask after a refusal",
+             "Leave it"):
+    assert text in auto, text
+review = open(d + "references/review-dispatch-details.md", encoding="utf-8").read()
+assert "After that write, ask with" not in review and "--infra-rerun" in review
+skill = open(d + "SKILL.md", encoding="utf-8").read()
+assert "surface it. Only a human re-gate request" not in skill and "references/auto-actions.md" in skill
+launch = open(d + "references/director-launch.md", encoding="utf-8").read()
+assert "## Host-sleep re-gate" in launch and "auto-actions.md" in launch
+PY
+
+check "docs: usage-limit seat stop is excluded from the loss class by real runner output" <<'PY'
+import importlib.util, json
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+rt = load("agent_runtime", "claude/hooks/agent_runtime.py")
+gate = load("gate_report", "claude/skills/co-review/scripts/gate_report.py")
+out = json.dumps({"type": "result", "is_error": False, "result": "You've hit your limit - resets 3pm"})
+parsed = rt.parse_runtime_result("claude", out)
+reasons = []
+gate._seat_content_ok(json.dumps(parsed).encode(), "claude.runtime.json", "claude", reasons)
+loss = {"seat claude runner status is not success"}
+assert "seat claude result is a usage-limit refusal" in reasons, reasons
+assert not set(reasons) <= loss, "quota stop must not fit the loss class"
+auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
+assert "moves the notice into `errors`" in auto
+PY
+
+check "docs: verifier-confirmed blockers repair without asking unless a decision or scope conflicts" <<'PY'
+import os
+auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
+for text in ("dispatch the repair worker", "without asking", "contradicts a live recorded",
+             "outside the PR's scope", "git diff --name-only", "co-review --fix"):
+    assert text in auto, text
+PY
+
+check "docs: auto-actions keeps the merge, post, Jira, force-push, takeover, digest and advisory asks" <<'PY'
+import os
+auto = open("claude/skills/herdr-orchestration/references/auto-actions.md", encoding="utf-8").read()
+section = auto[auto.index("## Asks that stay"):]
+for text in ("work-repository merge", "person-aimed post", "Jira write", "force push",
+             "lease takeover", "findings-digest mismatch", "unreproduced advisory"):
+    assert text in section, text
+PY
+
+check "docs: contract re-pin, todo split, delta round and carry-forward marker run without asking" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+def rd(name):
+    return open(d + name, encoding="utf-8").read()
+auto = rd("references/auto-actions.md")
+pin = rd("references/contract-pinning.md")
+kick = rd("references/kickoff.md")
+ship = rd("references/ship-carry-forward.md")
+assert "requires the user's task authorization" not in pin and "auto-actions.md" in pin
+assert "propose a split to the owner" not in kick and "auto-actions.md" in kick
+for text in ("Delta round (Recommended)", "a work repository asks the owner once",
+             "a work repository\nasks the owner with `AskUserQuestion`",
+             "a work repository asks the owner with `AskUserQuestion`"):
+    assert text not in ship, text
+assert "never dispatch a gate for that head" in ship
+for text in ("herdr-ship-brief: tier=delta", "herdr-ship-prior-handoff:",
+             "herdr-ship-delta-head:", "herdr-ship-delta-caps:"):
+    assert text in ship, text
+def sub(title):
+    start = auto.index("### " + title)
+    nxt = auto.find("\n#", start + 4)
+    return auto[start:nxt]
+for text in ("plan_artifacts", "herdr agent list", "--validate-only", "byte-for-byte",
+             "--kind contract", "--output-dir", "write-task", "review_head_sha: null",
+             "note-decision", "focus file", "diff -u", "not pinned"):
+    assert text in sub("Contract re-pin"), text
+for text in ("## Split plan", "word for word", "todos.sh list --all", "todos.sh new",
+             "--depends-on", "split from", "note-decision", "Reversal"):
+    assert text in sub("Todo split"), text
+for text in ("delta-class", "exit 0"):
+    assert text in sub("Delta round"), text
+for text in ("green evidence", "post guard", "posting.md", "posted co-review marker", "attempt"):
+    assert text in sub("Carry-forward marker"), text
+section = auto[auto.index("## Doc-rule actions"):auto.index("## Asks that stay")]
+for text in ("turn summary", "decision note", "before"):
+    assert text in section, text
+skill = rd("SKILL.md")
+assert len(skill.encode("utf-8")) <= 67000 and "Contract re-pin" in skill
+PY
+
+check "docs: an unexplained contract hash mismatch (verify-contract exit 4) stays an integrity halt" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+skill = open(d + "SKILL.md", encoding="utf-8").read()
+auto = open(d + "references/auto-actions.md", encoding="utf-8").read()
+flat = " ".join(skill.split())
+assert "or 4 (hash mismatch) is an integrity halt" in flat and "never re-pin to clear it" in flat
+start = auto.index("### Contract re-pin")
+sub = auto[start:auto.index("### Todo split")]
+for text in ("exit 4", "integrity halt", "interrupted", "Finish the re-pin",
+             "Restore the pinned contract", "herdr agent list"):
+    assert text in sub, text
+stay = auto[auto.index("## Asks that stay"):]
+assert "exit 4" in stay and "integrity halt" in stay
+PY
+
+# Real-repo fixture for the task-local review carry: a bare origin, main, a
+# branch with one commit reviewed at H, main advanced, then merged into the
+# branch. build() returns a dict; every carry check prefixes this with $LOAD.
+CARRY='import subprocess, hashlib, time
+GENV = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+            GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+def git(cwd, *a, check=True):
+    return subprocess.run(["git", "-C", cwd, *a], check=check, env=GENV,
+                          capture_output=True, text=True).stdout.strip()
+def put(cwd, name, text, msg):
+    open(os.path.join(cwd, name), "w").write(text)
+    git(cwd, "add", name); git(cwd, "commit", "-q", "-m", msg)
+def cli(fx, verb, *a):
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=fx["cfg"])
+    return subprocess.run(["python3", "claude/hooks/herdr_legacy_fixture.py", verb,
+                           "--repo-slug", "slug-x", *a], env=env,
+                          capture_output=True, text=True)
+def carry(fx):
+    return cli(fx, "carry-review", "--task-id", "PROJ-1", "--session", "S",
+               "--fence", fx["fence"])
+def build(contract_run="exit 0", merge="clean"):
+    cfg = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = cfg
+    root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+    tmp = tempfile.mkdtemp(); origin = tmp + "/origin.git"; wt = tmp + "/wt"; other = tmp + "/other"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True, env=GENV)
+    subprocess.run(["git", "clone", "-q", origin, wt], check=True, env=GENV, capture_output=True)
+    git(wt, "checkout", "-q", "-b", "main")
+    put(wt, ".gitignore", "claude/contracts/\n", "ignore"); put(wt, "a.txt", "a\n", "a")
+    git(wt, "push", "-q", "-u", "origin", "main"); base = git(wt, "rev-parse", "HEAD")
+    git(wt, "checkout", "-q", "-b", "feat"); put(wt, "a.txt", "branch\n", "branch work")
+    H = git(wt, "rev-parse", "HEAD")
+    os.makedirs(wt + "/claude/contracts")
+    rd = str(c.repo_dir("slug-x"))
+    contract_run = contract_run.replace("{TASK}", rd + "/tasks/PROJ-1.json").replace("{TMP}", tmp)
+    contract = json.dumps({"v": 1, "task_id": "PROJ-1", "commands": [
+        {"name": "c", "run": contract_run, "timeout_secs": 60}]})
+    open(wt + "/claude/contracts/c.json", "w").write(contract)
+    subprocess.run(["git", "clone", "-q", origin, other], check=True, env=GENV, capture_output=True)
+    if merge == "clean":
+        put(other, "c.txt", "c\n", "main work")
+    elif merge == "conflict":
+        put(other, "a.txt", "main\n", "main work")
+    if merge != "none":
+        git(other, "push", "-q", "origin", "main"); git(wt, "fetch", "-q", "origin")
+        git(wt, "merge", "--no-edit", "origin/main", check=False)
+        if git(wt, "diff", "--name-only", "--diff-filter=U"):
+            put(wt, "a.txt", "resolved\n", "resolve")
+    findings = os.path.join(root, "findings.md")
+    open(findings, "w").write("No findings. Inspected: fixture.\n")
+    digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+    impl = {"phase": "implement", "workspace_id": "w2", "runtime": "claude",
+            "launch_id": "I1", "pane_id": "pane0", "source_head_sha": base}
+    row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+           "launch_id": "L1", "pane_id": "pane1", "source_head_sha": H}
+    done = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+                blocking_count=0, findings_ref=findings, findings_sha256=digest)
+    task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": base,
+            "base_ref": "origin/main", "review_head_sha": H, "worktree": wt,
+            "workers": [impl, row], "contract_path": "claude/contracts/c.json",
+            "contract_sha256": hashlib.sha256(contract.encode()).hexdigest()}
+    fx = {"cfg": cfg, "wt": wt, "origin": origin, "other": other, "H": H, "base": base,
+          "rd": rd, "tmp": tmp, "task": task, "done": done}
+    fx["fence"] = cli(fx, "claim-owner", "--session", "S", "--host", "h", "--pid", "1").stdout.strip()
+    r = cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S", "--fence", fx["fence"],
+            "--json", json.dumps(task))
+    assert r.returncode == 0, r.stderr
+    open(fx["rd"] + "/tasks/PROJ-1.review.json", "w").write(json.dumps(done))
+    return fx
+def task_file(fx):
+    return open(fx["rd"] + "/tasks/PROJ-1.json").read()
+def facts(fx):
+    poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+    return c.checkin_facts(fx["rd"], json.loads(task_file(fx)), poll, c.state_root().parent)
+'
+
+check "checkin_action: carry-review outranks stale-review-reset only for a due carry" <<PY
+$LOAD
+base = dict(status="reviewed", poll_ok=True, live="idle", worktree_exists=True,
+            head="b" * 40, completed=False, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=True, review_at_head=False,
+            review_pin_orphaned=False, dispatch_review=False, mech_unsettled=False,
+            plan_advanced=True, done_outcome=None, idle_settled=False, ship_pending=True)
+assert c.checkin_action({**base, "review_carry_due": True}) == "carry-review"
+assert c.checkin_action({**base, "review_carry_due": False}) == "stale-review-reset"
+assert c.checkin_action(base) == "stale-review-reset"
+# Only an approved, parked-in-reviewed task carries; an orphaned pin still resets.
+assert c.checkin_action({**base, "status": "completed", "review_carry_due": False,
+                         "review_pin_orphaned": True}) == "stale-review-reset"
+names = [n for n, _ in c.checkin_rules({})]
+assert names.index("carry-review") + 1 == names.index("stale-review-reset"), names
+assert c.NEXT_ACTIONS["carry-review"][0] == "read", c.NEXT_ACTIONS["carry-review"]
+assert "carry-review" not in c.POLL_RULES
+PY
+
+check "is_reviewed: a carried head verifies only through a matching review_carry" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+H, M, X = "a" * 40, "b" * 40, "c" * 40
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L1", "pane_id": "pane1", "source_head_sha": H}
+done = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+carry = {"reviewed_head_sha": H, "head": M, "from_pin": H, "review_launch_id": "L1"}
+task = {"task_id": "PROJ-1", "status": "reviewed", "review_head_sha": M,
+        "workers": [row], "review_carry": carry}
+assert c.is_reviewed(task, done, M, "w3") is True
+assert c.is_reviewed(dict(task, review_carry=None), done, M, "w3") is False
+assert c.is_reviewed({k: v for k, v in task.items() if k != "review_carry"}, done, M, "w3") is False
+assert c.is_reviewed(dict(task, review_carry=dict(carry, head=X)), done, M, "w3") is False
+assert c.is_reviewed(dict(task, review_carry=dict(carry, reviewed_head_sha=X)), done, M, "w3") is False
+assert c.is_reviewed(dict(task, review_carry=dict(carry, review_launch_id="L0")), done, M, "w3") is False
+assert c.is_reviewed(dict(task, retired_review_launch_ids=["L1"]), done, M, "w3") is False
+assert c.is_reviewed(task, dict(done, outcome="changes-requested"), M, "w3") is False
+assert c.is_reviewed(task, dict(done, blocking_count=1), M, "w3") is False
+assert c.is_reviewed(task, done, X, "w3") is False
+assert c.is_reviewed(dict(task, review_head_sha=H, review_carry=None), done, H, "w3") is True
+PY
+
+check "checkin: a carried head never reports stale-review-reset" <<PY
+$LOAD
+$CARRY
+fx = build()
+f = facts(fx)
+assert f["action"] == "carry-review", f["action"]
+assert f["review_carry_due"] is True and f["reviewed"] is False, f
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+f = facts(fx)
+assert f["action"] == "ship", f["action"]
+assert f["reviewed"] is True, f
+head = git(fx["wt"], "rev-parse", "HEAD")
+r = cli(fx, "confirm-review", "--task-id", "PROJ-1", "--workspace", "w3", "--head-sha", head)
+assert r.returncode == 0, (r.returncode, r.stderr)
+PY
+
+check "carry-review: a clean main merge keeps the approval at the new head" <<PY
+$LOAD
+$CARRY
+fx = build()
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+out = json.loads(r.stdout)
+head = git(fx["wt"], "rev-parse", "HEAD")
+task = json.loads(task_file(fx))
+rc = task["review_carry"]
+assert task["review_head_sha"] == head and rc["head"] == head and out["outcome"] == "carried"
+assert rc["reviewed_head_sha"] == fx["H"] and rc["from_pin"] == fx["H"]
+assert rc["review_launch_id"] == "L1" and rc["upstream"] == "origin/main"
+assert rc["contract_sha256"] == task["contract_sha256"] and rc["contract_exit"] == 0
+for key in ("upstream_sha", "new_base", "audit", "audit_sha256", "ts"):
+    assert rc[key], key
+assert "retired_review_launch_ids" not in task and task["status"] == "reviewed"
+audit_bytes = open(rc["audit"], "rb").read()
+assert hashlib.sha256(audit_bytes).hexdigest() == rc["audit_sha256"] == out["audit_sha256"]
+audit = json.loads(audit_bytes)
+assert audit["outcome"] == "carried" and audit["head"] == head and audit["proof"]["pass"] is True
+assert audit["contract"]["exit"] == 0 and "PASS 1 commands" in audit["contract"]["output_tail"]
+PY
+
+check "carry-review: a conflicted main merge resets the task for a fresh review" <<PY
+$LOAD
+$CARRY
+fx = build(merge="conflict")
+r = carry(fx)
+assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+assert task["status"] == "completed" and task["review_head_sha"] is None, task
+assert "review_carry" not in task and task["retired_review_launch_ids"] == ["L1"], task
+assert facts(fx)["action"] == "dispatch-review"
+audit = json.load(open(fx["rd"] + "/artifacts/PROJ-1/review-carry/%s.json" % json.loads(r.stdout)["head"]))
+assert audit["outcome"] == "refused" and audit["contract"]["exit"] is None, audit
+PY
+
+check "carry-review: a branch-authored commit after the approval resets the task" <<PY
+$LOAD
+$CARRY
+fx = build()
+put(fx["wt"], "d.txt", "d\n", "more branch work")
+r = carry(fx)
+assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+assert task["status"] == "completed" and task["review_head_sha"] is None, task
+assert "branch-authored" in json.loads(r.stdout)["reasons"][0]
+assert facts(fx)["action"] == "dispatch-review"
+PY
+
+check "carry-review: a failing contract resets the task for a fresh review" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="echo contract-said-no; exit 1")
+r = carry(fx)
+assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+assert task["status"] == "completed" and task["review_head_sha"] is None, task
+assert task["retired_review_launch_ids"] == ["L1"] and facts(fx)["action"] == "dispatch-review"
+audit = json.load(open(json.loads(r.stdout)["audit"]))
+assert audit["contract"]["exit"] == 1 and "contract-said-no" in audit["contract"]["output_tail"]
+assert audit["contract"]["contract_sha256"] == task["contract_sha256"]
+PY
+
+check "carry-review: a head that moves during the contract run writes nothing" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="git -c user.email=t@t -c user.name=t commit --allow-empty -q -m moved")
+before = task_file(fx)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+PY
+
+check "carry-review: a second main merge carries from the reviewed head" <<PY
+$LOAD
+$CARRY
+fx = build()
+assert carry(fx).returncode == 0
+m1 = git(fx["wt"], "rev-parse", "HEAD")
+put(fx["other"], "e.txt", "e\n", "more main work")
+git(fx["other"], "push", "-q", "origin", "main"); git(fx["wt"], "fetch", "-q", "origin")
+git(fx["wt"], "merge", "--no-edit", "origin/main")
+m2 = git(fx["wt"], "rev-parse", "HEAD")
+f = facts(fx)
+assert f["review_carry_due"] is True and f["action"] == "carry-review", f
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+task = json.loads(task_file(fx))
+rc = task["review_carry"]
+assert task["review_head_sha"] == m2 and rc["head"] == m2 and rc["from_pin"] == m1
+assert rc["reviewed_head_sha"] == fx["H"], rc
+for sha in (m1, m2):
+    assert os.path.isfile(fx["rd"] + "/artifacts/PROJ-1/review-carry/%s.json" % sha)
+assert facts(fx)["action"] == "ship"
+PY
+
+check "write-task: review_carry is inherited, never changed, and dropped on a re-pin" <<PY
+$LOAD
+$CARRY
+fx = build()
+assert carry(fx).returncode == 0
+task = json.loads(task_file(fx))
+def write(rec):
+    return cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+               "--fence", fx["fence"], "--json", json.dumps(rec))
+omitted = {k: v for k, v in task.items() if k != "review_carry"}
+assert write(omitted).returncode == 0
+assert json.loads(task_file(fx))["review_carry"] == task["review_carry"]
+assert write(task).returncode == 0
+before = task_file(fx)
+for bad in (dict(task, review_carry=None), dict(task, review_carry=dict(task["review_carry"], head="f" * 40))):
+    r = write(bad)
+    assert r.returncode == 2 and "carry-review" in r.stderr, (r.returncode, r.stderr)
+assert task_file(fx) == before
+r = write(dict(omitted, review_head_sha="f" * 40, review_carry=task["review_carry"]))
+assert r.returncode == 0, r.stderr
+assert "review_carry" not in json.loads(task_file(fx))
+fresh = {k: v for k, v in task.items() if k != "review_carry"}
+r = cli(fx, "reset-task", "--task-id", "PROJ-1", "--new-task-id", "PROJ-2", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(dict(fresh, task_id="PROJ-2", workers=[], review_carry={})))
+assert r.returncode == 2 and "carry-review" in r.stderr, (r.returncode, r.stderr)
+PY
+
+check "carry-review: a task changed during the run writes nothing" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="printf '\n' >> {TASK}")
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx).endswith("\n\n")
+assert "review_carry" not in json.loads(task_file(fx))
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+PY
+
+check "carry-review: a tree the contract dirties writes nothing" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run="echo x > stray.txt")
+before = task_file(fx)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+PY
+
+check "carry-review: a held run lock writes nothing" <<PY
+$LOAD
+$CARRY
+import fcntl
+fx = build()
+before = task_file(fx)
+os.makedirs(fx["rd"] + "/artifacts/PROJ-1", exist_ok=True)
+fd = os.open(fx["rd"] + "/artifacts/PROJ-1/review-carry.lock", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry")
+os.close(fd)
+assert carry(fx).returncode == 0
+PY
+
+check "carry-review: a contract command left by a killed run holds the run lock" <<PY
+$LOAD
+$CARRY
+import signal
+fx = build(contract_run="[ -e {TMP}/go ] && exit 0; echo \$\$ > {TMP}/pid; sleep 60")
+before = task_file(fx)
+env = dict(os.environ, CLAUDE_CONFIG_DIR=fx["cfg"])
+verb = subprocess.Popen(["python3", "claude/hooks/herdr_legacy_fixture.py", "carry-review",
+                         "--repo-slug", "slug-x", "--task-id", "PROJ-1", "--session", "S",
+                         "--fence", fx["fence"]], env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for _ in range(300):
+    if os.path.exists(fx["tmp"] + "/pid"):
+        break
+    time.sleep(0.1)
+pid = int(open(fx["tmp"] + "/pid").read())
+verb.kill(); verb.wait()
+os.kill(pid, 0)
+r = carry(fx)
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+os.killpg(pid, signal.SIGKILL)
+open(fx["tmp"] + "/go", "w").close()
+for _ in range(100):
+    r = carry(fx)
+    if r.returncode != 4:
+        break
+    time.sleep(0.1)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+PY
+
+check "run_contract_commands: an interrupted run kills the running command group" <<PY
+$LOAD
+import signal, time
+tmp = tempfile.mkdtemp()
+cmds = [{"name": "hang", "run": "echo \$\$ > %s/pid; sleep 60" % tmp, "timeout_secs": 60}]
+def boom(signum, frame):
+    raise RuntimeError("interrupted")
+signal.signal(signal.SIGALRM, boom)
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+with tempfile.TemporaryFile("w+") as log:
+    try:
+        c.run_contract_commands(cmds, tmp, output=log)
+        raise AssertionError("expected the interrupt")
+    except RuntimeError:
+        pass
+pid = int(open(tmp + "/pid").read())
+for _ in range(50):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        break
+    time.sleep(0.1)
+else:
+    raise AssertionError("the command group survived the interrupt")
+PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
