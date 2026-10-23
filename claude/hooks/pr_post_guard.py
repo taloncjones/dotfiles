@@ -695,6 +695,7 @@ API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
 
 
 PLACEHOLDER_RE = re.compile(r"\{|:(owner|repo|branch)\b")
+OWNER_REPO_TOKENS = frozenset({"{owner}", ":owner", "{repo}", ":repo"})
 REPO_PREFIX_RE = re.compile(r"/*repos/[^/]*/[^/]*(?=/|$)")
 
 
@@ -710,7 +711,12 @@ def normalize_endpoint(raw: str) -> str | None:
     if "%" in path or "\\" in path or "." in segments or ".." in segments:
         return None
     prefix = REPO_PREFIX_RE.match(path)
-    if PLACEHOLDER_RE.search(path[prefix.end():] if prefix else path):
+    checked = path
+    if prefix and all(
+        seg in OWNER_REPO_TOKENS or not PLACEHOLDER_RE.search(seg) for seg in prefix.group().split("/")[-2:]
+    ):
+        checked = path[prefix.end():]
+    if PLACEHOLDER_RE.search(checked):
         return None
     return "/".join(seg for seg in segments if seg)
 
