@@ -1957,6 +1957,9 @@ def _workspace_kept(herdr_cli, task, workspace_id, env):
     if any(_malformed_agent(a) or a["pane_id"] in ids or a.get("workspace_id") == workspace_id
            for a in agents):
         return "live-agent", ids
+    # An open workspace always has a pane: none seen means the list is unreliable.
+    if not ids:
+        return "malformed-pane", ids
     if not all(_pane_idle(herdr_cli, pane_id, env) for pane_id in sorted(ids)):
         return "busy-pane", ids
     return None, ids
@@ -2573,10 +2576,17 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
     ws = impl.get("workspace_id") or ""
     reviews = {w.get("launch_id") for w in task.get("workers", [])
                if isinstance(w, dict) and w.get("phase") == "review"}
+    # A reopened workspace holds rows the implement row's workspace does not.
+    workspaces = [ws] + sorted({w["workspace_id"] for w in task.get("workers", [])
+                                if isinstance(w, dict) and w.get("workspace_id")
+                                and w["workspace_id"] != ws})
+    swept = {"rows": []}
     try:
-        swept = sweep(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
-                      workspace_id=ws, cwd=worktree, runtime=runtime, herdr_cli=herdr_cli,
-                      env=env, personal=personal)
+        for workspace_id in workspaces:
+            result = sweep(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                           workspace_id=workspace_id, cwd=worktree, runtime=runtime,
+                           herdr_cli=herdr_cli, env=env, personal=personal)
+            swept["rows"].extend(result.get("rows", []))
     except DispatchError as exc:
         return _gate_incomplete("review", task_id, "sweep", exc)
     live = [r.get("launch_id") for r in swept.get("rows", [])

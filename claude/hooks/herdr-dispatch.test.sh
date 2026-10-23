@@ -6763,6 +6763,73 @@ def test_close_idle_closes_a_workspace_holding_an_orphan_idle_gate_pane():
         fx.close()
 
 
+def test_review_gate_retry_after_reopen_sees_the_live_reviewer_in_the_reopened_workspace():
+    fx = Fixture()
+    calls = []
+    originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
+    live = {"launch_id": "R1", "status": "working"}
+    herdr_dispatch.sweep = lambda **kw: calls.append(("sweep", kw["workspace_id"])) or {
+        "status": "swept", "rows": [live] if kw["workspace_id"] == "w7" else []}
+    herdr_dispatch._gate_split = lambda cli, pane, wt, env: calls.append(("split", pane)) or "w7:p2"
+    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "R2"}
+    try:
+        head, focus = review_ready(fx)
+        task = stored_task(fx)
+        task["workers"].append({"phase": "review", "launch_id": "R1", "workspace_id": "w7",
+                                "pane_id": "w7:p2", "status": "launched"})
+        fx.task_file.write_text(json.dumps(task))
+        idle_fixture_workspaces = [("sweep", "w1"), ("sweep", "w7")]
+        write_workspaces(fx, [])
+        out = run_gate(fx, "review", focus)
+        assert out["status"] == "incomplete" and out["step"] == "sweep", out
+        assert calls == idle_fixture_workspaces, calls
+        assert not open_calls(fx), fx.calls()
+    finally:
+        for name, fn in originals.items():
+            setattr(herdr_dispatch, name, fn)
+        fx.close()
+
+
+def test_close_idle_keeps_a_workspace_whose_pane_list_is_empty():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        Path(fx.env["FAKE_PANES"]).write_text("[]")
+        before = fx.task_file.read_text()
+        out = close_idle(fx)
+        assert out == {"status": "kept", "kept": "malformed-pane", "workspace_id": "w1"}, out
+        assert not close_calls(fx), fx.calls()
+        assert fx.task_file.read_text() == before
+    finally:
+        fx.close()
+
+
+def test_close_idle_keeps_a_workspace_whose_only_pane_rows_belong_elsewhere():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        other = {**pane("w2:p1"), "workspace_id": "w2"}
+        Path(fx.env["FAKE_PANES"]).write_text(json.dumps([other]))
+        out = close_idle(fx)
+        assert out == {"status": "kept", "kept": "malformed-pane", "workspace_id": "w1"}, out
+        assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_close_idle_keeps_a_workspace_with_an_agent_row_missing_its_workspace_id():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        Path(fx.env["FAKE_PANES"]).write_text("[]")
+        Path(fx.env["FAKE_AGENTS"]).write_text(json.dumps([{"name": "a", "pane_id": "w1:p1"}]))
+        out = close_idle(fx)
+        assert out["status"] == "kept", out
+        assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
 def test_reopen_reports_open_for_a_listed_task_workspace():
     fx = Fixture()
     try:
@@ -7249,6 +7316,10 @@ for name, test in (
     ("ship gate relaunch keeps the reopened workspace_id", test_ship_gate_relaunch_keeps_the_reopened_workspace_id),
     ("reopen refuses a recorded root pane that is gone", test_reopen_refuses_a_recorded_root_pane_that_is_gone),
     ("close-idle closes a workspace holding an orphan idle gate pane", test_close_idle_closes_a_workspace_holding_an_orphan_idle_gate_pane),
+    ("review gate retry after reopen sees the live reviewer in the reopened workspace", test_review_gate_retry_after_reopen_sees_the_live_reviewer_in_the_reopened_workspace),
+    ("close-idle keeps a workspace whose pane list is empty", test_close_idle_keeps_a_workspace_whose_pane_list_is_empty),
+    ("close-idle keeps a workspace whose only pane rows belong elsewhere", test_close_idle_keeps_a_workspace_whose_only_pane_rows_belong_elsewhere),
+    ("close-idle keeps a workspace with an agent row missing its workspace id", test_close_idle_keeps_a_workspace_with_an_agent_row_missing_its_workspace_id),
 ):
     check(name, test)
 

@@ -23,7 +23,7 @@ on the task worktree, hold no agent, and hold only idle shell panes.
 | --- | --- | --- |
 | `closed` | 0 | Workspace closed; the record gains `workspace_closed`. |
 | `already-closed` | 0 | The record already names it closed and herdr lists no such workspace. |
-| `kept` | 3 | Nothing closed or written. `kept` is `other-worktree`, `live-agent`, `busy-pane`, `changed` or `close-failed`; the next check-in prints the line again. |
+| `kept` | 3 | Nothing closed or written. `kept` is `other-worktree`, `live-agent`, `busy-pane`, `malformed-pane` (a pane row herdr cannot place, or no pane row for the workspace; re-run once herdr lists the panes), `changed` or `close-failed`; the next check-in prints the line again. |
 | refused | 2 | The task is not parked at its reviewed head, the workspace is not the record's, or the worktree is gone. |
 
 herdr has no compare-and-close. A process started in the workspace between
@@ -84,4 +84,4 @@ re-read the record after a reopen before writing it back.
 | `close-idle`: close raised or its reply was lost | `close-failed`, exit 3; re-run. |
 | `reopen`: open done, record write not | Re-run: one workspace on the worktree is adopted. |
 | `reopen`: record written, relabel lost | A re-run returns `open`; the next `write-task --present` relabels. |
-| Gate: reopen done, later step interrupted | A retry takes the fast path and splits `workspace_root_pane`, never a leftover gate pane. A leftover idle pane closes with the workspace at the next `close-idle` or `archive-task`. |
+| Gate: reopen done, later step interrupted | A retry sweeps every workspace the task has used, so a reviewer already live in the reopened workspace blocks a second launch; it then splits `workspace_root_pane`, never a leftover gate pane. A leftover idle pane closes with the workspace at the next `close-idle` or `archive-task`. |

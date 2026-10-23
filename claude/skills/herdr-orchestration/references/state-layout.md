@@ -1075,7 +1075,8 @@ shell. Otherwise it prints
 and moves nothing. The `kept` codes: `other-worktree` (checkout is not the
 task worktree, or herdr could not say), `live-agent` (an agent in a pane,
 or a malformed agent row), `busy-pane` (a non-shell foreground process or
-failed inspection), `changed` (the pre-close re-check found a difference),
+failed inspection), `malformed-pane` (a pane row herdr cannot place, or no
+pane row for the workspace at all), `changed` (the pre-close re-check found a difference),
 `close-failed` (the close raised; a re-run polls fresh). `abandoned` and
 `failed` tasks never close a workspace.
 
