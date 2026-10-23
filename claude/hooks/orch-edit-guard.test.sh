@@ -926,6 +926,12 @@ hook_case "Q commit message with a call-shaped word allowed" allow Bash "git -C 
 hook_case "Q double-quoted variable in a message still denied" deny Bash "git -C $R commit -m \"fix \$HOME\"" "$N" "$SID_A"
 hook_case "Q double-quoted substitution in a message still denied" deny Bash "git -C $R commit -m \"\$(date)\"" "$N" "$SID_A"
 hook_case "Q unquoted glob operand still denied" deny Bash "git -C $R restore -- *.txt" "$N" "$SID_A"
+hook_case "Q escaped dollar variable in a message allowed" allow Bash "git -C $R commit -m \"bump \\\$VERSION handling\"" "$N" "$SID_A"
+hook_case "Q escaped dollar digit in a message allowed" allow Bash "git -C $R commit -m \"price is \\\$5\"" "$N" "$SID_A"
+hook_case "Q escaped backticks in a message allowed" allow Bash "git -C $R commit -m \"use \\\`git log\\\` here\"" "$N" "$SID_A"
+hook_case "Q escaped quote before a variable still denied" deny Bash "git -C $R commit -m \"a\\\"\$X\"" "$N" "$SID_A"
+hook_case "Q escaped backslash before a variable still denied" deny Bash "git -C $R commit -m \"a\\\\\$X\"" "$N" "$SID_A"
+hook_case "Q dollar digit in a message still denied" deny Bash "git -C $R commit -m \"price \$5\"" "$N" "$SID_A"
 rm -f "$RD_A/orch-edit-allow.json"; reset_log
 
 # Quoted or commented text is not a function definition, heredoc or here-string.
@@ -933,6 +939,32 @@ hook_case "S log --grep with call-shaped text allowed" allow Bash "git -C $R log
 hook_case "S log -S with conflict markers allowed" allow Bash "git -C $R log -S'<<<<<<<' -- merge.py" "$N" "$SID_A"
 hook_case "S status with a commented call-shaped word allowed" allow Bash "git -C $R status # commit f()" "$N" "$SID_A"
 hook_case "S unquoted function definition still denied" deny Bash "f() { git -C $R commit -m x; }; f" "$N" "$SID_A"
+
+# A heredoc inside a double-quoted $(...) whose end the scanner cannot find fails closed.
+reset_log
+B1_CMD="OUT=\"\$(bash <<'EOF'
+echo don't
+git -C $R commit -m x
+EOF
+)\""
+hook_case "S heredoc in quoted substitution with an apostrophe denied" deny Bash "$B1_CMD" "$N" "$SID_A"
+if [ "$(audit_count orch-edit-denied)" = 1 ]; then
+    printf 'PASS  S heredoc in quoted substitution is audited once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  S heredoc in quoted substitution is audited once (n=%s)\n' "$(audit_count orch-edit-denied)" >&2; FAIL=$((FAIL + 1))
+fi
+B1_CMD="cd $R && bash <<'EOF'
+echo don't
+git commit -m x
+EOF"
+hook_case "S cd then heredoc with an apostrophe denied" deny Bash "$B1_CMD" "$N" "$SID_A"
+B1_CMD="OUT=\"\$(bash <<'EOF'
+# note (x
+git -C $R commit -m x
+EOF
+)\""
+hook_case "S heredoc in quoted substitution with an open paren denied" deny Bash "$B1_CMD" "$N" "$SID_A"
+reset_log
 
 # A subshell closed by `)` glued to the next operator ends there.
 hook_case "P glued close paren then reset denied" deny Bash "(git status --short); git reset --hard HEAD" "$R" "$SID_A"

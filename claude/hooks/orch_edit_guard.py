@@ -1214,8 +1214,8 @@ def mask_quoted(text):
             if c == "'":
                 quote = None
         elif quote == '"':
-            if c == "\\" and i + 1 < n and text[i + 1] in '"\\':
-                out.append(text[i:i + 2])
+            if c == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
+                out.append(c + MASKED.get(text[i + 1], text[i + 1]))
                 i += 2
                 continue
             out.append(c if c in "$`" else MASKED.get(c, c))
@@ -1635,7 +1635,8 @@ def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None
 def executable_text(command):
     """`command` without comments, single-quoted spans, escaped characters and
     the literal text of double-quoted spans; only `$(...)` and backtick bodies
-    inside double quotes stay, because the shell runs them."""
+    inside double quotes stay, because the shell runs them. An unterminated
+    substitution keeps the rest of the text as code, so the scan fails closed."""
     text = rm_guard.strip_line_comments(command)
     out = []
     quote = None
@@ -1650,16 +1651,20 @@ def executable_text(command):
             continue
         elif quote == '"' and c == "$" and text.startswith("$(", i):
             end = substitution_end(text, i)
-            if end >= 0:
-                out.append(" " + text[i + 2:end] + " ")
-                i = end + 1
-                continue
+            if end < 0:
+                out.append(" " + text[i + 2:] + " ")
+                break
+            out.append(" " + text[i + 2:end] + " ")
+            i = end + 1
+            continue
         elif quote == '"' and c == "`":
             end = backtick_end(text, i)
-            if end >= 0:
-                out.append(" " + text[i + 1:end] + " ")
-                i = end + 1
-                continue
+            if end < 0:
+                out.append(" " + text[i + 1:] + " ")
+                break
+            out.append(" " + text[i + 1:end] + " ")
+            i = end + 1
+            continue
         elif c == '"':
             quote = None if quote == '"' else '"'
         elif c == "'" and quote is None:
@@ -2012,8 +2017,8 @@ def refuse_overflow(count):
 
 
 def refuse_unresolved(word):
-    """Three-line refusal for a fenced session's git write whose target
-    directory the guard cannot resolve."""
+    """Three-line refusal for a fenced session's git write the guard cannot
+    scan (an unresolved word, wrapper, heredoc or function)."""
     print(
         f"{BLOCKED} -- this session is fenced and the guard cannot scan "
         f"this command for a git write: {_printable(word)[:PATH_MAX]}.",
