@@ -914,6 +914,32 @@ else
 fi
 rm -f "$RD_A/orch-edit-allow.json"; reset_log
 
+# Quoted literal text does not expand; unquoted and double-quoted $ still do.
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+hook_case "Q commit message with a question mark allowed" allow Bash "git -C $R commit -m \"Why does this fail?\"" "$N" "$SID_A"
+hook_case "Q commit message with brackets allowed" allow Bash "git -C $R commit -m \"[WARNING] fix\"" "$N" "$SID_A"
+hook_case "Q commit message with a quoted star allowed" allow Bash "git -C $R commit -m \"wip *\"" "$N" "$SID_A"
+hook_case "Q restore of a single-quoted bracket file allowed" allow Bash "git -C $R restore -- '[id].txt'" "$N" "$SID_A"
+hook_case "Q restore of a single-quoted dollar file allowed" allow Bash "git -C $R restore -- '\$name.txt'" "$N" "$SID_A"
+hook_case "Q single-quoted dollar in a commit message allowed" allow Bash "git -C $R commit -m 'fix: preserve \$HOME'" "$N" "$SID_A"
+hook_case "Q commit message with a call-shaped word allowed" allow Bash "git -C $R commit -m \"fix: function call()\"" "$N" "$SID_A"
+hook_case "Q double-quoted variable in a message still denied" deny Bash "git -C $R commit -m \"fix \$HOME\"" "$N" "$SID_A"
+hook_case "Q double-quoted substitution in a message still denied" deny Bash "git -C $R commit -m \"\$(date)\"" "$N" "$SID_A"
+hook_case "Q unquoted glob operand still denied" deny Bash "git -C $R restore -- *.txt" "$N" "$SID_A"
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
+
+# Quoted or commented text is not a function definition, heredoc or here-string.
+hook_case "S log --grep with call-shaped text allowed" allow Bash "git -C $R log --grep='merge()'" "$N" "$SID_A"
+hook_case "S log -S with conflict markers allowed" allow Bash "git -C $R log -S'<<<<<<<' -- merge.py" "$N" "$SID_A"
+hook_case "S status with a commented call-shaped word allowed" allow Bash "git -C $R status # commit f()" "$N" "$SID_A"
+hook_case "S unquoted function definition still denied" deny Bash "f() { git -C $R commit -m x; }; f" "$N" "$SID_A"
+
+# A subshell closed by `)` glued to the next operator ends there.
+hook_case "P glued close paren then reset denied" deny Bash "(git status --short); git reset --hard HEAD" "$R" "$SID_A"
+hook_case "P close paren newline then reset denied" deny Bash "(git status --short)
+git reset --hard HEAD" "$R" "$SID_A"
+hook_case "P subshell cd then glued close paren merge denied" deny Bash "(cd $R && git status); git -C $R merge main" "$N" "$SID_A"
+
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 hook_case "AC5 valid marker allows Edit tracked" allow Edit "$R/tracked.txt" "$R" "$SID_A"
 hook_case "AC5 valid marker allows Write new file" allow Write "$R/new.txt" "$R" "$SID_A"
