@@ -857,6 +857,11 @@ audit_deny "AL B1 comment ending in an odd backslash run" "echo hi # c \\\\\\
 git -C $R commit -m x" "$N"
 audit_deny "AL B1 comment ending in an even backslash run" "echo hi # c \\\\
 git -C $R commit -m x" "$N"
+audit_deny "AL H1 mid-word hash in echo before semicolon merge" "echo PR#12; git -C $R merge main" "$N"
+audit_deny "AL H1 mid-word hash in echo before && merge" "echo PR#12 && git -C $R merge main" "$N"
+audit_deny "AL H1 url fragment before && merge" "git -C $R fetch https://h/r#frag && git -C $R merge main" "$N"
+audit_deny "AL H1 mid-word hash in ls before cd and merge" "ls a#b; cd $R && git merge main" "$N"
+hook_case "AL H1 real comment still hides the later merge" allow Bash "echo x #c; git -C $R merge main" "$N" "$SID_A"
 audit_deny "AL A1 flock -c time prefix hides writer" "flock /tmp/l -c 'time git commit -m x'" "$N"
 audit_deny "AL A1 flock -c brace form hides writer" "flock /tmp/l -c '{ git commit -m x; }'" "$N"
 audit_deny "AL A1 su -c GIT_WORK_TREE assignment hides writer" "su -c 'GIT_WORK_TREE=$R git reset --hard'" "$N"

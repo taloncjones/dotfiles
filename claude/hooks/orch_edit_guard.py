@@ -60,8 +60,6 @@ Accepted holes (allow), listed exactly and mirrored in install-layout.md:
   body's commands.
 - Brace-expansion words, a verb passed from stdin to `xargs`, and the dashed
   `git-commit` binary.
-- A mid-word `#` after a backslash-newline join, read as a comment by the
-  tokenizer (tracked as a separate todo).
 - Work-tree retargeting without a work-tree flag: `--git-dir=<repo>/.git` or
   `GIT_DIR=<repo>/.git` from a non-repo cwd, `-c core.worktree=<repo>`, and
   the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` env.
@@ -78,6 +76,7 @@ Accepted holes (allow), listed exactly and mirrored in install-layout.md:
   editors, NotebookEdit/MultiEdit, and `awk`/`gawk -i inplace`; non-git
   targets built from `$VAR`/`$(...)`/globs (redirects, `sed -i`, `tee` keep
   their existing handling).
+- A bare `cd` or `cd -`, read as a no-op by the cd tracker.
 - The unknown-cd advisory never clearing after a later literal `cd` (it only
   over-refuses).
 This is a guard against drift, not evasion. The guard targets momentum
