@@ -2105,6 +2105,24 @@ def test_settle_keeps_the_root_pane_of_a_superseded_implement_row():
         fx.close()
 
 
+def test_settle_keeps_the_reopened_root_pane_of_a_superseded_repair_row():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p3", head)
+        latest = settle_row("implement", "I3", "w1:p5", head)
+        fx.settle_state([impl, repair, latest], "changes-requested", [],
+                        [pane("w1:p3", launch_id="I2"), pane("w1:p5", launch_id="I3")])
+        task = stored_task(fx)
+        task["workspace_root_pane"] = "w1:p3"
+        fx.task_file.write_text(json.dumps(task))
+        result = fx.settle("I2")
+        assert result["reason"] == "superseded" and result["pane"] == "kept-shared", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_settle_keeps_a_superseded_repair_pane_with_a_busy_foreground():
     fx = Fixture()
     try:
@@ -6667,6 +6685,35 @@ def test_close_idle_keeps_a_workspace_with_a_live_agent():
         fx.close()
 
 
+def test_close_idle_keeps_a_workspace_with_a_malformed_pane_row():
+    for bad in ({"workspace_id": "w1", "agent": None}, {"pane_id": "w1:p1", "agent": None}):
+        fx = Fixture()
+        try:
+            idle_fixture(fx)
+            Path(fx.env["FAKE_PANES"]).write_text(json.dumps([bad]))
+            before = fx.task_file.read_text()
+            out = close_idle(fx)
+            assert out["status"] == "kept", (bad, out)
+            assert not close_calls(fx), (bad, fx.calls())
+            assert fx.task_file.read_text() == before
+        finally:
+            fx.close()
+
+
+def test_close_idle_keeps_a_workspace_whose_agent_the_pane_list_misses():
+    fx = Fixture()
+    try:
+        idle_fixture(fx)
+        Path(fx.env["FAKE_PANES"]).write_text("[]")
+        Path(fx.env["FAKE_AGENTS"]).write_text(json.dumps(
+            [{"name": "a", "pane_id": "w1:p1", "workspace_id": "w1"}]))
+        out = close_idle(fx)
+        assert out == {"status": "kept", "kept": "live-agent", "workspace_id": "w1"}, out
+        assert not close_calls(fx), fx.calls()
+    finally:
+        fx.close()
+
+
 def test_close_idle_refuses_a_task_that_is_not_parked():
     fx = Fixture()
     try:
@@ -7013,6 +7060,7 @@ for name, test in (
     ("settle keeps a review-approved pane after its agent exits", test_settle_keeps_a_review_approved_pane_after_its_agent_exits),
     ("settle closes a review-approved pane once superseded", test_settle_closes_a_review_approved_pane_once_superseded),
     ("settle keeps the root pane of a superseded implement row", test_settle_keeps_the_root_pane_of_a_superseded_implement_row),
+    ("settle keeps the reopened root pane of a superseded repair row", test_settle_keeps_the_reopened_root_pane_of_a_superseded_repair_row),
     ("settle keeps a superseded repair pane with a busy foreground", test_settle_keeps_a_superseded_repair_pane_with_a_busy_foreground),
     ("settle keeps a superseded repair pane a later row claims", test_settle_keeps_a_superseded_repair_pane_a_later_row_claims),
     ("background exit menu regex rejects prose without the numbered option", test_background_exit_menu_regex_rejects_prose_without_the_numbered_option),
@@ -7185,6 +7233,8 @@ for name, test in (
     ("bound reprompt refuses a reservation whose readiness probe went stale", test_bound_reprompt_refuses_a_reservation_whose_readiness_probe_went_stale),
     ("close-idle closes a parked reviewed workspace and records it", test_close_idle_closes_a_parked_reviewed_workspace_and_records_it),
     ("close-idle keeps a workspace with a live agent", test_close_idle_keeps_a_workspace_with_a_live_agent),
+    ("close-idle keeps a workspace with a malformed pane row", test_close_idle_keeps_a_workspace_with_a_malformed_pane_row),
+    ("close-idle keeps a workspace whose agent the pane list misses", test_close_idle_keeps_a_workspace_whose_agent_the_pane_list_misses),
     ("close-idle refuses a task that is not parked", test_close_idle_refuses_a_task_that_is_not_parked),
     ("close-idle reports already-closed for a recorded closed workspace", test_close_idle_reports_already_closed_for_a_recorded_closed_workspace),
     ("reopen reports open for a listed task workspace", test_reopen_reports_open_for_a_listed_task_workspace),

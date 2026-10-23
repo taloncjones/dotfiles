@@ -1741,8 +1741,7 @@ def _agents_snapshot(herdr_cli, env):
     return agents
 
 
-def _snapshot(herdr_cli, workspace_id, env):
-    agents = _agents_snapshot(herdr_cli, env)
+def _raw_panes(herdr_cli, workspace_id, env):
     try:
         panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
                            env=env).get("panes")
@@ -1753,6 +1752,12 @@ def _snapshot(herdr_cli, workspace_id, env):
         panes = []
     if not isinstance(panes, list):
         raise DispatchError("herdr agent or pane list is malformed")
+    return panes
+
+
+def _snapshot(herdr_cli, workspace_id, env):
+    agents = _agents_snapshot(herdr_cli, env)
+    panes = _raw_panes(herdr_cli, workspace_id, env)
     return (agents,
             [p for p in panes if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
 
@@ -1862,8 +1867,10 @@ def _pane_verdict(task, row, agents, panes, reasons):
         return "kept-last-pane"
     sharing = [i for i, w in enumerate(task["workers"])
                if isinstance(w, dict) and w.get("pane_id") == pane_id]
-    # The first row's pane is the workspace root; a repair may still follow.
-    if not gate_only and pane_id == task["workers"][0].get("pane_id"):
+    # The first row's pane, or the pane reopen recorded, is the workspace root;
+    # a repair may still follow.
+    roots = (task["workers"][0].get("pane_id"), task.get(core.WORKSPACE_ROOT_PANE_KEY))
+    if not gate_only and pane_id in roots:
         return "kept-shared"
     if not all(core.row_releases_pane(task, i, reasons(i)) for i in sharing):
         return "kept-shared"
@@ -1939,9 +1946,16 @@ def _workspace_kept(herdr_cli, task, workspace_id, env):
     """-> (kept code or None, pane ids): why the workspace may not be closed."""
     if not _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
         return "other-worktree", set()
-    agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    agents = _agents_snapshot(herdr_cli, env)
+    raw = _raw_panes(herdr_cli, workspace_id, env)
+    # A row herdr cannot place proves nothing about what runs there: keep.
+    if not all(isinstance(p, dict) and isinstance(p.get("pane_id"), str) and p["pane_id"]
+               and isinstance(p.get("workspace_id"), str) and p["workspace_id"] for p in raw):
+        return "malformed-pane", set()
+    panes = [p for p in raw if p["workspace_id"] == workspace_id]
     ids = _pane_ids(panes)
-    if any(_malformed_agent(a) or a["pane_id"] in ids for a in agents):
+    if any(_malformed_agent(a) or a["pane_id"] in ids or a.get("workspace_id") == workspace_id
+           for a in agents):
         return "live-agent", ids
     if not all(_pane_idle(herdr_cli, pane_id, env) for pane_id in sorted(ids)):
         return "busy-pane", ids
