@@ -64,6 +64,8 @@ STATE_ROOT/
     queue.json                        # todos queued to start next (see "queue.json" below); `set-queue` writes it
     rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
     decisions.jsonl                   # append-only owner decisions (see "decisions.jsonl" below); fenced verbs and `rollover --carry` write it
+    away.json                         # away-mode flag (see "away.json and asks.jsonl" below); `away` writes it
+    asks.jsonl                        # owner questions queued while away; `queue-ask` and `drop-ask` append
     rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed|takeover, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
     tasks/
       <task_id>.json                  # durable task record
@@ -275,6 +277,23 @@ id, more than 10 ids, a stale fence or a foreign session. No `--todo` clears
 the queue. `session` and `fence` are an audit trail only. The fleet panel's
 Queue tab reads the file for display; nothing else does. A missing file is an
 empty queue; a file of another shape reads as unreadable.
+
+### `away.json` and `asks.jsonl`
+
+`away.json`: `{"v":1,"on":<bool>,"since":<iso>|null,"session":<id>,"fence":<n>}`,
+replaced whole (atomic) by `away --on|--off`, never deleted. A missing file is
+off; an unparseable file reads as on. It gates only whether `next` prints
+`queue-ask` instead of `ask` and whether `queue-ask` accepts a write.
+
+`asks.jsonl`: append-only, `v: 1`, torn tails handled as in `decisions.jsonl`.
+`event: ask` (`id`, `ts`, `task` or null, `question` of at most 500
+characters, `options` of 0 or 2-4 labels, `recommendation`, `action` or null)
+is written by `queue-ask`. `event: drop` (`drops: <ask id>`, `reason`
+`stale`, `withdrawn` or `superseded`) is written by `drop-ask` and by a
+superseding `queue-ask`. `answer-ask` writes one `decisions.jsonl` record in
+`note-decision`'s shape plus `"ask": <ask id>`. A live ask has no drop and no
+decision (retired or not) naming it. Readers skip unparseable lines. The
+fleet panel's Queue tab lists live asks.
 
 ### `config.json`
 

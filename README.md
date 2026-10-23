@@ -427,6 +427,8 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 
 **Commands** (`/command`):
 
+- `/afk` - Queue herdr director questions while away
+- `/back` - Ask the queued questions on return
 - `/checks` - View CI status
 - `/commit` - Create a commit with auto-detected scope
 - `/done` - Finish work and clean up
