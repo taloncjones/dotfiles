@@ -187,10 +187,14 @@ function director() {    # director() launches the herdr director with inbound m
     local arg
     local -a mode=(--permission-mode auto)
     local -a fleet=()
+    local -a args=()
     [[ -d "$DOTFILES_FLEET_PLUGIN" ]] && fleet=(--plugin-dir "$DOTFILES_FLEET_PLUGIN")
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
+        # --afk opens the session in away mode: /afk goes last, as the prompt.
+        [[ "$arg" == --afk ]] || args+=("$arg")
     done
+    (( ${#args} != $# )) && args+=(/afk)
     # In the dotfiles checkout the guard hooks are the product: allow rules
     # let the director read and edit them without the auto-mode classifier.
     # Workers keep the classifier and report blocked:; the director applies
@@ -211,6 +215,6 @@ function director() {    # director() launches the herdr director with inbound m
             local launcher=$sysparams[pid]
             caffeinate -is -w "$launcher" &!
         fi
-        claude --agent director "${guard[@]}" --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "$@"
+        claude --agent director "${guard[@]}" --settings '{"crossSessionInbound":"accept","autoCompactWindow":350000}' "${fleet[@]}" "${mode[@]}" "${args[@]}"
     )
 }

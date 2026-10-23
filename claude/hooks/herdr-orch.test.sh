@@ -12780,6 +12780,221 @@ out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-jso
 printf '%s\n' "$out" | grep -qx 'rollover-due used_pct=31 threshold=30'
 SH
 
+AWAY_FIXTURE=$(mktemp); export AWAY_FIXTURE
+cat > "$AWAY_FIXTURE" <<'PYFIX'
+import importlib.util, json, os, shlex, subprocess, tempfile
+CORE = os.path.abspath("claude/hooks/herdr_orch_core.py")
+tmp = os.path.realpath(tempfile.mkdtemp())
+home = os.path.join(tmp, "home")
+repo = os.path.join(home, "Git", "personal", "project")
+os.environ.update(HOME=home, HERDR_COORDINATION_ROOT=os.path.join(tmp, "coord"),
+                  GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                  GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                  GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+os.environ.pop("CLAUDE_CONFIG_DIR", None)
+os.makedirs(repo)
+for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"],
+             ["remote", "add", "origin", "https://github.com/acme/widget.git"]):
+    subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True)
+spec = importlib.util.spec_from_file_location("core", CORE)
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+slug = c._context_slug(c.repository_context(repo))
+rd = os.path.join(home, ".claude", "herdr-orch", slug)
+
+def run(*a, ok=True):
+    p = subprocess.run(["python3", CORE, *a], capture_output=True, text=True)
+    if ok:
+        assert p.returncode == 0, (a, p.returncode, p.stdout, p.stderr)
+    return p
+
+def claim(session, *extra):
+    return run("claim-owner", "--repo-slug", slug, "--repo-path", repo, "--session", session,
+               "--host", "h", "--pid", str(os.getpid()), *extra).stdout.strip()
+
+def write_task(tid, status="in-progress", workers=True):
+    os.makedirs(os.path.join(rd, "tasks"), exist_ok=True)
+    with open(os.path.join(rd, "tasks", tid + ".json"), "w") as fh:
+        json.dump({"v": 1, "task_id": tid, "status": status, "base_sha": "b" * 40,
+                   "worktree": os.path.join(tmp, "gone-" + tid),
+                   "workers": ([{"phase": "implement", "workspace_id": "w2", "runtime": "claude"}]
+                               if workers else [])}, fh)
+
+agents, wss = os.path.join(tmp, "a.json"), os.path.join(tmp, "w.json")
+open(agents, "w").write('{"result":{"agents":[]}}')
+open(wss, "w").write('{"result":{"workspaces":[]}}')
+
+def fl(session, fence):
+    return ["--repo-slug", slug, "--session", session, "--fence", fence]
+
+def nxt(session, fence, verb="next"):
+    extra = ["--repo-path", repo, "--runtime", "claude"] if verb == "next" else []
+    return run(verb, *fl(session, fence), *extra, "--agents-json", agents,
+               "--workspaces-json", wss).stdout.splitlines()
+
+def read_jsonl(name):
+    path = os.path.join(rd, name)
+    return [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
+PYFIX
+
+check "away: next queues one ask for an ask action and reports it in the away line" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+assert not any(l.startswith("away:") for l in nxt("S", fence)), "no away line while off and empty"
+first = run("away", *F, "--on").stdout.strip()
+since = json.load(open(os.path.join(rd, "away.json")))["since"]
+assert first == f"away: on since {since}, 0 asks queued", first
+run("away", *F, "--on")
+assert json.load(open(os.path.join(rd, "away.json")))["since"] == since, "repeat --on moved since"
+out = nxt("S", fence)
+assert not any(l.startswith("  next: ask ") for l in out), out
+q = [l for l in out if l.startswith("  next: run ") and " queue-ask " in l]
+assert len(q) == 1 and "--task PROJ-1" in q[0] and "--action abandoned-candidate" in q[0], out
+assert out.count(f"away: on since {since}, 0 asks queued") == 1, out
+assert out[-1].startswith("changed: ") and out[-2].startswith("next: run ") \
+    and " present-task " in out[-2] and out[-3].startswith("away: "), out
+p = subprocess.run(shlex.split(q[0][len("  next: run "):]), capture_output=True, text=True)
+assert p.returncode == 0 and p.stdout.startswith("ask: "), (p.stdout, p.stderr)
+ask = read_jsonl("asks.jsonl")[0]
+assert ask["task"] == "PROJ-1" and ask["options"] == [] and ask["recommendation"] is None, ask
+out = nxt("S", fence)
+assert f"away: on since {since}, 1 asks queued" in out, out
+chk = nxt("S", fence, "checkin")
+assert chk == [l for l in out if not l.startswith("  next:") and not l.startswith("next:")], (chk, out)
+PY
+
+check "away: a queued task is not asked again" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+q = [l for l in nxt("S", fence) if " queue-ask " in l][0]
+argv = shlex.split(q[len("  next: run "):])
+aid = subprocess.run(argv, capture_output=True, text=True).stdout.split()[1]
+out = nxt("S", fence)
+assert f"  next: queued {aid}" in out and not any(" queue-ask " in l for l in out), out
+assert "already queued" in subprocess.run(argv, capture_output=True, text=True).stdout
+write_task("PROJ-2", status="design-approved", workers=False)
+out2 = nxt("S", fence)
+assert len([l for l in out2 if l.startswith("  next: queued ")]) == 1, out2
+r1 = run("queue-ask", *F, "--repo-wide", "--question", "Merge the batch?").stdout
+assert r1.startswith("ask: ") and "already" not in r1, r1
+assert "already queued" in run("queue-ask", *F, "--repo-wide", "--question", "Merge the batch?").stdout
+assert len(read_jsonl("asks.jsonl")) == 2
+assert any(l.endswith(", 2 asks queued") for l in nxt("S", fence) if l.startswith("away:"))
+PY
+
+check "away: a changed check-in action supersedes the queued ask" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+a1 = run("queue-ask", *F, "--task", "PROJ-1", "--action", "paused", "--question", "relaunch?").stdout.split()[1]
+r = run("queue-ask", *F, "--task", "PROJ-1", "--action", "failed", "--question", "repair?").stdout
+assert "supersedes" in r and a1 in r, r
+off = run("away", *F, "--off").stdout.splitlines()
+assert off[0] == "away: off, 1 asks queued" and len(off) == 2, off
+assert json.loads(off[1])["action"] == "failed"
+run("away", *F, "--on")
+r = run("queue-ask", *F, "--task", "PROJ-1", "--question", "Merge it?", "--option", "yes",
+        "--option", "no").stdout
+assert "already queued" in r, r
+PY
+
+check "away: --off lists the queue and answer-ask or drop-ask closes each ask" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+t_id = run("queue-ask", *F, "--task", "PROJ-1", "--question", "Stop it?").stdout.split()[1]
+r_id = run("queue-ask", *F, "--repo-wide", "--question", "Merge?", "--option", "A", "--option", "B",
+           "--recommend", "A").stdout.split()[1]
+off = run("away", *F, "--off").stdout.splitlines()
+assert off[0] == "away: off, 2 asks queued" and len(off) == 3, off
+recs = [json.loads(l) for l in off[1:]]
+assert [r["id"] for r in recs] == [t_id, r_id], recs
+assert recs[0]["task_status"] == "in-progress" and recs[1]["task"] is None, recs
+assert recs[1]["options"] == ["A", "B"] and recs[1]["recommendation"] == "A", recs
+assert run("away", *F, "--off").stdout.splitlines() == off
+d = run("answer-ask", *F, "--id", t_id, "--text", "Owner: stop PROJ-1.").stdout
+assert d.startswith("decision: "), d
+dec = read_jsonl("decisions.jsonl")
+assert len(dec) == 1 and dec[0]["ask"] == t_id and dec[0]["task"] == "PROJ-1", dec
+assert "already answered" in run("answer-ask", *F, "--id", t_id, "--text", "again").stdout
+assert run("answer-ask", *F, "--id", "nope", "--text", "x", ok=False).returncode == 2
+assert run("drop-ask", *F, "--id", r_id, "--reason", "stale").stdout.startswith("ask: ")
+assert run("drop-ask", *F, "--id", "nope", "--reason", "stale", ok=False).returncode == 2
+assert "already closed" in run("drop-ask", *F, "--id", r_id, "--reason", "stale").stdout
+assert "already closed" in run("drop-ask", *F, "--id", t_id, "--reason", "stale").stdout
+assert run("answer-ask", *F, "--id", r_id, "--text", "late", ok=False).returncode == 2
+assert not any(l.startswith("away:") for l in nxt("S", fence))
+PY
+
+check "away: a rollover keeps the flag and the queue" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+s_fence = claim("S"); F = fl("S", s_fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+aid = run("queue-ask", *F, "--task", "PROJ-1", "--question", "Stop it?").stdout.split()[1]
+t_fence = claim("T", "--stale-secs", "0")
+out = nxt("T", t_fence)
+assert any(l.startswith("away: on since ") and l.endswith(", 1 asks queued") for l in out), out
+names = ("away.json", "asks.jsonl", "decisions.jsonl")
+def snap():
+    return [open(os.path.join(rd, n), "rb").read() if os.path.exists(os.path.join(rd, n)) else None
+            for n in names]
+before = snap()
+for args in (["away", "--off"], ["queue-ask", "--repo-wide", "--question", "x?"],
+             ["answer-ask", "--id", aid, "--text", "t"], ["drop-ask", "--id", aid, "--reason", "stale"]):
+    p = run(args[0], *F, *args[1:], ok=False)
+    assert p.returncode == 1 and "owner: stale-fence" in p.stdout, (args, p.returncode, p.stdout)
+assert snap() == before
+assert run("away", *fl("T", t_fence), "--off").stdout.splitlines()[0] == "away: off, 1 asks queued"
+PY
+
+check "away: queue-ask refuses bad input and a closed away mode" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+def refused(*a):
+    p = run("queue-ask", *F, *a, ok=False)
+    assert p.returncode == 2, (a, p.returncode, p.stdout, p.stderr)
+    assert not os.path.exists(os.path.join(rd, "asks.jsonl")), a
+refused("--repo-wide", "--question", "q?")
+run("away", *F, "--on")
+refused("--repo-wide", "--question", "")
+refused("--repo-wide", "--question", "x" * 501)
+refused("--repo-wide", "--question", "a\nb")
+refused("--repo-wide", "--question", "q?", "--option", "only")
+refused("--repo-wide", "--question", "q?", *[o for i in range(5) for o in ("--option", str(i))])
+refused("--repo-wide", "--question", "q?", "--option", "a", "--option", "b" * 101)
+refused("--repo-wide", "--question", "q?", "--option", "a", "--option", "b", "--recommend", "c")
+refused("--task", "PROJ-1", "--question", "q?", "--action", "ship")
+PY
+
+check "away: an unreadable away.json reads as on" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+open(os.path.join(rd, "away.json"), "w").write("not json")
+out = nxt("S", fence)
+assert "away: unreadable (treated as on), 0 asks queued" in out, out
+q = [l for l in out if " queue-ask " in l]
+assert len(q) == 1, out
+p = subprocess.run(shlex.split(q[0][len("  next: run "):]), capture_output=True, text=True)
+assert p.returncode == 0 and p.stdout.startswith("ask: "), (p.stdout, p.stderr)
+assert run("away", *F, "--off").stdout.splitlines()[0] == "away: off, 1 asks queued"
+assert "away: off, 1 asks queued" in nxt("S", fence)
+PY
+
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD
 s = open("claude/skills/herdr-orchestration/SKILL.md").read()

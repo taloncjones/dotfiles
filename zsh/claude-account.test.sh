@@ -558,6 +558,10 @@ run_case "director keeps a prompt clear of the variadic guard rules" \
     "$SBHOME/Git/personal/dotfiles" "HERDR_ENV=1 director fix-it --permission-mode manual" "UNSET" \
     "$GPREFIX fix-it --permission-mode manual"
 
+run_case "director --afk opens with the /afk prompt" \
+    "$SBHOME/Git/personal/dotfiles" "HERDR_ENV=1 director --afk --permission-mode manual" "UNSET" \
+    "$GPREFIX --permission-mode manual /afk"
+
 # With the plugin directory missing, director launches with no --plugin-dir.
 rec="$TMP/rec"; : >"$rec"
 RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \

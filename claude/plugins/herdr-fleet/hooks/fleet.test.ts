@@ -1514,6 +1514,35 @@ test('the queue tab lists queued todos with board links', async ($, on) => {
   expect(all.join('\n')).not.toContain('Backlog only')
 })
 
+test('the queue tab lists queued owner asks above queued todos', async ($, on) => {
+  const ask = (id: string, task: string | null, question: string) =>
+    JSON.stringify({ v: 1, event: 'ask', id, task, question })
+  const w = newWorld({
+    ...owner('a'), ...boardFiles(),
+    [`${ROOT}/a/queue.json`]: JSON.stringify({ v: 1, todos: ['q1', 'q2'] }),
+    ...todoFile('q1', 'First thing'), ...todoFile('q2', 'Second thing'),
+    [`${ROOT}/a/asks.jsonl`]: [
+      ask('live1', 'PROJ-1', 'Stop PROJ-1?'),
+      ask('done1', 'PROJ-2', 'Answered question'),
+      ask('gone1', null, 'Dropped question'),
+      JSON.stringify({ v: 1, event: 'drop', drops: 'gone1', reason: 'stale' }),
+      'not json',
+    ].join('\n') + '\n',
+    [`${ROOT}/a/decisions.jsonl`]: JSON.stringify({ v: 1, id: 'd1', event: 'decision', ask: 'done1' }) + '\n',
+  })
+  w.scope = scopeOf(ACCOUNT_A)
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  expect((await ui.find({ key: 'tab-queue' })).props.label).toBe('queue (3)')
+  const all = await tabLines(ui, 'tab-queue')
+  const first = all.findIndex(t => t.includes('? PROJ-1: Stop PROJ-1?'))
+  expect(first).toBeGreaterThanOrEqual(0)
+  expect(all.findIndex(t => t.includes('First thing'))).toBeGreaterThan(first)
+  expect(all.join('\n')).not.toContain('Answered question')
+  expect(all.join('\n')).not.toContain('Dropped question')
+})
+
 test('an empty or missing queue draws no queue rows', async ($, on) => {
   const w = newWorld({ ...owner('a'), ...todoFile('q1', 'Backlog only') })
   const clock = stub(on, w)
