@@ -860,6 +860,10 @@ def launch(
         base = rd / "leads" / binding
     pending_task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
     _validate_task_context(pending_task, repository, repo_slug)
+    closed = pending_task.get(core.WORKSPACE_CLOSED_KEY)
+    if isinstance(closed, dict) and closed.get("workspace_id") == workspace_id:
+        raise DispatchError(
+            f"workspace {workspace_id} is closed: run reopen, then launch into its pane")
     if phase == "ship" and any(
             isinstance(w, dict) and w.get("pane_id") == pane_id and w.get("phase") != "ship"
             for w in pending_task.get("workers", [])):
@@ -1737,8 +1741,7 @@ def _agents_snapshot(herdr_cli, env):
     return agents
 
 
-def _snapshot(herdr_cli, workspace_id, env):
-    agents = _agents_snapshot(herdr_cli, env)
+def _raw_panes(herdr_cli, workspace_id, env):
     try:
         panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
                            env=env).get("panes")
@@ -1749,6 +1752,12 @@ def _snapshot(herdr_cli, workspace_id, env):
         panes = []
     if not isinstance(panes, list):
         raise DispatchError("herdr agent or pane list is malformed")
+    return panes
+
+
+def _snapshot(herdr_cli, workspace_id, env):
+    agents = _agents_snapshot(herdr_cli, env)
+    panes = _raw_panes(herdr_cli, workspace_id, env)
     return (agents,
             [p for p in panes if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
 
@@ -1858,8 +1867,10 @@ def _pane_verdict(task, row, agents, panes, reasons):
         return "kept-last-pane"
     sharing = [i for i, w in enumerate(task["workers"])
                if isinstance(w, dict) and w.get("pane_id") == pane_id]
-    # The first row's pane is the workspace root; a repair may still follow.
-    if not gate_only and pane_id == task["workers"][0].get("pane_id"):
+    # The first row's pane, or the pane reopen recorded, is the workspace root;
+    # a repair may still follow.
+    roots = (task["workers"][0].get("pane_id"), task.get(core.WORKSPACE_ROOT_PANE_KEY))
+    if not gate_only and pane_id in roots:
         return "kept-shared"
     if not all(core.row_releases_pane(task, i, reasons(i)) for i in sharing):
         return "kept-shared"
@@ -1935,10 +1946,20 @@ def _workspace_kept(herdr_cli, task, workspace_id, env):
     """-> (kept code or None, pane ids): why the workspace may not be closed."""
     if not _workspace_on_task_worktree(herdr_cli, task, workspace_id, env):
         return "other-worktree", set()
-    agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    agents = _agents_snapshot(herdr_cli, env)
+    raw = _raw_panes(herdr_cli, workspace_id, env)
+    # A row herdr cannot place proves nothing about what runs there: keep.
+    if not all(isinstance(p, dict) and isinstance(p.get("pane_id"), str) and p["pane_id"]
+               and isinstance(p.get("workspace_id"), str) and p["workspace_id"] for p in raw):
+        return "malformed-pane", set()
+    panes = [p for p in raw if p["workspace_id"] == workspace_id]
     ids = _pane_ids(panes)
-    if any(_malformed_agent(a) or a["pane_id"] in ids for a in agents):
+    if any(_malformed_agent(a) or a["pane_id"] in ids or a.get("workspace_id") == workspace_id
+           for a in agents):
         return "live-agent", ids
+    # An open workspace always has a pane: none seen means the list is unreliable.
+    if not ids:
+        return "malformed-pane", ids
     if not all(_pane_idle(herdr_cli, pane_id, env) for pane_id in sorted(ids)):
         return "busy-pane", ids
     return None, ids
@@ -1965,6 +1986,165 @@ def close_emptied_workspace(herdr_cli, task, workspace_id, env):
     except DispatchError:
         return "close-failed"
     return "closed"
+
+
+def _utc_stamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _workspaces_on(herdr_cli, worktree, env):
+    """Ids of the workspaces herdr lists with `worktree` as their checkout."""
+    listed = _run_herdr(herdr_cli, ["workspace", "list"], env=env).get("workspaces")
+    if not isinstance(listed, list):
+        raise DispatchError("herdr workspace list is malformed")
+    found = []
+    for row in listed:
+        tree = row.get("worktree") if isinstance(row, dict) else None
+        checkout = tree.get("checkout_path") if isinstance(tree, dict) else None
+        if core.valid_workspace_id(row.get("workspace_id")) and _same_directory(checkout, worktree):
+            found.append(row["workspace_id"])
+    return found
+
+
+def _workspace_panes(herdr_cli, workspace_id, env):
+    """Pane ids herdr lists in one workspace."""
+    panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
+                       env=env).get("panes")
+    if not isinstance(panes, list):
+        raise DispatchError("herdr pane list is malformed")
+    return _pane_ids([p for p in panes
+                      if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
+
+
+def close_idle(*, repo_slug, task_id, session, fence, workspace_id, cwd,
+               runtime="claude", herdr_cli="herdr", env=None, personal=False):
+    """Close a parked reviewed task's agent-free workspace; the worktree, branch and record stay."""
+    child_env, repository, scope, rd = _settle_context(
+        repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "close-idle")
+    try:
+        with core.owner_transaction(rd, session, fence, context=repository, scope=scope,
+                                    expected_slug=repo_slug):
+            task_path = rd / "tasks" / f"{task_id}.json"
+            task = _read_task(task_path, task_id)
+            head, worktree = task.get("review_head_sha"), task.get("worktree")
+            if not (task.get("status") == "reviewed" and head
+                    and head == task.get("ship_parked_head")
+                    and task.get("workspace_id") == workspace_id
+                    and isinstance(worktree, str) and Path(worktree).is_dir()):
+                raise DispatchError(
+                    "close-idle needs a reviewed task parked at its reviewed head, the "
+                    "workspace its record names, and its worktree on disk")
+            _validate_task_context(task, repository, repo_slug)
+            result = {"workspace_id": workspace_id}
+            marker = task.get(core.WORKSPACE_CLOSED_KEY)
+            if (isinstance(marker, dict) and marker.get("workspace_id") == workspace_id
+                    and workspace_id not in _workspaces_on(herdr_cli, worktree, child_env)):
+                return {"status": "already-closed", **result}
+            outcome = close_emptied_workspace(herdr_cli, task, workspace_id, child_env)
+            if outcome != "closed":
+                return {"status": "kept", "kept": outcome, **result}
+            core.write_json_atomic(task_path, {
+                **task, core.WORKSPACE_CLOSED_KEY: {"workspace_id": workspace_id,
+                                                    "ts": _utc_stamp()}})
+            return {"status": "closed", **result}
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"close-idle could not hold the owner fence: {exc}") from exc
+
+
+def _claim_index(rd, workspace_id, task_id, repo_slug):
+    """Own the workspace's index: create it, keep this task's, refuse another's."""
+    path = core.index_path(rd, workspace_id)
+    core.create_payload_dir(path.parent)
+    for _ in range(2):
+        try:
+            index = json.loads(core.read_payload_text(path))
+        except FileNotFoundError:
+            index = None
+        except (OSError, ValueError):
+            raise DispatchError(f"reopen refused: index-conflict: {path.name} is unreadable")
+        if index is None:
+            if core.publish_exclusive(path, {"task_id": task_id, "repo_slug": repo_slug,
+                                             "role": "impl"}):
+                return
+            continue
+        if (isinstance(index, dict) and index.get("task_id") == task_id
+                and index.get("repo_slug") == repo_slug):
+            return
+        raise DispatchError(f"reopen refused: index-conflict: {path.name} names another task")
+    raise DispatchError(f"reopen refused: index-conflict: could not create {path.name}")
+
+
+def _reopen_locked(rd, repository, repo_slug, task_id, herdr_cli, env):
+    """Find or open the task worktree's workspace and record it. Caller holds the owner fence."""
+    task_path = rd / "tasks" / f"{task_id}.json"
+    task = _read_task(task_path, task_id)
+    if task.get("repo_slug") != repo_slug:
+        raise DispatchError("reopen refused: the task belongs to another repository")
+    worktree, recorded = task.get("worktree"), task.get("workspace_id")
+    on_tree = (_workspaces_on(herdr_cli, worktree, env)
+               if isinstance(worktree, str) and worktree else [])
+    if recorded in on_tree:
+        _claim_index(rd, recorded, task_id, repo_slug)
+        if core.WORKSPACE_CLOSED_KEY in task:
+            task = {k: v for k, v in task.items() if k != core.WORKSPACE_CLOSED_KEY}
+            core.write_json_atomic(task_path, task)
+        root = task.get(core.WORKSPACE_ROOT_PANE_KEY)
+        if not isinstance(root, str) or not root:
+            return {"status": "open", "workspace_id": recorded, "pane_id": None}
+        if root in _workspace_panes(herdr_cli, recorded, env):
+            return {"status": "open", "workspace_id": recorded, "pane_id": root}
+        raise DispatchError(
+            f"reopen refused: root-pane-gone: {root} is not in {recorded}; close the "
+            "workspace by hand and run reopen again")
+    if not (isinstance(worktree, str) and Path(worktree).is_dir()):
+        raise DispatchError("reopen refused: worktree-missing")
+    primary = repository.get("primary_root")
+    if repository.get("primary_known") is not True or not primary:
+        raise DispatchError("reopen refused: primary-unknown: no proven main checkout")
+    if len(on_tree) > 1:
+        raise DispatchError("reopen refused: ambiguous-workspace: " + ", ".join(on_tree))
+    if not on_tree:
+        _run_herdr(herdr_cli, ["worktree", "open", "--cwd", primary, "--path", worktree,
+                               "--no-focus"], env=env, timeout_secs=60, json_result=False)
+        on_tree = _workspaces_on(herdr_cli, worktree, env)
+        if len(on_tree) != 1:
+            raise DispatchError("reopen refused: open-unconfirmed: herdr lists "
+                                f"{len(on_tree)} workspaces on the worktree")
+    workspace_id = on_tree[0]
+    _claim_index(rd, workspace_id, task_id, repo_slug)
+    panes = _workspace_panes(herdr_cli, workspace_id, env)
+    if len(panes) != 1:
+        raise DispatchError(
+            f"reopen refused: pane-ambiguous: {workspace_id} holds {len(panes)} panes; "
+            "close the workspace by hand and run reopen again")
+    (pane_id,) = panes
+    core.write_json_atomic(task_path, {
+        **{k: v for k, v in task.items() if k != core.WORKSPACE_CLOSED_KEY},
+        "workspace_id": workspace_id, core.WORKSPACE_ROOT_PANE_KEY: pane_id})
+    _task_label_result(rd, task_id, herdr_cli, env)
+    return {"status": "reopened", "workspace_id": workspace_id, "pane_id": pane_id}
+
+
+def _reopen_under_fence(*, rd, repository, scope, repo_slug, task_id, session, fence,
+                        herdr_cli, env):
+    try:
+        with core.owner_transaction(rd, session, fence, context=repository, scope=scope,
+                                    expected_slug=repo_slug):
+            return _reopen_locked(rd, repository, repo_slug, task_id, herdr_cli, env)
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"reopen could not hold the owner fence: {exc}") from exc
+
+
+def reopen(*, repo_slug, task_id, session, fence, cwd, runtime="claude",
+           herdr_cli="herdr", env=None, personal=False):
+    """Give a task whose workspace is closed a workspace on its worktree, and record it."""
+    if not core.valid_task_id(task_id):
+        raise DispatchError("invalid task identity")
+    child_env, repository, scope, rd = _repo_context(
+        repo_slug, cwd, runtime, personal, env, "reopen")
+    return _reopen_under_fence(rd=rd, repository=repository, scope=scope, repo_slug=repo_slug,
+                               task_id=task_id, session=session, fence=fence,
+                               herdr_cli=herdr_cli, env=child_env)
 
 
 def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env):
@@ -2314,6 +2494,27 @@ def _gate_incomplete(phase, task_id, step, detail, **extra):
             "detail": str(detail)[:200], **extra}
 
 
+def _gate_place(phase, *, ctx, rd, task, impl, repo_slug, task_id, session, fence,
+                herdr_cli, env):
+    """-> (task, workspace_id, pane_id) to split for the gate, or an incomplete result.
+
+    The implement row's workspace is used while it is open on the task worktree;
+    otherwise the worktree is reopened and the record re-read."""
+    ws = impl.get("workspace_id") or ""
+    if _workspace_on_task_worktree(herdr_cli, task, ws, env):
+        return task, ws, impl["pane_id"]
+    try:
+        opened = _reopen_under_fence(
+            rd=rd, repository=ctx["repository"], scope=ctx["scope"], repo_slug=repo_slug,
+            task_id=task_id, session=session, fence=fence, herdr_cli=herdr_cli, env=env)
+        if not opened["pane_id"]:
+            raise DispatchError("the reopened workspace has no recorded root pane to split")
+        task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    except DispatchError as exc:
+        return _gate_incomplete(phase, task_id, "reopen", exc)
+    return task, opened["workspace_id"], opened["pane_id"]
+
+
 INFRA_RERUN_LIMIT = 2
 
 
@@ -2375,10 +2576,17 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
     ws = impl.get("workspace_id") or ""
     reviews = {w.get("launch_id") for w in task.get("workers", [])
                if isinstance(w, dict) and w.get("phase") == "review"}
+    # A reopened workspace holds rows the implement row's workspace does not.
+    workspaces = [ws] + sorted({w["workspace_id"] for w in task.get("workers", [])
+                                if isinstance(w, dict) and w.get("workspace_id")
+                                and w["workspace_id"] != ws})
+    swept = {"rows": []}
     try:
-        swept = sweep(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
-                      workspace_id=ws, cwd=worktree, runtime=runtime, herdr_cli=herdr_cli,
-                      env=env, personal=personal)
+        for workspace_id in workspaces:
+            result = sweep(repo_slug=repo_slug, task_id=task_id, session=session, fence=fence,
+                           workspace_id=workspace_id, cwd=worktree, runtime=runtime,
+                           herdr_cli=herdr_cli, env=env, personal=personal)
+            swept["rows"].extend(result.get("rows", []))
     except DispatchError as exc:
         return _gate_incomplete("review", task_id, "sweep", exc)
     live = [r.get("launch_id") for r in swept.get("rows", [])
@@ -2399,13 +2607,19 @@ def _dispatch_review_gate(*, ctx, rd, task, head, repo_slug, task_id, session, f
                                 "--json", json.dumps(record), ctx=ctx)
         if not ok:
             return _gate_incomplete("review", task_id, "write-task", detail)
+    placed = _gate_place("review", ctx=ctx, rd=rd, task=task, impl=impl, repo_slug=repo_slug,
+                         task_id=task_id, session=session, fence=fence,
+                         herdr_cli=herdr_cli, env=env)
+    if isinstance(placed, dict):
+        return placed
+    task, ws, root_pane = placed
     ok, rendered = _core_step("render-brief", "--task-id", task_id, "--phase", "review",
                               "--focus-file", str(focus_file), ctx=ctx)
     if not ok:
         return _gate_incomplete("review", task_id, "render-brief", rendered)
     brief = json.loads(rendered)
     try:
-        pane = _gate_split(herdr_cli, impl["pane_id"], worktree, env)
+        pane = _gate_split(herdr_cli, root_pane, worktree, env)
     except DispatchError as exc:
         return _gate_incomplete("review", task_id, "pane-split", exc)
     try:
@@ -2489,8 +2703,13 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
         tier = "full"
     elif handoff is not None and handoff.get("verdict") != "APPROVE":
         tier = "full"
-    ws = impl.get("workspace_id") or ""
     fenced = ("--session", session, "--fence", str(fence))
+    placed = _gate_place("ship", ctx=ctx, rd=rd, task=task, impl=impl, repo_slug=repo_slug,
+                         task_id=task_id, session=session, fence=fence,
+                         herdr_cli=herdr_cli, env=env)
+    if isinstance(placed, dict):
+        return placed
+    task, ws, root_pane = placed
     args = ["--task-id", task_id, "--phase", "ship", "--focus-file", str(focus_file)]
     if tier:
         args += ["--tier", tier]
@@ -2511,7 +2730,7 @@ def _dispatch_ship_gate(*, ctx, rd, task, head, repo_slug, task_id, session, fen
         if not ok:
             return _gate_incomplete("ship", task_id, "write-task", detail)
     try:
-        pane = _gate_split(herdr_cli, impl["pane_id"], worktree, env)
+        pane = _gate_split(herdr_cli, root_pane, worktree, env)
     except DispatchError as exc:
         return _gate_incomplete("ship", task_id, "pane-split", exc)
     try:
@@ -2558,12 +2777,12 @@ def dispatch_gate(*, repo_slug, repo_path, runtime, task_id, session, fence, pha
     gates = {"review": _dispatch_review_gate, "ship": _dispatch_ship_gate}
     if phase not in gates:
         raise DispatchError("dispatch-gate phase must be review or ship")
-    child_env, _repository, _scope, rd = _repo_context(
+    child_env, repository, scope, rd = _repo_context(
         repo_slug, repo_path, runtime, personal, env, "dispatch-gate")
     if not Path(focus_file).is_file():
         raise DispatchError(f"focus file missing: {focus_file}")
     ctx = {"repo_slug": repo_slug, "repo_path": str(repo_path), "runtime": runtime,
-           "personal": personal, "env": child_env}
+           "personal": personal, "env": child_env, "repository": repository, "scope": scope}
     task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
     head = core._git(task.get("worktree") or "", "rev-parse", "HEAD")
     if not head:

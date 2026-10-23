@@ -483,6 +483,16 @@ def _dispatch_parser() -> argparse.ArgumentParser:
         sub.add_argument("--fence", required=True, type=int)
         sub.add_argument("--runtime", default="claude", choices=("claude", "codex"))
         sub.add_argument("--personal", action="store_true")
+    for verb in ("close-idle", "reopen"):
+        sub = commands.add_parser(verb)
+        flags = ["repo-slug", "task-id", "session", "cwd"]
+        if verb == "close-idle":
+            flags.append("workspace-id")
+        for flag in flags:
+            sub.add_argument(f"--{flag}", required=True)
+        sub.add_argument("--fence", required=True, type=int)
+        sub.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+        sub.add_argument("--personal", action="store_true")
     for verb in ("accept-review", "advance"):
         sub = commands.add_parser(verb)
         for flag in ("repo-slug", "repo-path", "task-id", "session"):
@@ -571,6 +581,15 @@ def main(argv: list[str] | None = None) -> int:
                 output = herdr_dispatch.settle(launch_id=args.launch_id, **kwargs)
             else:
                 output = herdr_dispatch.sweep(**kwargs)
+        elif args.command in ("close-idle", "reopen"):
+            kwargs = dict(
+                repo_slug=args.repo_slug, task_id=args.task_id, session=args.session,
+                fence=args.fence, cwd=args.cwd, runtime=args.runtime, personal=args.personal,
+            )
+            if args.command == "close-idle":
+                output = herdr_dispatch.close_idle(workspace_id=args.workspace_id, **kwargs)
+            else:
+                output = herdr_dispatch.reopen(**kwargs)
         elif args.command in ("accept-review", "advance"):
             kwargs = dict(repo_slug=args.repo_slug, repo_path=args.repo_path,
                           runtime=args.runtime, task_id=args.task_id, session=args.session,
@@ -598,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
         unsettled = any(row.get("status") != "settled" for row in output.get("settle", []))
         return (3 if unsettled or output.get("status") in
                 ("blocked", "unsupported", "not-settled", "busy",
-                 "occupant-unverified", "exit-incomplete", "incomplete") else 0)
+                 "occupant-unverified", "exit-incomplete", "incomplete", "kept") else 0)
     except (
         herdr_dispatch.DispatchError,
         OSError,
