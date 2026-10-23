@@ -1500,6 +1500,7 @@ cases = [
     (["pr", "review", "5", "-c=true"], None),
     (["api", "-X", "POST", "repos/o/r/pulls/5/{branch}", "-f", "event=APPROVE"], "unknown"),
     (["api", "-X", "POST", "repos/:owner/:repo/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/x:branch", "-f", "event=APPROVE"], "unknown"),
     (["pr", "review", "5", "-R", "-a", "-c"], None),
     (["pr", "comment", "5", "-b", "x"], None),
     (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"], "approve"),

@@ -694,6 +694,9 @@ GRAPHQL_PATHS = "graphql"
 API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
 
 
+PLACEHOLDER_RE = re.compile(r"\{|:(owner|repo|branch)\b")
+
+
 def normalize_endpoint(raw: str) -> str | None:
     """Canonical `gh api` endpoint: scheme, host, query, fragment and empty
     segments dropped. None when percent escapes, dot segments or a backslash
@@ -703,7 +706,7 @@ def normalize_endpoint(raw: str) -> str | None:
     segments = path.split("/")
     if "%" in path or "\\" in path or "." in segments or ".." in segments:
         return None
-    if "{" in path or any(seg in (":owner", ":repo", ":branch") for seg in segments):
+    if PLACEHOLDER_RE.search(path):
         return None
     return "/".join(seg for seg in segments if seg)
 
