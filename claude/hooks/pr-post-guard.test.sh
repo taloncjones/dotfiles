@@ -1334,5 +1334,235 @@ expect_class "KC6 a title edit is a body write" body pr edit 5 --title t
 expect_class "KC7 an issue comment is a post" post issue comment 5 -b x
 expect_class "KC8 a comment delete stays a delete" delete api -X DELETE repos/o/r/issues/comments/9
 
+# --- RE: review events bound to the option verb ------------------------------
+
+HOOK_ABS="$(pwd)/$HOOK"
+H40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf 'review text' >"$FIX/body.md"
+
+# payload_alt SID ANSWER LABEL1 LABEL2 TEXT -> PostToolUse AskUserQuestion JSON:
+# one single-select question with TEXT, the two labels and a Hold option
+payload_alt() {
+    PL_SID="$1" PL_ANSWER="$2" PL_L1="$3" PL_L2="$4" PL_TEXT="$5" python3 - <<'PY'
+import json, os
+q = "Post which?\n" + os.environ["PL_TEXT"]
+opts = [{"label": os.environ["PL_L1"], "description": "one"},
+        {"label": os.environ["PL_L2"], "description": "two"},
+        {"label": "Hold the review on #5", "description": "wait"}]
+qs = [{"question": q, "multiSelect": False, "options": opts}]
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": os.environ["PL_SID"], "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {q: os.environ["PL_ANSWER"]}}}))
+PY
+}
+
+# reg ARG...: register `gh ARG...` as a draft for s1 from $FIX; prints its hash, rc 1 when refused
+reg() {
+    out=$(cd "$FIX" && python3 "$HOOK_ABS" draft -- gh "$@" 2>"$FIX/reg.err"); rc=$?
+    printf '%s\n' "$out" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p'
+    return "$rc"
+}
+
+# refused LABEL NEEDLE ARG...: registration exits 1 naming NEEDLE and writes no draft
+refused() {
+    label="$1"; needle="$2"; shift 2
+    reg "$@" >/dev/null; rc=$?
+    if [ "$rc" = 1 ] && grep -q -- "$needle" "$FIX/reg.err" && [ -z "$(ls "$GATE" 2>/dev/null)" ]; then
+        printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (rc=%s err=%s)\n' "$label" "$rc" "$(cat "$FIX/reg.err")" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
+REVIEW_APPROVE="api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=APPROVE -F body=@body.md"
+REVIEW_CHANGES="api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=REQUEST_CHANGES -F body=@body.md"
+COMMENT_CALL="pr comment 5 -R o/r --body-file body.md"
+LBL_APPROVE='Approve #5 at aaaaaaa with this text (draft %s)'
+LBL_CHANGES='Request changes on #5 at aaaaaaa with this text (draft %s)'
+LBL_COMMENT='Post as a comment on #5 (draft %s)'
+
+case_gate re1
+HR=$(reg $REVIEW_APPROVE)
+expect_err "RE1 an approve review draft with a Post label is refused before the prompt" 'must start with `Approve`' "$(payload_q s1 "$(printf "$LBL_COMMENT" "$HR")" '' 'Post this? review text')"
+
+case_gate re2
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE2 an Approve label approves an approve review draft" "post gate: approved draft $HR" "$(payload_a s1 "$(printf "$LBL_APPROVE" "$HR")" 'review text')"
+expect_file "RE2 the draft is approved" "$GATE/s1.draft-$HR.approved" present
+
+case_gate re3
+HC=$(reg $COMMENT_CALL)
+expect_out "RE3 an Approve label on a comment draft is refused" 'its option must start with `Post`, not `Approve`' "$(payload_a s1 "$(printf "$LBL_APPROVE" "$HC")" 'review text')"
+expect_file "RE3 the comment draft stays pending" "$GATE/s1.draft-$HC.pending" present
+
+case_gate re4
+HRC=$(reg $REVIEW_CHANGES)
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE4 a Request changes label on an approve review is refused" 'must start with `Approve`, not `Request changes`' "$(payload_a s1 "$(printf "$LBL_CHANGES" "$HR")" 'review text')"
+expect_out "RE4 a Request changes label approves a request-changes draft" "post gate: approved draft $HRC" "$(payload_a s1 "$(printf "$LBL_CHANGES" "$HRC")" 'review text')"
+expect_file "RE4 only the request-changes draft is approved" "$GATE/s1.draft-$HR.approved" absent
+
+case_gate re5
+HC=$(reg $COMMENT_CALL)
+HR=$(reg $REVIEW_APPROVE)
+L_REVIEW=$(printf "$LBL_APPROVE" "$HR"); L_COMMENT=$(printf "$LBL_COMMENT" "$HC")
+expect_out "RE5 choosing the review approves it and dismisses the comment" "post gate: draft $HC dismissed (another option was chosen)" "$(payload_alt s1 "$L_REVIEW" "$L_REVIEW" "$L_COMMENT" 'review text')"
+expect_file "RE5 the review draft is approved" "$GATE/s1.draft-$HR.approved" present
+expect_file "RE5 the comment draft is not approved" "$GATE/s1.draft-$HC.approved" absent
+expect_file "RE5 the comment draft is dismissed" "$GATE/s1.draft-$HC.dismissed" present
+
+case_gate re6
+HC=$(reg $COMMENT_CALL)
+HR=$(reg $REVIEW_APPROVE)
+L_REVIEW=$(printf "$LBL_APPROVE" "$HR"); L_COMMENT=$(printf "$LBL_COMMENT" "$HC")
+expect_out "RE6 Hold decides nothing" "not decided (no Post or Skip option was chosen)" "$(payload_alt s1 'Hold the review on #5' "$L_REVIEW" "$L_COMMENT" 'review text')"
+expect_file "RE6 the review draft stays pending" "$GATE/s1.draft-$HR.pending" present
+expect_file "RE6 the comment draft stays pending" "$GATE/s1.draft-$HC.pending" present
+
+case_gate re7
+refused "RE7 draft registration refuses gh pr review --approve" "must be" pr review 5 --approve -b x
+
+case_gate re8
+refused "RE8 draft registration refuses a reviews API event with a short commit_id" "must be" api -X POST repos/o/r/pulls/5/reviews -f commit_id=abc1234 -f event=APPROVE -f body=x
+case_gate re8b
+refused "RE8 and one with no commit_id" "must be" api -X POST repos/o/r/pulls/5/reviews -f event=REQUEST_CHANGES -f body=x
+
+case_gate re9
+refused "RE9 draft registration refuses a graphql mutation naming APPROVE" "must be" api graphql -f 'query=mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }'
+
+case_gate re13
+refused "RE13 draft registration refuses a reviews events call carrying APPROVE" "must be" api -X POST repos/o/r/pulls/5/reviews/9/events -f event=APPROVE -f body=x
+
+case_gate re10
+HR=$(reg $REVIEW_APPROVE)
+expect_err "RE10 a hedge word in an Approve label is ambiguous" "is ambiguous" "$(payload_q s1 "Approve #5 or hold (draft $HR)" '' 'Post this? review text')"
+
+case_gate re11
+HC=$(reg $COMMENT_CALL)
+HR=$(reg $REVIEW_APPROVE)
+L_REVIEW=$(printf "$LBL_APPROVE" "$HR"); L_COMMENT=$(printf "$LBL_COMMENT" "$HC")
+payload_alt s1 "$L_REVIEW" "$L_REVIEW" "$L_COMMENT" 'review text' | python3 "$HOOK" >/dev/null 2>&1
+expect_out "RE11 a later question naming the dismissed sibling cannot approve it" "post gate: draft $HC not decided (the question names more than one draft)" "$(payload_alt s1 "$L_COMMENT" "$L_REVIEW" "$L_COMMENT" 'review text')"
+expect_file "RE11 the sibling stays unapproved" "$GATE/s1.draft-$HC.approved" absent
+
+case_gate re14
+refused "RE14 draft registration refuses a reviews call with an event in the query string" "must be" api -X POST "repos/o/r/pulls/5/reviews?event=APPROVE&commit_id=$H40" -F body=@body.md
+case_gate re14b
+refused "RE14 and a reviews events call with an event in the query string" "must be" api -X POST "repos/o/r/pulls/5/reviews/9/events?event=APPROVE" -F body=@body.md
+case_gate re14c
+refused "RE14 and a reviews call with a fragment" "must be" api -X POST "repos/o/r/pulls/5/reviews#x" -f commit_id=$H40 -f event=APPROVE -F body=@body.md
+
+printf '{"event":"COMMENT","body":"x"}' >"$FIX/comment.json"
+printf '{"event":"APPROVE","body":"x"}' >"$FIX/approve.json"
+case_gate re16a
+refused "RE16 draft registration refuses two --input files" "must be" api -X POST repos/o/r/pulls/5/reviews --input "$FIX/comment.json" --input "$FIX/approve.json"
+case_gate re16b
+refused "RE16 and an --input file with a disagreeing -f event" "must be" api -X POST repos/o/r/pulls/5/reviews --input "$FIX/comment.json" -f event=APPROVE
+case_gate re16c
+refused "RE16 and a repeated -X" "must be" api -X GET -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=APPROVE -F body=@body.md
+case_gate re16d
+refused "RE16 and a repeated -f event" "must be" api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=COMMENT -f event=APPROVE -F body=@body.md
+case_gate re17a
+refused "RE17 draft registration refuses a +5 PR segment" "must be" api -X POST repos/o/r/pulls/+5/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+case_gate re17b
+refused "RE17 and a %35 PR segment" "must be" api -X POST repos/o/r/pulls/%35/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+case_gate re17c
+refused "RE17 and a zero-padded PR segment" "must be" api -X POST repos/o/r/pulls/05/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+
+case_gate re15
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE15 an Approve label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Approve #6 at aaaaaaa with this text (draft $HR)" 'review text')"
+expect_file "RE15 the draft stays pending" "$GATE/s1.draft-$HR.pending" present
+expect_out "RE15 an Approve label naming another head is refused" "must name the pinned head \`aaaaaaa\`" "$(payload_a s1 "Approve #5 at bbbbbbb with this text (draft $HR)" 'review text')"
+expect_file "RE15 the draft still stays pending" "$GATE/s1.draft-$HR.pending" present
+HRC=$(reg $REVIEW_CHANGES)
+expect_out "RE15 a Request changes label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Request changes on #15 at aaaaaaa with this text (draft $HRC)" 'review text')"
+
+expect_py "RE12 review_event classifies each argv branch" ok '
+cases = [
+    (["pr", "review", "5", "--approve", "-b", "x"], "approve"),
+    (["pr", "review", "5", "--approve=true"], "approve"),
+    (["pr", "review", "5", "-ab", "x"], "approve"),
+    (["pr", "review", "5", "-rb", "x"], "request-changes"),
+    (["pr", "review", "5", "--request-changes"], "request-changes"),
+    (["pr", "review", "5", "-a", "-r"], "unknown"),
+    (["pr", "review", "5", "-c", "-b", "--approve"], None),
+    (["pr", "review", "5", "-b", "-a"], None),
+    (["pr", "review", "5", "-R", "-a", "-c"], None),
+    (["pr", "comment", "5", "-b", "x"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"], "approve"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=REQUEST_CHANGES"], "request-changes"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=COMMENT"], None),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "body=x"], None),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=DISMISS"], "unknown"),
+    (["api", "repos/o/r/pulls/5/reviews", "-F", "event=@e.txt"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/9/events", "-f", "event=APPROVE"], "approve"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-f", "event=COMMENT"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation { x(event: APPROVE) }"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation { x(event: REQUEST_CHANGES) }"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation { x }"], None),
+    ([], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews?event=APPROVE&commit_id=" + "a" * 40], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/9/events?event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews#frag", "-f", "event=COMMENT"], "unknown"),
+]
+import json, os, tempfile
+d = tempfile.mkdtemp()
+for name, body, want in (("a.json", {"event": "APPROVE"}, "approve"), ("c.json", {"body": "x"}, None)):
+    with open(os.path.join(d, name), "w") as f:
+        json.dump(body, f)
+    cases.append((["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", name], want))
+cases.append((["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", "missing.json"], "unknown"))
+with open(os.path.join(d, "g.json"), "w") as f:
+    f.write(json.dumps({"variables": {"e": "APPROVE"}}).replace("A", "\\u0041"))
+cases.append((["api", "graphql", "--input", "g.json"], "unknown"))
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+expect_py "RE18 review_event reads one normalized endpoint and refuses repeated flags first" ok '
+import json, os, tempfile
+d = tempfile.mkdtemp()
+for name, body in (("gc.json", {"query": "mutation { addPullRequestReview(input: {event: COMMENT}) { clientMutationId } }"}),
+                   ("ga.json", {"query": "mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }"})):
+    with open(os.path.join(d, name), "w") as f:
+        json.dump(body, f)
+mut = "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}"
+rev = ["-f", "commit_id=" + "a" * 40, "-f", "event=COMMENT"]
+cases = [
+    (["api", "graphql", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "graphql", "--input", "gc.json"], None),
+    (["api", "https://api.github.com/graphql", "-f", mut], "unknown"),
+    (["api", "HTTPS://API.GitHub.com/graphql", "-f", mut], "unknown"),
+    (["api", "--hostname", "ghe.example.com", "https://ghe.example.com/graphql", "-f", mut], "unknown"),
+    (["api", "graphql/", "-f", mut], "unknown"),
+    (["api", "https://ghe.example.com/api/graphql", "-f", mut], "unknown"),
+    (["api", "/graphql", "-f", mut], "unknown"),
+    (["api", "graphql?x=1", "-f", mut], "unknown"),
+    (["api", "./graphql", "-f", mut], "unknown"),
+    (["api", "%67raphql", "-f", mut], "unknown"),
+    (["api", "GraphQL", "-f", mut], "unknown"),
+    (["api", "gRaPhQl", "-f", mut], "unknown"),
+    (["api", "https://api.github.com/GraphQL", "-f", mut], "unknown"),
+    (["api", "api/v3/graphql", "-f", mut], "unknown"),
+    (["api", "https://api.github.com/graphql", "-f", "query=query { viewer { login } }", "-X", "GET"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/?x=1", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls//5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5//reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "https://api.github.com/repos/o/r/pulls/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/./5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", *rev], None),
+    (["api", "repos/o/r/pulls/5/reviews/"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], "unknown"),
+]
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

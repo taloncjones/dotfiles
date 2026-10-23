@@ -6,7 +6,8 @@ the shell has done all quoting, substitution and continuation -- the shapes
 four review rounds used to hide a write from pr_post_guard.py's text hook.
 Classification and the draft state are pr_post_guard's; this file finds the
 real gh, reads the target PR's author (cached per session), decides the
-audience, spends an approved draft for a gated call, checks a delete targets
+audience, refuses an approve or request-changes review whose commit_id is not
+the live head, spends an approved draft for a gated call, checks a delete targets
 our own marker, prints an [INFO] notice for each work-repo write it lets
 through, and execs.
 """
@@ -156,11 +157,42 @@ def own_pr(target: str, args: list[str], cwd: str) -> bool:
     return author == login
 
 
+def review_pin_refusal(args: list[str], target: str, cwd: str) -> str | None:
+    """Denial text for an approve or request-changes review that is not the
+    pinned reviews call, or whose commit_id is no longer the PR's live head.
+    Runs in every repository and before any draft is spent: the pin is
+    correctness, not a go. A failed head read refuses."""
+    if pr_post_guard.review_event(args, cwd) is None:
+        return None
+    pin = pr_post_guard.pinned_review(args)
+    if pin is None:
+        return (
+            "Blocked: a review that approves or requests changes must be the reviews API call with a "
+            "40-hex commit_id field (`gh api -X POST repos/<o>/<r>/pulls/<n>/reviews -f commit_id=<head> "
+            "-f event=APPROVE|REQUEST_CHANGES -F body=@<file>`); `gh pr review --approve`, graphql and "
+            "the pending-review events path cannot pin the head."
+        )
+    owner, repo, number, gated, host = pin
+    try:
+        live = _gh_json(target, ["api", f"repos/{owner}/{repo}/pulls/{number}", *(["--hostname", host] if host else [])])["head"]["sha"]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return f"Blocked: could not read the live head of {owner}/{repo}#{number}; the review was not posted."
+    if live != gated:
+        return (
+            f"Blocked: {owner}/{repo}#{number} head moved: the review is pinned to {gated} but the live head is "
+            f"{live}. Re-gate the new head; do not retry this draft."
+        )
+    return None
+
+
 def gate(args: list[str], target: str) -> str | None:
     """Denial text, or None to exec. A work-repo post, body or reply that
     passes gets its [INFO] notice first."""
     kind = pr_post_guard.classify_gh(args)
     cwd = os.getcwd()
+    pin_refusal = review_pin_refusal(args, target, cwd)
+    if pin_refusal:
+        return pin_refusal
     if kind not in ("post", "body", "reply") or pr_post_guard.exempt_from_go(args, cwd):
         return None
     body = pr_post_guard.post_body(args, cwd)

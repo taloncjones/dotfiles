@@ -790,6 +790,17 @@ at most once, after its final gate.
   for the go.
 - `INCOMPLETE`: never posted; the marker grammar has no such verdict.
 
+On a PR this account did not author, in a work or personal repository, an
+`APPROVE` or `CHANGES` verdict also offers a GitHub review whose event matches
+the verdict, pinned to the gated head. See "Review events on another author's
+PR" in `claude/skills/herdr-orchestration/references/posting.md`: register the
+comment and the review (`gh api -X POST "repos/$PR_REPO/pulls/$PR/reviews"
+-f commit_id=<gated head> -f event=APPROVE|REQUEST_CHANGES -F body=@"$RUN_DIR/marker.md"`),
+ask one question with both, and offer the event only when the live head equals
+the gated head and this account has not already left that event at that head.
+The gh shim refuses the call when the head moved; re-gate instead of retrying.
+A posted review is not a marker comment: skip the supersede step.
+
 The herdr post gate enforcing this is a momentum guardrail, not a security
 boundary: it stops a well-meaning agent posting through `gh` as found on
 PATH. In a work repository the gh shim lets an `APPROVE` marker through on a

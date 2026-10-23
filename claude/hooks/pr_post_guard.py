@@ -26,7 +26,10 @@ a `draft` CLI:
   option reads as a post and names `draft <hash>`, and the draft's text is
   in that question; an option that reads as a skip (`skip draft <hash>`)
   dismisses it or withdraws its unspent approval. Typed prompts never
-  approve.
+  approve. The option verb names the draft's review event: `Approve` for a
+  pinned APPROVE review, `Request changes` for REQUEST_CHANGES, `Post` for
+  every other draft; one question may offer a comment and a review of the
+  same text, and choosing one dismisses the other.
 - UserPromptSubmit records which session this Claude process is on for the
   shim, removes legacy files and prunes old state.
 - PreToolUse AskUserQuestion refuses a prompt whose post option names an
@@ -73,11 +76,13 @@ from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
 # The owner's answer to a post prompt: a label naming `draft <hash>` decides
-# that draft. A post label starts with `Post` plus whitespace, or `(` then
-# `Post`; any other leading word ("Hold off on post draft h") is not a post.
+# that draft. A post label starts with `Post`, `Approve` or `Request changes`
+# plus whitespace, or `(` then the verb; any other leading word ("Hold off on
+# post draft h") is not a post.
 # A skip is the leading `Skip` or `skip draft h` ("Leave it (skip draft h)").
 DRAFT_TOKEN_RE = re.compile(r"\b(?:(?i:(post|skip))\s+)?(?i:draft)\s+([0-9a-f]{8})\b")
-LEAD_VERB_RE = re.compile(r"\s*\(?(post|skip)(?=\s)", re.IGNORECASE)
+LEAD_VERB_RE = re.compile(r"\s*\(?(post|skip|approve|request\s+changes)(?=\s)", re.IGNORECASE)
+POST_VERBS = ("post", "approve", "request changes")
 LEAD_PUNCT_POST_RE = re.compile(r"\s*\(?post(?=[^\w\s])", re.IGNORECASE)
 # A negation makes the verb unreliable ("Post nothing (draft h)"): fail closed.
 NEGATION_RE = re.compile(r"\b(?:not|never|no|none|nothing|nobody|neither|nor|zero|without|cannot)\b|n't\b", re.IGNORECASE)
@@ -141,6 +146,16 @@ VALUE_FLAGS = FIELD_FLAGS + (
     "-H", "--header", "-q", "--jq", "-t", "--template",
     "--hostname", "--cache", "-p", "--preview",
 )
+
+REVIEW_EVENT_PATH = re.compile(r"pulls/[1-9]\d*/reviews(?:/[1-9]\d*/events)?$")
+# Any reviews or events path, including PR segments gh would normalize (`+5`, `%35`, `05`).
+LOOSE_REVIEW_PATH = re.compile(r"pulls/[^/]*/reviews(?:/[^/]*/events)?$|%.*reviews")
+REVIEW_POST_PATH = re.compile(r"repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews")
+SHA40_RE = re.compile(r"[0-9a-f]{40}")
+GRAPHQL_EVENT_RE = re.compile(r"\b(?:APPROVE|REQUEST_CHANGES)\b")
+API_EVENTS = {"APPROVE": "approve", "REQUEST_CHANGES": "request-changes", "COMMENT": None}
+# Option verb a draft's review event needs; an `unknown` event has none.
+EVENT_VERBS = {None: "Post", "approve": "Approve", "request-changes": "Request changes"}
 
 # `gh` subcommands that only ever read. `search` and `api` are handled by
 # their own rules below (any `search` subcommand; `api` by method/path).
@@ -404,7 +419,9 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
     "that read as the action: a post starts with `Post` plus a space and ends with `(draft <hash>)` "
-    "(or is `Post draft <hash>`), with exactly one hash and none of "
+    "(or is `Post draft <hash>`); a pinned APPROVE review starts with `Approve` and a REQUEST_CHANGES review "
+    "with `Request changes`, and a comment and a review of one text may share a question; "
+    "each has exactly one hash and none of "
     "not/no/never/nothing/without/n't or if/unless/after/until/later/wait/hold/or/maybe/but/only/again/for now, "
     "a `?` or a dash aside, and a skip ends with "
     "`(skip draft <hash>)`, the full draft text in the question "
@@ -671,14 +688,31 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
     return method, path, host, has_field
 
 
+# GitHub routes graphql case-insensitively; Enterprise Server serves it at
+# api/graphql and api/v3/graphql, so match by lowercase suffix.
+GRAPHQL_PATHS = ("graphql", "api/graphql")
+API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
+
+
+def normalize_endpoint(raw: str) -> str | None:
+    """Canonical `gh api` endpoint: scheme, host, query, fragment and empty
+    segments dropped. None when percent escapes, dot segments or a backslash
+    still hide the real path; callers treat that as unknown for any write."""
+    path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
+    segments = path.split("/")
+    if "%" in path or "\\" in path or "." in segments or ".." in segments:
+        return None
+    return "/".join(seg for seg in segments if seg)
+
+
 def classify_api(args: list[str]) -> str:
     normalized = normalize_api_args(args)
     if normalized is None:
         return "write"
     method, path, _host, has_field = parse_api(normalized)
     if path is not None:
-        path = re.split(r"[?#]", path, maxsplit=1)[0]
-    if path == "graphql":
+        path = normalize_endpoint(path)
+    if path is not None and path.lower().endswith(GRAPHQL_PATHS):
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
             return "reply"
         return "read"
@@ -741,11 +775,132 @@ def classify_gh(args: list[str]) -> str:
     if sub == ("pr", "edit"):
         return "body"
     return "write"
-    if sub in (("pr", "comment"), ("pr", "review"), ("issue", "comment")):
-        return "post"
-    if sub == ("pr", "edit"):
-        return "body"
-    return "write"
+
+
+def _pr_review_event(rest: list[str]) -> str | None:
+    """Event of `gh pr review` flags: `--approve`, `--request-changes`, or
+    their short forms inside a cluster before any value flag."""
+    found: set[str] = set()
+    k = 0
+    while k < len(rest):
+        tok = rest[k]
+        k += 1
+        if tok in ("-b", "--body", "-F", "--body-file", "-R", "--repo"):
+            k += 1
+        elif tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            if name == "--approve":
+                found.add("approve")
+            elif name == "--request-changes":
+                found.add("request-changes")
+        elif tok.startswith("-") and len(tok) > 1:
+            for pos, ch in enumerate(tok[1:], 1):
+                if ch in "bFR":
+                    k += pos == len(tok) - 1
+                    break
+                if ch == "a":
+                    found.add("approve")
+                elif ch == "r":
+                    found.add("request-changes")
+    return found.pop() if len(found) == 1 else ("unknown" if found else None)
+
+
+def _graphql_event(api: list[str], cwd: str) -> str | None:
+    """A graphql reply naming an approval enum is unpinnable: `unknown`."""
+    if classify_api(api) != "reply":
+        return None
+    texts = list(api)
+    for path in draft_files(["api", *api]):
+        state, text = read_text(path, cwd)
+        if state != "text":
+            return "unknown"
+        texts.append(text)
+        try:
+            texts.extend(_json_strings(json.loads(text)))
+        except ValueError:
+            pass
+    return "unknown" if any(GRAPHQL_EVENT_RE.search(t) for t in texts) else None
+
+
+def _json_strings(node) -> list[str]:
+    """Every decoded string in a JSON value, keys included."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [t for k, v in node.items() for t in _json_strings(k) + _json_strings(v)]
+    if isinstance(node, list):
+        return [t for v in node for t in _json_strings(v)]
+    return []
+
+
+def repeated_api_flags(api: list[str]) -> bool:
+    """True when a gh api argv repeats --input or the method flag, so the
+    guard and gh could read different occurrences."""
+    inputs = sum(1 for t in api if t == "--input" or t.startswith("--input="))
+    methods = sum(1 for t in api if t in ("-X", "--method") or t.startswith(("--method=", "-X")))
+    return inputs > 1 or methods > 1
+
+
+def review_event(args: list[str], cwd: str | None = None) -> str | None:
+    """Review event a gh call submits: "approve", "request-changes",
+    "unknown" (an event this cannot read or name) or None for any other call."""
+    cwd = cwd or os.getcwd()
+    i, j = subcommand_index(args)
+    if i < len(args) and args[i] == "api":
+        api = normalize_api_args(args[i + 1:]) or args[i + 1:]
+        if repeated_api_flags(api):
+            return "unknown"
+        raw_method, raw_path, _host, has_field = parse_api(api)
+        method = raw_method or ("POST" if has_field else "GET")
+        path = normalize_endpoint(raw_path or "")
+        if path is None:
+            return "unknown" if method != "GET" else None
+        if path is not None and path.lower().endswith(GRAPHQL_PATHS):
+            return _graphql_event(api, cwd)
+        if not REVIEW_EVENT_PATH.search(path):
+            return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
+        if path != raw_path:
+            return "unknown" if method != "GET" else None
+        values = [
+            "@file" if typed and value.startswith("@") else value
+            for typed, key, value in api_fields(api) if key == "event"
+        ]
+        source = input_path(api)
+        if source is not None:
+            state, raw = read_text(source, cwd)
+            try:
+                data = json.loads(raw) if state == "text" else None
+            except ValueError:
+                data = None
+            if not isinstance(data, dict):
+                return "unknown"
+            if "event" in data:
+                values.append(data["event"])
+        events = {API_EVENTS.get(v, "unknown") if isinstance(v, str) else "unknown" for v in values}
+        return events.pop() if len(events) == 1 else ("unknown" if events else None)
+    if tuple(args[k] for k in (i, j) if k < len(args)) == ("pr", "review"):
+        return _pr_review_event(args[j + 1:])
+    return None
+
+
+def pinned_review(args: list[str]) -> tuple[str, str, str, str, str | None] | None:
+    """(owner, repo, pr, commit_id, hostname) of a POST to the reviews API
+    carrying one 40-hex `commit_id` field, else None: the only shape an
+    approve or request-changes review may take."""
+    i, _j = subcommand_index(args)
+    if i >= len(args) or args[i] != "api":
+        return None
+    api = normalize_api_args(args[i + 1:])
+    if api is None or input_path(api) is not None:
+        return None
+    method, path, host, has_field = parse_api(api)
+    hit = REVIEW_POST_PATH.fullmatch(path or "")
+    if (method or ("POST" if has_field else "GET")) != "POST" or not hit:
+        return None
+    shas = {value for _typed, key, value in api_fields(api) if key == "commit_id"}
+    if len(shas) != 1 or not SHA40_RE.fullmatch(next(iter(shas))):
+        return None
+    return (*hit.groups(), shas.pop(), host)
 
 
 def effective_command(stripped: list[str]) -> list[str]:
@@ -942,12 +1097,14 @@ def _move_fresh(src: Path, dst: Path) -> bool:
     return True
 
 
-def register_draft(directory: Path, sid: str, digest: str, args: list[str], text: str | None, now: float) -> bool:
+def register_draft(
+    directory: Path, sid: str, digest: str, args: list[str], text: str | None, now: float, cwd: str = "",
+) -> bool:
     """Record a draft as shown (pending) with the text it shows; False when
     it is already approved."""
     if draft_path(directory, sid, digest, "approved").exists():
         return False
-    record = {"v": 3, "created": now, "argv": list(args), "text": text}
+    record = {"v": 3, "created": now, "argv": list(args), "text": text, "cwd": cwd}
     write_atomic(draft_path(directory, sid, digest, "pending"), json.dumps(record))
     _unlink(draft_path(directory, sid, digest, "dismissed"))
     return True
@@ -965,8 +1122,24 @@ def shown(text, question: str) -> bool:
     return len(question) <= SHOWN_LIMIT and " ".join(text.split()) in " ".join(question.split())
 
 
-def approval_problem(directory: Path, sid: str, digest: str, question: str) -> str | None:
-    """Why choosing the post option for `draft <digest>` on `question` cannot approve the
+def label_binding_problem(argv: list[str], label: str | None) -> str | None:
+    """Why an Approve or Request changes label does not name its draft's PR and
+    pinned head (`#<n>` and the first 7 characters of commit_id); None when it does."""
+    pin = pinned_review(argv)
+    if pin is None:
+        return "its review is not a pinned reviews call"
+    text = normalize_label(label or "")
+    if not re.search(rf"#{pin[2]}(?!\d)", text):
+        return f"its option must name the PR as `#{pin[2]}`"
+    if pin[3][:7] not in text.lower():
+        return f"its option must name the pinned head `{pin[3][:7]}`"
+    return None
+
+
+def approval_problem(
+    directory: Path, sid: str, digest: str, question: str, verb: str = "Post", label: str | None = None
+) -> str | None:
+    """Why choosing the `verb` option for `draft <digest>` on `question` cannot approve the
     draft now; None when it can. Shared by the answer and the pre-check."""
     if not draft_path(directory, sid, digest, "pending").exists():
         if draft_path(directory, sid, digest, "approved").exists():
@@ -983,6 +1156,15 @@ def approval_problem(directory: Path, sid: str, digest: str, question: str) -> s
         or not (record["text"] is None or isinstance(record["text"], str))
     ):
         return f"draft {digest} not approved: its record is unreadable or predates prompt approval; register it again"
+    needed = EVENT_VERBS.get(review_event(record.get("argv") or [], record.get("cwd") or None))
+    if needed is None:
+        return f"draft {digest} not approved: its review event cannot be read or pinned; register a pinned review"
+    if needed != verb:
+        return f"draft {digest} not approved: its option must start with `{needed}`, not `{verb}`"
+    if needed != "Post":
+        bound = label_binding_problem(record.get("argv") or [], label)
+        if bound:
+            return f"draft {digest} not approved: {bound}"
     if isinstance(record["text"], str) and len(record["text"]) > SHOWN_LIMIT:
         return (
             f"draft {digest} not approved: its text is over {SHOWN_LIMIT} characters; "
@@ -1001,10 +1183,12 @@ def approval_problem(directory: Path, sid: str, digest: str, question: str) -> s
     return None
 
 
-def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
+def approve_draft(
+    directory: Path, sid: str, digest: str, question: str, verb: str = "Post", label: str | None = None
+) -> str:
     """Approve a pending draft the owner chose to post (spec R3 step 5);
     returns the context line."""
-    problem = approval_problem(directory, sid, digest, question)
+    problem = approval_problem(directory, sid, digest, question, verb, label)
     if problem:
         return problem
     pending = draft_path(directory, sid, digest, "pending")
@@ -1039,7 +1223,8 @@ def normalize_label(label: str) -> str:
 
 def label_decision(label: str) -> tuple[str | None, list[str]] | None:
     """(verb, digests) for a label naming a draft, None for any other label;
-    verb is "Post" or "Skip", or None when the label is ambiguous."""
+    verb is "Post", "Approve", "Request changes" or "Skip", or None when the
+    label is ambiguous."""
     label = normalize_label(label)
     tokens = list(DRAFT_TOKEN_RE.finditer(label))
     if not tokens:
@@ -1048,14 +1233,14 @@ def label_decision(label: str) -> tuple[str | None, list[str]] | None:
     hashes = {hit.lower() for hit in HASH_WORD_RE.findall(label)}
     signals = {hit.group(1).lower() for hit in tokens if hit.group(1)}
     lead = LEAD_VERB_RE.match(label)
-    lead_verb = lead.group(1).lower() if lead else None
+    lead_verb = " ".join(lead.group(1).lower().split()) if lead else None
     if lead_verb:
         signals.add(lead_verb)
     if "post" in signals and lead_verb != "post":
         return None, digests
     if len(digests) != 1 or len(hashes) != 1 or len(signals) != 1 or NEGATION_RE.search(label):
         return None, digests
-    if lead_verb == "post" and HEDGE_RE.search(label):
+    if lead_verb in POST_VERBS and HEDGE_RE.search(label):
         return None, digests
     return signals.pop().capitalize(), digests
 
@@ -1071,19 +1256,24 @@ def decision_labels(options: list) -> list[tuple[dict, str | None, list[str]]]:
     return named
 
 
-def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
-    """(verb, digest, question, why_undecided) for each draft a
+MULTI_DRAFT = "the question names more than one draft"
+STALE_WHYS = ("the prompt timed out", "the owner asked for more questions")
+
+
+def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None, tuple[str, ...]]]:
+    """(verb, digest, question, why_undecided, group) for each draft a
     question names in its option labels (spec R3); why_undecided is None
-    when the chosen option decides it."""
+    when the chosen option decides it. group holds every digest the
+    question names; handle_answer checks a group of more than one."""
     answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
     questions = response.get("questions")
     if not isinstance(questions, list):
         return []
     stale = None
     if response.get("afkTimeoutMs"):
-        stale = "the prompt timed out"
+        stale = STALE_WHYS[0]
     elif response.get("followUp"):
-        stale = "the owner asked for more questions"
+        stale = STALE_WHYS[1]
     found = []
     for question in questions:
         if not isinstance(question, dict):
@@ -1093,9 +1283,10 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
         named = decision_labels(options)
         if not named:
             continue
+        group = tuple(dict.fromkeys(d for _option, _verb, digests in named for d in digests))
         why = stale
-        if not why and len({digest for _option, _verb, digests in named for digest in digests}) > 1:
-            why = "the question names more than one draft"
+        if not why and any(len(digests) > 1 for _option, _verb, digests in named):
+            why = MULTI_DRAFT
         if not why and question.get("multiSelect"):
             why = "a multi-select question cannot approve"
         chosen = next((entry for entry in named if entry[0]["label"] == answers.get(text)), None)
@@ -1103,12 +1294,23 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
             why = "the chosen option label is ambiguous"
         if chosen and not why:
             _option, verb, digests = chosen
-            found.append((verb, digests[0], text, None))
+            found.append((verb, digests[0], text, None, group))
             continue
         why = why or "no Post or Skip option was chosen"
-        for digest in dict.fromkeys(d for _option, _verb, digests in named for d in digests):
-            found.append(("", digest, text, why))
+        for digest in group:
+            found.append(("", digest, text, why, group))
     return found
+
+
+def alternatives_pending(directory: Path, sid: str, group: tuple[str, ...]) -> bool:
+    """Every draft of the group is pending and records the same text."""
+    texts = set()
+    for digest in group:
+        record = read_json(draft_path(directory, sid, digest, "pending"))
+        if not isinstance(record, dict) or not isinstance(record.get("text"), str):
+            return False
+        texts.add(record["text"])
+    return len(texts) == 1
 
 
 def spend_draft(directory: Path, sid: str, digest: str) -> bool:
@@ -1214,19 +1416,31 @@ def handle_answer(payload: dict, directory: Path) -> str | None:
     if not isinstance(response, dict):
         return None
     decisions = answer_decisions(response)
+    answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
-        decisions = [(verb, digest, question, why or "no valid session id")
-                     for verb, digest, question, why in decisions]
+        decisions = [(verb, digest, question, why or "no valid session id", group)
+                     for verb, digest, question, why, group in decisions]
         sid = None
     lines = []
-    for verb, digest, question, why in decisions:
+    for verb, digest, question, why, group in decisions:
+        if len(group) > 1 and sid and why not in STALE_WHYS and not alternatives_pending(directory, sid, group):
+            if verb:
+                lines.extend(f"draft {d} not decided ({MULTI_DRAFT})" for d in group)
+                continue
+            why = MULTI_DRAFT
         if why:
             lines.append(f"draft {digest} not decided ({why})")
         elif verb == "Skip":
             lines.append(dismiss_draft(directory, sid, digest))
         else:
-            lines.append(approve_draft(directory, sid, digest, question))
+            line = approve_draft(directory, sid, digest, question, verb, answers.get(question))
+            lines.append(line)
+            if line.startswith("approved draft"):
+                for other in group:
+                    if other != digest:
+                        _move_fresh(draft_path(directory, sid, other, "pending"), draft_path(directory, sid, other, "dismissed"))
+                        lines.append(f"draft {other} dismissed (another option was chosen)")
     if sid:
         write_pid_map(directory, sid)
     return "\n".join(f"post gate: {line}" for line in lines) or None
@@ -1301,7 +1515,7 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
                     )
                 else:
                     fix = (
-                        "a post option must start with `Post` plus a space, or `(Post`; "
+                        "a post option must start with `Post`, `Approve` or `Request changes` plus a space, or `(` then the verb; "
                         "any other leading word is a refusal. Write `(skip draft <hash>)` "
                         "in a skip option, and name exactly one draft hash"
                     )
@@ -1310,9 +1524,9 @@ def handle_ask(payload: dict, directory: Path) -> str | None:
                 )
                 continue
             digest = digests[0]
-            if verb != "Post" or draft_path(directory, sid, digest, "approved").exists():
+            if verb == "Skip" or draft_path(directory, sid, digest, "approved").exists():
                 continue
-            problem = approval_problem(directory, sid, digest, text)
+            problem = approval_problem(directory, sid, digest, text, verb, option['label'])
             if problem:
                 problems[(digest, text)] = problem
     if not problems:
@@ -1374,8 +1588,18 @@ def draft_main(argv: list[str]) -> int:
     if digest is None:
         print("draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor", file=sys.stderr)
         return 1
+    event = review_event(args, cwd)
+    if event == "unknown" or (event and pinned_review(args) is None):
+        print(
+            "draft: a review that approves or requests changes must be "
+            "`gh api -X POST repos/<owner>/<repo>/pulls/<n>/reviews -f commit_id=<40-hex head> "
+            "-f event=APPROVE|REQUEST_CHANGES -F body=@<file>`; `gh pr review --approve`, graphql and "
+            "the pending-review events path cannot pin the head",
+            file=sys.stderr,
+        )
+        return 1
     text = post_body(args, cwd)[1]
-    if not register_draft(gate_dir(), sid, digest, args, text, time.time()):
+    if not register_draft(gate_dir(), sid, digest, args, text, time.time(), cwd):
         print(f"draft {digest} already approved")
         return 0
     print(f"draft {digest}: gh {shlex.join(args)}")
