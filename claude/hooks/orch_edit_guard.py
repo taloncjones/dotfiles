@@ -79,9 +79,9 @@ Accepted holes (allow), listed exactly and mirrored in install-layout.md:
 - A bare `cd` or `cd -`, read as a no-op by the cd tracker.
 - The unknown-cd advisory never clearing after a later literal `cd` (it only
   over-refuses).
-- An escaped dollar in a double-quoted `-C` value (`-C "dir\$x"`), read as
-  `dir\$x` where bash passes `dir$x`; it matters only for a directory name that
-  literally contains `$`.
+- A backslash-escaped dollar in a double-quoted `-C` value: the guard keeps the
+  backslash in the path where bash drops it; it matters only for a directory
+  name that literally contains `$`.
 This is a guard against drift, not evasion. The guard targets momentum
 mistakes; shapes that need deliberate obfuscation are accepted holes.
 
