@@ -841,5 +841,21 @@ else
     fail "RV17 the shim refuses an issue comment with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+gh api GraphQL -f "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV18 the shim refuses a mixed-case GraphQL mutation naming APPROVE"
+else
+    fail "RV18 the shim refuses a mixed-case GraphQL mutation naming APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api api/v3/graphql -f "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV19 the shim refuses an api/v3/graphql mutation naming APPROVE"
+else
+    fail "RV19 the shim refuses an api/v3/graphql mutation naming APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -688,7 +688,8 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
     return method, path, host, has_field
 
 
-# GitHub Enterprise Server serves graphql at api/graphql.
+# GitHub routes graphql case-insensitively; Enterprise Server serves it at
+# api/graphql and api/v3/graphql, so match by lowercase suffix.
 GRAPHQL_PATHS = ("graphql", "api/graphql")
 API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
 
@@ -711,7 +712,7 @@ def classify_api(args: list[str]) -> str:
     method, path, _host, has_field = parse_api(normalized)
     if path is not None:
         path = normalize_endpoint(path)
-    if path in GRAPHQL_PATHS:
+    if path is not None and path.lower().endswith(GRAPHQL_PATHS):
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
             return "reply"
         return "read"
@@ -854,7 +855,7 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
         path = normalize_endpoint(raw_path or "")
         if path is None:
             return "unknown" if method != "GET" else None
-        if path in GRAPHQL_PATHS:
+        if path is not None and path.lower().endswith(GRAPHQL_PATHS):
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
             return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
