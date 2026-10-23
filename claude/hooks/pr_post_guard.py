@@ -697,10 +697,13 @@ API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
 def normalize_endpoint(raw: str) -> str | None:
     """Canonical `gh api` endpoint: scheme, host, query, fragment and empty
     segments dropped. None when percent escapes, dot segments or a backslash
-    still hide the real path; callers treat that as unknown for any write."""
+    still hide the real path, as do the `{owner}` and `:owner` placeholders gh
+    expands; callers treat that as unknown for any write."""
     path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
     segments = path.split("/")
     if "%" in path or "\\" in path or "." in segments or ".." in segments:
+        return None
+    if "{" in path or any(seg in (":owner", ":repo", ":branch") for seg in segments):
         return None
     return "/".join(seg for seg in segments if seg)
 
@@ -777,6 +780,9 @@ def classify_gh(args: list[str]) -> str:
     return "write"
 
 
+GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
+
+
 def _pr_review_event(rest: list[str]) -> str | None:
     """Event of `gh pr review` flags: `--approve`, `--request-changes`, or
     their short forms inside a cluster before any value flag. A call with
@@ -792,7 +798,7 @@ def _pr_review_event(rest: list[str]) -> str | None:
         elif tok.startswith("--"):
             name = tok.split("=", 1)[0]
             if name == "--comment":
-                commented = True
+                commented = commented or "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
             elif name == "--approve":
                 found.add("approve")
             elif name == "--request-changes":
@@ -803,7 +809,10 @@ def _pr_review_event(rest: list[str]) -> str | None:
                     k += pos == len(tok) - 1
                     break
                 if ch == "c":
-                    commented = True
+                    value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
+                    commented = commented or value is None or value in GO_TRUE
+                    if value is not None:
+                        break
                 elif ch == "a":
                     found.add("approve")
                 elif ch == "r":
