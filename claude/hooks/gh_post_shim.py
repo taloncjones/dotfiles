@@ -169,8 +169,9 @@ def review_pin_refusal(args: list[str], target: str, cwd: str) -> str | None:
         return (
             "Blocked: a review that approves or requests changes must be the reviews API call with a "
             "40-hex commit_id field (`gh api -X POST repos/<o>/<r>/pulls/<n>/reviews -f commit_id=<head> "
-            "-f event=APPROVE|REQUEST_CHANGES -F body=@<file>`); `gh pr review --approve`, graphql and "
-            "the pending-review events path cannot pin the head."
+            "-f event=APPROVE|REQUEST_CHANGES -F body=@<file>`); `gh pr review --approve` or a "
+            "`gh pr review` with no `--comment` flag, graphql and the pending-review events path cannot pin "
+            "the head; pass `--comment` for a plain comment review."
         )
     owner, repo, number, gated, host = pin
     try:

@@ -149,7 +149,7 @@ VALUE_FLAGS = FIELD_FLAGS + (
 
 REVIEW_EVENT_PATH = re.compile(r"pulls/[1-9]\d*/reviews(?:/[1-9]\d*/events)?$")
 # Any reviews or events path, including PR segments gh would normalize (`+5`, `%35`, `05`).
-LOOSE_REVIEW_PATH = re.compile(r"pulls/[^/]*/reviews(?:/[^/]*/events)?$|%.*reviews")
+LOOSE_REVIEW_PATH = re.compile(r"pulls/[^/]*/reviews(?:/[^/]*/events)?$")
 REVIEW_POST_PATH = re.compile(r"repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews")
 SHA40_RE = re.compile(r"[0-9a-f]{40}")
 GRAPHQL_EVENT_RE = re.compile(r"\b(?:APPROVE|REQUEST_CHANGES)\b")
@@ -690,7 +690,7 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
 
 # GitHub routes graphql case-insensitively; Enterprise Server serves it at
 # api/graphql and api/v3/graphql, so match by lowercase suffix.
-GRAPHQL_PATHS = ("graphql", "api/graphql")
+GRAPHQL_PATHS = "graphql"
 API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
 
 
@@ -779,8 +779,10 @@ def classify_gh(args: list[str]) -> str:
 
 def _pr_review_event(rest: list[str]) -> str | None:
     """Event of `gh pr review` flags: `--approve`, `--request-changes`, or
-    their short forms inside a cluster before any value flag."""
+    their short forms inside a cluster before any value flag. A call with
+    no event flag at all is `unknown`: gh's interactive menu could pick one."""
     found: set[str] = set()
+    commented = False
     k = 0
     while k < len(rest):
         tok = rest[k]
@@ -789,7 +791,9 @@ def _pr_review_event(rest: list[str]) -> str | None:
             k += 1
         elif tok.startswith("--"):
             name = tok.split("=", 1)[0]
-            if name == "--approve":
+            if name == "--comment":
+                commented = True
+            elif name == "--approve":
                 found.add("approve")
             elif name == "--request-changes":
                 found.add("request-changes")
@@ -798,11 +802,15 @@ def _pr_review_event(rest: list[str]) -> str | None:
                 if ch in "bFR":
                     k += pos == len(tok) - 1
                     break
-                if ch == "a":
+                if ch == "c":
+                    commented = True
+                elif ch == "a":
                     found.add("approve")
                 elif ch == "r":
                     found.add("request-changes")
-    return found.pop() if len(found) == 1 else ("unknown" if found else None)
+    if found:
+        return found.pop() if len(found) == 1 else "unknown"
+    return None if commented else "unknown"
 
 
 def _graphql_event(api: list[str], cwd: str) -> str | None:
@@ -855,7 +863,7 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
         path = normalize_endpoint(raw_path or "")
         if path is None:
             return "unknown" if method != "GET" else None
-        if path is not None and path.lower().endswith(GRAPHQL_PATHS):
+        if path.lower().endswith(GRAPHQL_PATHS):
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
             return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None

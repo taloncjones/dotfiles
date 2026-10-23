@@ -802,6 +802,22 @@ else
 fi
 
 fresh_gate
+gh pr review 5 >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q -- "--comment" "$T/err"; then
+    pass "RV16 the shim refuses a bare gh pr review with no event flag"
+else
+    fail "RV16 the shim refuses a bare gh pr review with no event flag (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$HOME/Git/personal/repo" && gh pr review 5 >/dev/null 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q -- "--comment" "$T/err"; then
+    pass "RV17 a personal repository refuses a bare gh pr review with no event flag"
+else
+    fail "RV17 a personal repository refuses a bare gh pr review (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
 gh api graphql --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
     pass "RV13 the shim refuses graphql with two --input files"
