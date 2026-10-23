@@ -30,12 +30,80 @@ reserved claim-then-count in tasks/orch-edits.jsonl so parallel tool calls
 cannot overshoot. Every guarded attempt (allowed or refused) is appended to
 that log, best effort, after the decision.
 
-Accepted holes (allow): scripts and functions, `python -c`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
-`rsync`, `dd`, editors, `xargs`, process substitution, targets built from
-`$VAR`/`$(...)`/globs, a heredoc with no terminator, git calls past the
-10-second budget, NotebookEdit/MultiEdit, `awk`/`gawk -i inplace` (cycle-3
-A-1; only sed/gsed/perl are modeled as in-place editors). This is a guard
-against drift, not evasion.
+Git work-tree writers pass only as an allowlist, and any other form that may
+run one is refused for a launcher or lead, before any marker lookup, so no
+marker can lift it. A command with a git writer verb passes the target scan
+only when each git invocation is a plain simple command: `git [-C <path>]...
+<writer> <args>`, every word a literal (no `$`, backtick, substitution or
+glob), a literal verb, not behind a wrapper (env, command, nice, time, sudo,
+exec, nohup, xargs, builtin, eval, timeout, a shell -c string and the like),
+and the command has no heredoc, here-string or function definition. A `cd <literal>`
+before it sets the cwd; a non-literal `cd` makes a later relative writer fail
+closed. When unsure whether a word is a writer (`$GIT commit`, `git $VERB`)
+the call is refused. Read-only verbs (`status`, `log`, `diff`, `fetch`) pass
+with `-C "$W"`; a writer word as an argument of a wrapped or option-prefixed
+read-only call (`timeout 5 git log --grep=merge`) is refused. There is no dry-run exemption; a literal
+`clean -n` takes the normal marker path. `env -C`/`sudo -D` ahead of a
+non-git writer (`sed -i`, `tee`) is refused too. `git merge --abort` in plain
+form is not a work-tree write for the guard; a launcher's call is logged as
+allowed.
+
+Accepted holes (allow), listed exactly and mirrored in install-layout.md:
+- Verbs outside GIT_WRITE_SUBCOMMANDS pass in any form, including `add`,
+  `bisect`, `merge-file`, `mergetool`, `update-index`, `read-tree`,
+  `checkout-index`, `submodule update`, `worktree add`, `branch -f`/`-D`,
+  `update-ref`, `symbolic-ref`, `tag -f`, `reflog expire`, `gc --prune`,
+  `filter-branch`, `sparse-checkout`.
+- Git alias verbs (`git ci`, from ~/.gitconfig) read as non-writers, including
+  a `-c alias.*` value taken from a variable or command substitution.
+- A heredoc whose end marker is split by a backslash-newline, which hides the
+  body's commands.
+- Brace-expansion words, a verb passed from stdin to `xargs`, and the dashed
+  `git-commit` binary.
+- Work-tree retargeting without a work-tree flag: `--git-dir=<repo>/.git` or
+  `GIT_DIR=<repo>/.git` from a non-repo cwd, `-c core.worktree=<repo>`, and
+  the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` env.
+- Commands built or run outside the scanner: shell functions defined in an
+  earlier Bash call, strings built wholly from variables (`eval "$CMD"`,
+  `bash -c "$CMD"`, `sh -c "$VAR"`), scripts, inline interpreters (`python -c`,
+  `perl -e`, `ruby -e`, `node -e`, `awk 'BEGIN{system()}'`), process
+  substitution, `builtin cd`, a heredoc with no terminator, and git calls past
+  the 10-second budget.
+- A quoted git command line given to a head outside ARGUMENT_RUNNERS (`flock`,
+  `su`, `ssh`, `tmux`, `screen`, `parallel`, `script`, `at`, `watch`, `runuser`,
+  `sg`, `systemd-run`, `mosh`).
+- Non-git writers: `patch`, `truncate`, `touch`, `mkdir`, `ln`, `rsync`, `dd`,
+  editors, NotebookEdit/MultiEdit, and `awk`/`gawk -i inplace`; non-git
+  targets built from `$VAR`/`$(...)`/globs (redirects, `sed -i`, `tee` keep
+  their existing handling).
+- A bare `cd` or `cd -`, read as a no-op by the cd tracker.
+- The unknown-cd advisory never clearing after a later literal `cd` (it only
+  over-refuses).
+- A backslash-escaped dollar in a double-quoted `-C` value: the guard keeps the
+  backslash in the path where bash drops it; it matters only for a directory
+  name that literally contains `$`.
+This is a guard against drift, not evasion. The guard targets momentum
+mistakes; shapes that need deliberate obfuscation are accepted holes.
+
+Quoted text is literal: nothing expands inside single quotes, and inside double
+quotes only `$`, `$(...)` and backticks do, so `-m "Why?"` and `restore --
+'[id].txt'` pass while `-m "$X"` and an unquoted glob stay refused. The
+heredoc, here-string and function-definition scan skips comments and quoted
+text but reads `$(...)` bodies inside double quotes. A `)` glued to the next
+operator (`);`) closes the subshell.
+
+Scanner seams that fail closed: scan_raw drops a backslash-newline as the
+shell does (an even backslash run is escaped backslashes, and a comment still
+ends at its newline); a GIT_DIR/GIT_WORK_TREE prefix assignment or earlier
+`export`/`declare` counts as the matching flag (non-literal value refused); a
+git global option other than `-C`, `-c`, the `--git-dir`/`--work-tree`/
+`--namespace` forms and `--no-pager -P --bare --literal-pathspecs
+--no-optional-locks` is refused before a writer verb; a `-c alias.*` option is
+refused when any word names a writer; a quoted argument that is a git command
+line (`su -c`, `flock -c`, `ssh`, `parallel`) and `find -exec/-execdir/-ok/
+-okdir` with a writer are refused. Under an ARGUMENT_RUNNERS head, any `git`
+token plus a writer word in one argument is refused, as is a commit message
+that names both.
 
 A command naming more than TARGET_CAP (20) distinct canonical targets is an
 overflow the guard cannot scan within its git budget. Nothing is silently
@@ -88,14 +156,50 @@ MAX_EDITS_RANGE = (1, 10)
 CORE_CMD = "python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
 BLOCKED = "Blocked: orch-edit-guard"
 SENTINEL_RE = re.compile(r"__ORCH_REDIR_(\d+)__\Z")
+SUBST_RE = re.compile(r"\$ORCHSUBST_(\d+)_")
 WORD_STOP = " \t\n;&|()<>"
 SHELL_WRAPPERS = ("sh", "bash", "zsh", "dash")
+SEGMENT_CHARS = ";&|()\n"
 # Subcommands that change a work tree; `stash list|show` are reads.
 GIT_WRITE_SUBCOMMANDS = frozenset({
     "commit", "merge", "cherry-pick", "revert", "rebase", "am", "apply", "reset",
     "stash", "restore", "checkout", "switch", "pull", "rm", "mv", "clean",
 })
 GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace")
+GIT_BARE_OPTIONS = frozenset({
+    "--no-pager", "-P", "--bare", "--literal-pathspecs", "--no-optional-locks",
+})
+GIT_ENV_TARGETS = ("GIT_DIR", "GIT_WORK_TREE")
+ENV_DECLARERS = frozenset({"export", "declare", "typeset", "local", "readonly"})
+# Commands that run another command; a git writer behind one is refused.
+WRAPPER_HEADS = frozenset({
+    "env", "command", "nice", "time", "sudo", "exec", "nohup", "xargs", "builtin",
+    "eval", "timeout", "stdbuf", "setsid", "ionice", "caffeinate", "doas",
+    "unbuffer", "chronic", *SHELL_WRAPPERS,
+})
+CWD_WRITERS = frozenset({"sed", "gsed", "perl", "tee", "cp", "install", "mv", "rm", "rmdir"})
+HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)")
+FUNCTION_RE = re.compile(r"(?:^|[\s;&|(){}])function\s|[\w.:-]\s*\(\s*\)")
+# A multi-word argument that is itself a git command line (`su -c 'git ...'`).
+QUOTED_GIT_RE = re.compile(
+    r"(?m)(?:^|[;&|(])\s*(?:\S*/)?git\s|(?:^|\s)git\s+(?:-C|-c|--)"
+)
+# Heads that run a quoted argument as a command line.
+ARGUMENT_RUNNERS = frozenset({
+    "flock", "su", "ssh", "tmux", "screen", "parallel", "script", "at", "watch",
+    "runuser", "sg", "systemd-run", "mosh",
+})
+GIT_TOKEN_RE = re.compile(r"(?<![\w.-])git(?![\w-])")
+FIND_EXEC_OPTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+WRITER_WORD_RE = re.compile(
+    r"(?<![\w-])(?:" + "|".join(sorted(GIT_WRITE_SUBCOMMANDS)) + r")(?![\w-])"
+)
+
+
+# Private-use stand-ins for characters the shell does not expand because they
+# are quoted or escaped; mask_quoted writes them, unmask restores them.
+MASKED = {"$": "\ue000", "`": "\ue001", "*": "\ue002", "?": "\ue003", "[": "\ue004"}
+UNMASK_TABLE = str.maketrans({v: k for k, v in MASKED.items()})
 
 
 class Budget:
@@ -696,11 +800,16 @@ def scan_raw(text):
     arith_paren = 0  # open '(' still needed to close a $(( ... )) we're in
     arith_bracket = 0  # open '[' still needed to close a $[ ... ] we're in
     i = 0
+    join_end = -1  # index just past the last backslash-newline join
     quote = None
     while i < n:
         c = text[i]
         if quote:
             if quote == '"' and c == "\\" and i + 1 < n:
+                if text[i + 1] == "\n":
+                    i += 2
+                    join_end = i
+                    continue
                 out.append(text[i : i + 2])
                 i += 2
                 continue
@@ -715,10 +824,15 @@ def scan_raw(text):
             i += 1
             continue
         if c == "\\" and i + 1 < n:
+            if text[i + 1] == "\n":  # the shell drops a backslash-newline
+                i += 2
+                join_end = i
+                continue
             out.append(text[i : i + 2])
             i += 2
             continue
-        if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+        prev = (out[-1][-1:] if out else "") if i == join_end else text[i - 1 : i]
+        if c == "#" and (prev == "" or prev in " \t\n;&|("):
             j = text.find("\n", i)
             i = n if j < 0 else j
             continue
@@ -1020,7 +1134,14 @@ def segment_groups(tokens):
     inside a subshell must not persist past its closing `)` (B3)."""
     current = []
     previous = None
+    pieces = []
     for tok in tokens:
+        if tok and ("(" in tok or ")" in tok) and all(c in SEGMENT_CHARS for c in tok):
+            # shlex glues adjacent operator characters: `);` is one token
+            pieces.extend(re.findall(r"[()]|[^()]+", tok))
+        else:
+            pieces.append(tok)
+    for tok in pieces:
         if tok and all(c in ";&|\n" for c in tok):
             if current:
                 yield "seg", current, previous, tok
@@ -1067,33 +1188,260 @@ class GitDir(str):
     repository, so the decision is made on that repository, not this path."""
 
 
-def git_write_targets(words):
-    """[path] the git invocation writes (--work-tree, else the -C chain, else
-    "."), or [] for a subcommand that does not change a work tree."""
-    chdir, work_tree, i = "", None, 1
+class Unresolved(str):
+    """A git writer's directory word the scanner cannot turn into a path."""
+
+
+class MergeAbort(str):
+    """A `git merge --abort` call's directory word; audit-only, never a target."""
+
+
+def unmask(text):
+    """`text` with the stand-ins from mask_quoted turned back into characters."""
+    return text.translate(UNMASK_TABLE)
+
+
+def mask_quoted(text):
+    """`text` with the characters the shell would NOT expand replaced by
+    stand-ins, so unexpanded() sees only real expansions: nothing expands
+    inside single quotes or after a backslash, and only `$` and backticks
+    expand inside double quotes (globs and brackets do not). Quotes stay
+    for the tokenizer."""
+    out = []
+    quote = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            out.append(MASKED.get(c, c))
+            if c == "'":
+                quote = None
+        elif quote == '"':
+            if c == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
+                out.append(c + MASKED.get(text[i + 1], text[i + 1]))
+                i += 2
+                continue
+            out.append(c if c in "$`" else MASKED.get(c, c))
+            if c == '"':
+                quote = None
+        elif c == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            out.append(MASKED[nxt] if nxt in MASKED else text[i:i + 2])
+            i += 2
+            continue
+        else:
+            if c in "'\"":
+                quote = c
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def unexpanded(word, home):
+    """True when the shell would still expand `word` ($VAR, backtick, glob)."""
+    w = rm_guard.expand_home(word, home)
+    return "$" in w or "`" in w or rm_guard.has_glob_chars(w)
+
+
+def git_write_targets(words, home, unknown_cd=None, env=None):
+    """[path] the git invocation writes (--work-tree or GIT_WORK_TREE, else the
+    -C chain, else "."), or [] for a verb that does not change a work tree. A
+    fenced writer must be plain: every word literal, so any unexpanded word (or
+    a relative directory after an unresolvable `cd`) yields [Unresolved(word)].
+    The global options are `-C <path>`, `-c <k=v>` (not `alias.*`), the
+    `--git-dir`/`--work-tree`/`--namespace` forms and GIT_BARE_OPTIONS; any
+    other option before a writer verb is refused, because it may take the next
+    word as its value (`--config-env`, `--attr-source`). `env` holds GIT_DIR and
+    GIT_WORK_TREE values set by a prefix assignment or an earlier export.
+    `merge --abort` yields [MergeAbort(dir)]."""
+    chdir, work_tree, bad, i = "", None, None, 1
     while i < len(words):
         word = words[i]
         if word in GIT_VALUE_OPTIONS:
             if i + 1 >= len(words):
                 return []
-            if word == "-C":
-                chdir = os.path.join(chdir, words[i + 1])
-            elif word == "--work-tree":
-                work_tree = words[i + 1]
-            i += 2
-            continue
-        if word.startswith("--work-tree="):
-            work_tree = word.split("=", 1)[1]
-        elif not word.startswith("-"):
+            opt, value, step = word, words[i + 1], 2
+            if opt == "-c" and value.lower().startswith("alias."):
+                # an alias may expand to a writer; read-only verbs still pass
+                if any(WRITER_WORD_RE.search(w) for w in words[1:]):
+                    return [Unresolved(unmask(value))]
+        elif word.startswith("-C") and len(word) > 2:
+            opt, value, step = "-C", word[2:], 1
+        elif word.startswith("--work-tree="):
+            opt, value, step = "--work-tree", word.split("=", 1)[1], 1
+        elif word.startswith(("--git-dir=", "--namespace=")) or word in GIT_BARE_OPTIONS:
+            opt, value, step = None, word, 1
+        elif word.startswith("-"):
+            if any(w in GIT_WRITE_SUBCOMMANDS for w in words[i + 1:]):
+                return [Unresolved(unmask(word))]
+            return []
+        elif unexpanded(word, home):
+            return [Unresolved(unmask(word))]  # may hide the verb or an option
+        else:
             break
-        i += 1
+        if bad is None and unexpanded(value, home):
+            bad = value
+        if opt == "-C":
+            chdir = os.path.join(chdir, value)
+        elif opt == "--work-tree":
+            work_tree = value
+        i += step
     if i >= len(words) or words[i] not in GIT_WRITE_SUBCOMMANDS:
         return []
     if words[i] == "stash" and i + 1 < len(words) and words[i + 1] in ("list", "show"):
         return []
-    if work_tree is not None:
-        return [GitDir(os.path.join(chdir, work_tree))]
-    return [GitDir(chdir or ".")]
+    for name in GIT_ENV_TARGETS:
+        value = (env or {}).get(name)
+        if not value:
+            continue
+        if bad is None and unexpanded(value, home):
+            bad = value
+        if name == "GIT_WORK_TREE" and work_tree is None:
+            work_tree = value
+    if bad is None:
+        bad = next((w for w in words[i + 1:] if unexpanded(w, home)), None)
+    where = os.path.join(chdir, work_tree) if work_tree is not None else chdir
+    if bad is None and unknown_cd is not None and not os.path.isabs(where):
+        bad = unknown_cd
+    if bad is not None:
+        return [Unresolved(unmask(bad))]
+    where = unmask(where)
+    if words[i] == "merge" and words[i + 1:] == ["--abort"]:
+        return [MergeAbort(where or ".")]
+    return [GitDir(where or ".")]
+
+
+def substitution_end(text, i):
+    """Index of the `)` closing the `$(` whose `$` is text[i], or -1."""
+    depth, j, q, n = 0, i + 1, None, len(text)
+    while j < n:
+        ch = text[j]
+        if q:
+            if ch == "\\" and q == '"':
+                j += 1
+            elif ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == "\\":
+            j += 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+def backtick_end(text, i):
+    """Index of the backtick closing the one at text[i], or -1."""
+    j = i + 1
+    while j < len(text):
+        if text[j] == "\\":
+            j += 1
+        elif text[j] == "`":
+            return j
+        j += 1
+    return -1
+
+
+def split_substitutions(text):
+    """(text, inners): each `$(...)` or backtick substitution outside single
+    quotes (inside double quotes too) becomes the single word `$ORCHSUBST_n_`
+    (so its spaces cannot split a git -C/--work-tree value), and inners[n]
+    holds the body for a scan at the cwd where the substitution runs.
+    Unbalanced ones are left alone."""
+    out, inners = [], []
+    quote = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        end = -1
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        elif c == "$" and text.startswith("$(", i):
+            end = substitution_end(text, i)
+            body = text[i + 2:end]
+        elif c == "`":
+            end = backtick_end(text, i)
+            body = text[i + 1:end]
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        elif c == "'" and quote is None:
+            quote = "'"
+        if end >= 0:
+            out.append(f"$ORCHSUBST_{len(inners)}_")
+            inners.append(body)
+            i = end + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), inners
+
+
+def leading_words(words):
+    """`words` without leading keywords and env assignments."""
+    i = 0
+    while i < len(words) and (
+        rm_guard.is_env_assignment(words[i]) or words[i] in rm_guard.LEADING_KEYWORDS
+    ):
+        i += 1
+    return words[i:]
+
+
+def hidden_git_writer(words, home):
+    """The word to refuse when a command whose head is not `git` may still run
+    a git writer (a wrapper, a shell -c string, a variable head, `find -exec`),
+    or a wrapper's own directory option (`env -C DIR`) moves a non-git writer,
+    else None. Only a writer verb word triggers the git cases, so `gh pr
+    create --title "fix git commit"` and wrapped read-only git calls pass."""
+    head = words[0]
+    name = rm_guard.basename(head)
+    if name in ("env", "sudo") and any(
+        w in ("-C", "-D", "--chdir") or w.startswith("--chdir=")
+        or (w.startswith("-") and not w.startswith("--") and ("C" in w or "D" in w))
+        for w in words[1:]
+    ) and any(rm_guard.basename(w) in CWD_WRITERS for w in words[1:]):
+        return head
+    text = " ".join(words)
+    if not set(re.findall(r"[\w-]+", text)) & GIT_WRITE_SUBCOMMANDS:
+        return None
+    if unexpanded(head, home):
+        return head
+    if any(QUOTED_GIT_RE.search(w) and WRITER_WORD_RE.search(w) for w in words[1:]):
+        return head
+    if name in ARGUMENT_RUNNERS and any(
+        GIT_TOKEN_RE.search(w) and WRITER_WORD_RE.search(w) for w in words[1:]
+    ):
+        return head
+    if name == "find" and any(w in FIND_EXEC_OPTIONS for w in words[1:]):
+        if "git" in text.lower() or "$" in text:
+            return head
+    if name in WRAPPER_HEADS:
+        mentions_git = "git" in text.lower()
+    else:
+        mentions_git = any(rm_guard.basename(w) == "git" for w in words[1:])
+    return head if mentions_git else None
+
+
+def cd_operand(words):
+    """The directory operand of a `cd`/`pushd`, or None; skips option flags."""
+    seen_dashdash = False
+    for t in words[1:]:
+        if not seen_dashdash and t == "--":
+            seen_dashdash = True
+            continue
+        if not seen_dashdash and t.startswith("-") and t != "-" and len(t) > 1:
+            continue
+        return t
+    return None
 
 
 def cd_target_candidates(words, cwd, home):
@@ -1110,18 +1458,10 @@ def cd_target_candidates(words, cwd, home):
     `mkdir -p /tmp/x && cd /tmp/x && echo hi > out.txt` can be denied even
     though /tmp/x exists by the time the shell actually runs `cd` -- a
     false-positive deny, never a missed guard."""
-    operand, seen_dashdash = None, False
-    for t in words[1:]:
-        if not seen_dashdash and t == "--":
-            seen_dashdash = True
-            continue
-        if not seen_dashdash and t.startswith("-") and t != "-" and len(t) > 1:
-            continue
-        operand = t
-        break
+    operand = cd_operand(words)
     if operand is None or operand == "-":
         return {cwd}
-    if "$" in operand or "`" in operand or rm_guard.has_glob_chars(operand):
+    if unexpanded(operand, home):
         return {cwd}  # unexpanded target: accepted hole, same as other operands
     # A logical `cd` keeps the lexical path; `cd -P` resolves symlinks
     # physically. The scanner does not know which spelling the shell will use,
@@ -1145,7 +1485,28 @@ def cd_target_candidates(words, cwd, home):
     return cands
 
 
-def bash_targets(command, cwd, home, depth=0):
+def git_env_words(words):
+    """{GIT_DIR|GIT_WORK_TREE: value} among the words that are assignments."""
+    found = {}
+    for w in words:
+        name, sep, value = w.partition("=")
+        if sep and name in GIT_ENV_TARGETS:
+            found[name] = value
+    return found
+
+
+def leading_assignments(words):
+    """The words before the command word: env assignments and keywords."""
+    i = 0
+    while i < len(words) and (
+        rm_guard.is_env_assignment(words[i]) or words[i] in rm_guard.LEADING_KEYWORDS
+    ):
+        i += 1
+    return words[:i]
+
+
+def bash_targets(command, cwd, home, depth=0, unknown_cd=None, outer_redirs=None,
+                 git_env=None):
     """[(cwd, word)] write targets of one command string. `cwd` is tracked
     as a SET of candidates rather than one string, so an uncertain `cd`
     (a subshell, a failed cd, cd options) fails toward guarding rather
@@ -1156,19 +1517,36 @@ def bash_targets(command, cwd, home, depth=0):
     command, never narrowed (B-2)."""
     if depth > 1:
         return []
+    git_env = dict(git_env or {})
     cleaned, redirs = scan_raw(command)
+    if outer_redirs:
+        redirs = {**outer_redirs, **redirs}
+    cleaned, inners = split_substitutions(cleaned)
+    cleaned = mask_quoted(cleaned)
     found = []
+    visited = set()
     cwds = {cwd}
     seen_cwds = {cwd}
     stack = []
     for kind, tokens, previous, following in segment_groups(rm_guard.tokenize(cleaned)):
         if kind == "push":
-            stack.append(cwds)
+            stack.append((cwds, unknown_cd))
             continue
         if kind == "pop":
             if stack:
-                cwds = stack.pop()
+                cwds, unknown_cd = stack.pop()
             continue
+        # A substitution runs at its position in the command: scan its body
+        # with the cwds and unknown-cd state the shell has reached here.
+        for t in tokens:
+            for m in SUBST_RE.finditer(t):
+                idx = int(m.group(1))
+                if idx < len(inners):
+                    visited.add(idx)
+                    for c in cwds:
+                        found.extend(
+                            bash_targets(inners[idx], c, home, depth, unknown_cd, redirs, git_env)
+                        )
         words = []
         for t in tokens:
             if SENTINEL_RE.match(t):
@@ -1182,18 +1560,23 @@ def bash_targets(command, cwd, home, depth=0):
                     found.extend((c, w) for c in cwds)
             else:
                 words.append(t)
-        # Accepted gap (cycle-3 A-2): rm_guard.strip_prefixes only skips a
-        # wrapper name, not its own flag argument (`nice -n 10 sed -i ...`,
-        # `time -p ...`, `env -i ...`, `sudo -u x ...`), so the loop below
-        # breaks on the flag token and the wrapped sed/perl/tee/cp/mv/rm
-        # operand is never inspected. Redirects are unaffected (the
-        # sentinel scan above is head-independent); only operand-writers
-        # behind a flagged wrapper are missed, a rare shape for an
-        # orchestrator edit.
+        prefix_env = git_env_words(leading_assignments(words))
+        words = leading_words(words)
+        if not words:
+            git_env.update(prefix_env)  # a bare `GIT_DIR=x` assignment persists
+            continue
+        if rm_guard.basename(words[0]) in ENV_DECLARERS:
+            git_env.update(git_env_words(words[1:]))
+        hidden = hidden_git_writer(words, home) if rm_guard.basename(words[0]) != "git" else None
+        if hidden is not None:
+            found.extend((c, Unresolved(hidden)) for c in cwds)
+            continue
         words = rm_guard.strip_prefixes(words)
         if not words:
             continue
         head = rm_guard.basename(words[0])
+        if head != "git":
+            words = [unmask(w) for w in words]
         if head in ("cd", "pushd"):
             new_cwds = set()
             for c in cwds:
@@ -1202,6 +1585,9 @@ def bash_targets(command, cwd, home, depth=0):
                 new_cwds |= cwds
             if following != "|":
                 cwds = new_cwds
+                operand = cd_operand(words)
+                if operand is not None and unexpanded(operand, home):
+                    unknown_cd = operand
             seen_cwds |= cwds
         elif head == "popd":
             cwds |= seen_cwds
@@ -1224,16 +1610,87 @@ def bash_targets(command, cwd, home, depth=0):
                 found.extend((c, w) for w in rm_operands(words))
         elif head == "git":
             for c in cwds:
-                found.extend((c, w) for w in git_write_targets(words))
+                found.extend(
+                    (c, w)
+                    for w in git_write_targets(
+                        words, home, unknown_cd, {**git_env, **prefix_env}
+                    )
+                )
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:
                 for c in cwds:
-                    found.extend(bash_targets(inner, c, home, depth + 1))
+                    found.extend(bash_targets(inner, c, home, depth + 1, unknown_cd, None, git_env))
+    # A substitution in a word the walk never saw (a redirect target) runs
+    # somewhere in the command: scan it at every cwd reached.
+    for idx, inner in enumerate(inners):
+        if idx not in visited:
+            for c in seen_cwds:
+                found.extend(
+                    bash_targets(inner, c, home, depth, unknown_cd, redirs, git_env)
+                )
     return found
 
 
 # --- targets ---------------------------------------------------------------
+
+
+def executable_text(command):
+    """`command` without comments, single-quoted spans, escaped characters and
+    the literal text of double-quoted spans; only `$(...)` and backtick bodies
+    inside double quotes stay, because the shell runs them. An unterminated
+    substitution keeps the rest of the text as code, so the scan fails closed."""
+    text = rm_guard.strip_line_comments(command)
+    out = []
+    quote = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        elif quote == '"' and c == "$" and text.startswith("$(", i):
+            end = substitution_end(text, i)
+            if end < 0:
+                out.append(" " + text[i + 2:] + " ")
+                break
+            out.append(" " + text[i + 2:end] + " ")
+            i = end + 1
+            continue
+        elif quote == '"' and c == "`":
+            end = backtick_end(text, i)
+            if end < 0:
+                out.append(" " + text[i + 1:] + " ")
+                break
+            out.append(" " + text[i + 1:end] + " ")
+            i = end + 1
+            continue
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        elif c == "'" and quote is None:
+            quote = "'"
+        elif quote is None:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def unscannable_shape(command):
+    """Name of a heredoc, here-string or function definition in a command that mentions a
+    git writer: the scan cannot see where its body runs, so it is refused."""
+    if not WRITER_WORD_RE.search(command) or "git" not in command.lower():
+        return None
+    code = executable_text(command)
+    if HEREDOC_RE.search(code):
+        return "heredoc"
+    if "<<<" in code:
+        return "here-string"
+    if FUNCTION_RE.search(code):
+        return "function definition"
+    return None
 
 
 def targets_for(payload, tool, cwd, home):
@@ -1245,6 +1702,9 @@ def targets_for(payload, tool, cwd, home):
         cmd = ti.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
             return []
+        shape = unscannable_shape(cmd)
+        if shape is not None:
+            return [(cwd, Unresolved(shape), True)]
         return [
             (target_cwd, word, True)
             for target_cwd, word in bash_targets(cmd, cwd, home)
@@ -1276,10 +1736,10 @@ def resolve_targets(raw, home):
     tracked write hidden past the cap."""
     paths = []
     for c_cwd, w, shell_expands in raw:
+        if isinstance(w, (Unresolved, MergeAbort)):
+            continue
         we = rm_guard.expand_home(w, home)
-        if not we or (
-            shell_expands and ("$" in we or "`" in we or rm_guard.has_glob_chars(we))
-        ):
+        if not we or (shell_expands and unexpanded(w, home)):
             continue
         p = canonical_target(we, c_cwd, home)
         if p is not None and isinstance(w, GitDir):
@@ -1559,6 +2019,28 @@ def refuse_overflow(count):
     return 2
 
 
+def refuse_unresolved(word):
+    """Three-line refusal for a fenced session's git write the guard cannot
+    scan (an unresolved word, wrapper, heredoc or function)."""
+    print(
+        f"{BLOCKED} -- this session is fenced and the guard cannot scan "
+        f"this command for a git write: {_printable(word)[:PATH_MAX]}.",
+        file=sys.stderr,
+    )
+    print(
+        "A variable, substitution, glob, wrapper, heredoc or function may hide "
+        "which repository it changes, and no allow-edit marker can scope it.",
+        file=sys.stderr,
+    )
+    print(
+        "Write the git call as a plain `git -C <literal path> <verb>` with "
+        "literal words, no wrapper, heredoc or function, or dispatch it.",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    return 2
+
+
 def under_workspace(path, roots):
     return any(path == r or path.startswith(r + "/") for r in roots)
 
@@ -1621,7 +2103,48 @@ def decide(payload, runtime="claude"):
         # without the scope and fail closed if it is fenced (co-review r9).
         return refuse_crash() if privileged_anywhere(sid, runtime) else 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
-    paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
+    raw = targets_for(payload, tool, cwd, home)
+    unresolved = [w for _c, w, _s in raw if isinstance(w, Unresolved)]
+    aborts = [w for _c, w, _s in raw if isinstance(w, MergeAbort)]
+    if unresolved or aborts:
+        owned = owned_slugs(sid, runtime, caller_scope, {})
+        if unresolved and (owned or lead_authority(sid, runtime, caller_scope)[0]):
+            rc = refuse_unresolved(unresolved[0])
+            for slug in sorted(owned):
+                audit_append(
+                    owned[slug]["rd"],
+                    {
+                        "v": 1,
+                        "ts": core.now_iso(),
+                        "event": "orch-edit-denied",
+                        "session_id": sid,
+                        "tool_name": tool,
+                        "tool_use_id": payload.get("tool_use_id"),
+                        "path": _printable(unresolved[0])[:PATH_MAX],
+                        "repo": "",
+                        "reason": "unresolved",
+                        "why": "unresolved",
+                    },
+                )
+            return rc
+        for slug in sorted(owned):
+            for w in aborts:
+                audit_append(
+                    owned[slug]["rd"],
+                    {
+                        "v": 1,
+                        "ts": core.now_iso(),
+                        "event": "orch-edit-allowed",
+                        "session_id": sid,
+                        "tool_name": tool,
+                        "tool_use_id": payload.get("tool_use_id"),
+                        "path": _printable(w)[:PATH_MAX],
+                        "cwd": _printable(cwd)[:PATH_MAX],
+                        "repo": "",
+                        "reason": "merge-abort",
+                    },
+                )
+    paths = resolve_targets(raw, home)
     if not paths:
         return 0
     if len(paths) > TARGET_CAP:
