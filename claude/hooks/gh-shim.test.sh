@@ -897,5 +897,13 @@ else
     fail "RV24 the shim refuses a write through a {branch} endpoint placeholder (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+gh api "repos/{owner}/{repo}/issues/5/comments" -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV25 the shim does not refuse an issue comment written through owner and repo placeholders"
+else
+    fail "RV25 the shim refuses an issue comment through placeholders (rc=$rc err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
