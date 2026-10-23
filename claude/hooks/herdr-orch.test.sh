@@ -11411,7 +11411,8 @@ PY
 check "pending_action: skips the poll rules and otherwise matches checkin_action" <<PY
 $LOAD
 assert c.POLL_RULES == frozenset({"unknown", "abandoned-candidate", "blocked",
-                                  "unblocked", "exit-idle-worker", "reprompt-stalled"})
+                                  "unblocked", "exit-idle-worker", "reprompt-stalled",
+                                  "close-idle"})
 base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
             head="a" * 40, completed=False, plan_completed=False, reviewed=False,
             review_correlates=False, review_stale=False, dispatch_review=False,
@@ -14304,6 +14305,152 @@ for _ in range(50):
     time.sleep(0.1)
 else:
     raise AssertionError("the command group survived the interrupt")
+PY
+
+# Fixture for the close-idle check-in rule: a real one-commit worktree and a
+# reviewed task parked at its head, with workspace "w1" on that worktree.
+IDLE='import subprocess
+GENV = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+            GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+d = tempfile.mkdtemp(); wt = os.path.join(d, "wt"); rd = os.path.join(d, "rd")
+subprocess.run(["git", "init", "-q", wt], check=True, env=GENV)
+subprocess.run(["git", "-C", wt, "commit", "-q", "--allow-empty", "-m", "init"], check=True, env=GENV)
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+head = c._git(wt, "rev-parse", "HEAD")
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": head,
+        "worktree": wt, "branch": "u/PROJ-1/x", "workspace_id": "w1", "workers": [],
+        "review_head_sha": head, "ship_parked_head": head}
+def poll(known=("w1",), tree=wt, agents=None):
+    p = {"live": {}, "known": set(known), "worktrees": {"w1": tree}, "agents": {}}
+    if agents:
+        p["live"]["w1"] = "idle"; p["agents"]["w1"] = agents
+    return p
+def facts(t, p):
+    return c.checkin_facts(rd, t, p, c.state_root().parent)
+'
+
+check "checkin_facts: a parked reviewed task with an agent-free workspace reports close-idle" <<PY
+$LOAD
+$IDLE
+f = facts(task, poll())
+assert f["action"] == "close-idle", f["action"]
+assert f["idle_close"] is True and f["idle_close_ws"] == "w1", f
+assert "close-idle" in c.POLL_RULES and c.NEXT_ACTIONS["close-idle"][0] == "run"
+assert c.checkin_rules(f)[-1][0] == "close-idle", c.checkin_rules(f)[-1]
+assert c.pending_action(f) != "close-idle"
+assert c.checkin_action(dict(f, ship_pending=True)) == "ship"
+assert c.checkin_action(dict(f, idle_settled=True)) == "exit-idle-worker"
+PY
+
+check "checkin_facts: an agent, an unparked task, an unlisted workspace or another checkout never reports close-idle" <<PY
+$LOAD
+$IDLE
+agent = [{"name": "x", "pane_id": "w1:p1", "agent_status": "idle"}]
+assert facts(task, poll(agents=agent))["action"] != "close-idle", "agent"
+assert facts(dict(task, ship_parked_head="0" * 40), poll())["action"] != "close-idle", "unparked"
+assert facts(dict(task, ship_parked_head=None), poll())["action"] != "close-idle", "never parked"
+assert facts(dict(task, status="completed"), poll())["action"] != "close-idle", "status"
+assert facts(task, poll(known=()))["action"] != "close-idle", "unlisted"
+assert facts(task, poll(tree=d))["action"] != "close-idle", "other checkout"
+assert facts(dict(task, workspace_id="bad id"), poll())["action"] != "close-idle", "bad id"
+assert facts(dict(task, worktree=os.path.join(d, "gone")), poll())["action"] != "close-idle", "no worktree"
+assert facts(task, None)["action"] != "close-idle", "no poll"
+f = facts(task, poll(agents=agent))
+assert f["idle_close"] is False, f
+PY
+
+check "next: close-idle prints the close-idle adapter line" <<PY
+$LOAD
+$IDLE
+import shlex
+sys.path.insert(0, "claude/hooks")
+import herdr_dispatch_cli as cli
+f = facts(task, poll())
+ctx = {"runtime": "claude", "personal": False, "session": "s", "fence": 3,
+       "repo_slug": "slug", "repo_path": wt}
+line = c.next_line(task, f, ctx)
+assert line and line.startswith("  next: run "), line
+argv = shlex.split(line[len("  next: run "):])
+assert argv[1].endswith("herdr_dispatch.py") and argv[2] == "close-idle", argv
+ns = cli._dispatch_parser().parse_args(argv[2:])
+assert ns.workspace_id == "w1" and ns.cwd == wt and ns.task_id == "PROJ-1" and ns.fence == 3, ns
+assert ns.runtime == "claude" and ns.session == "s" and ns.repo_slug == "slug", ns
+personal = shlex.split(c.next_line(task, f, dict(ctx, personal=True))[len("  next: run "):])
+assert personal[-1] == "--personal" and personal.count("--personal") == 1, personal
+ns = cli._dispatch_parser().parse_args(["reopen", "--repo-slug", "slug", "--task-id", "PROJ-1",
+                                        "--session", "s", "--fence", "3", "--cwd", wt])
+assert ns.command == "reopen", ns
+PY
+
+check "write-task: workspace keys are inherited, refused when changed, and pin workspace_id after a reopen" <<PY
+$LOAD
+$CARRY
+fx = build(merge="none")
+def write(rec):
+    return cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+               "--fence", fx["fence"], "--json", json.dumps(rec))
+path = fx["rd"] + "/tasks/PROJ-1.json"
+def stored():
+    return json.loads(open(path).read())
+def put_record(rec):
+    open(path, "w").write(json.dumps(rec))
+base = dict(stored(), workspace_id="w2")
+base.pop("workspace_closed", None); base.pop("workspace_root_pane", None)
+assert write(base).returncode == 0
+closed = {"workspace_id": "w2", "ts": "2026-10-22T00:00:00Z"}
+# A caller cannot introduce either key.
+for key, val in (("workspace_closed", closed), ("workspace_root_pane", "w9:p1")):
+    r = write(dict(base, **{key: val}))
+    assert r.returncode == 2 and "written only by close-idle and reopen" in r.stderr, (key, r.stderr)
+assert "workspace_closed" not in stored()
+# Closed marker written by close-idle: inherited when omitted, refused when changed.
+put_record(dict(base, workspace_closed=closed))
+assert write(base).returncode == 0
+assert stored()["workspace_closed"] == closed
+assert write(dict(base, workspace_closed=closed)).returncode == 0
+before = open(path).read()
+for bad in (dict(base, workspace_closed=None), dict(base, workspace_closed=dict(closed, ts="x"))):
+    r = write(bad)
+    assert r.returncode == 2 and "written only by close-idle and reopen" in r.stderr, r.stderr
+assert open(path).read() == before
+# Without a root pane a workspace_id change is allowed and drops the marker.
+assert write(dict(base, workspace_id="w5")).returncode == 0
+assert "workspace_closed" not in stored() and stored()["workspace_id"] == "w5"
+# After a reopen the record pins workspace_id and the root pane.
+reopened = dict(base, workspace_id="w6", workspace_root_pane="w6:p1")
+put_record(reopened)
+assert write(base).returncode == 2
+r = write(dict(base, workspace_id="w2"))
+assert r.returncode == 2 and "workspace_id is written only by reopen after a reopen" in r.stderr, r.stderr
+no_keys = {k: v for k, v in reopened.items() if k != "workspace_root_pane"}
+assert write(no_keys).returncode == 0
+assert stored()["workspace_root_pane"] == "w6:p1" and stored()["workspace_id"] == "w6"
+assert write(dict(no_keys, workspace_root_pane="w6:p2")).returncode == 2
+before = open(path).read()
+r = cli(fx, "reset-task", "--task-id", "PROJ-1", "--new-task-id", "PROJ-2", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(
+            {"v": 1, "task_id": "PROJ-2", "workers": [], "workspace_closed": closed}))
+assert r.returncode == 2 and "close-idle" in r.stderr, (r.returncode, r.stderr)
+r = cli(fx, "reset-task", "--task-id", "PROJ-1", "--new-task-id", "PROJ-2", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(
+            {"v": 1, "task_id": "PROJ-2", "workers": [], "workspace_root_pane": "w6:p1"}))
+assert r.returncode == 2 and "reopen" in r.stderr, (r.returncode, r.stderr)
+assert open(path).read() == before
+PY
+
+check "label_target: a closed task workspace is no label target" <<PY
+$LOAD
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "worktree": "/wt",
+        "workspace_id": "w1", "workers": []}
+assert c.label_target(task) == "w1"
+closed = {"workspace_id": "w1", "ts": "2026-10-22T00:00:00Z"}
+assert c.label_target(dict(task, workspace_closed=closed)) is None
+# A marker for another workspace does not hide the current one.
+assert c.label_target(dict(task, workspace_closed=dict(closed, workspace_id="w2"))) == "w1"
+out = c.apply_workspace_label(dict(task, workspace_closed=closed), "label",
+                              herdr_cli="/nonexistent/herdr")
+assert out["status"] == "unsupported" and out["reason"] == "workspace-closed", out
 PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

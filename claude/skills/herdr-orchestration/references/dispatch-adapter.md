@@ -222,6 +222,27 @@ brief_path, head_sha, follow_up[, settle]}`. Run each `follow_up` line
   - `write-index`: run `write-index` by hand.
   - An unsettled `settle` row: re-run `settle`.
 
+## Idle workspaces (sections 4 and 6)
+
+`python3 "$DISPATCH" close-idle --repo-slug <slug> --task-id <task> --session <id> --fence <fence> --workspace-id <ws> --cwd <worktree> --runtime <claude|codex> [--personal]`
+closes a parked reviewed task's agent-free workspace.
+`python3 "$DISPATCH" reopen --repo-slug <slug> --task-id <task> --session <id> --fence <fence> --cwd <worktree> --runtime <claude|codex> [--personal]`
+gives a task whose workspace is closed a workspace on its worktree. Both hold
+the owner fence and print one JSON object. `next` prints the `close-idle`
+line. The procedure, the `kept` and refusal codes, and the interruption table
+are in `references/idle-workspaces.md`.
+
+- `close-idle` exit 0: `closed` or `already-closed`. Exit 3: `kept` with a
+  `kept` code. Exit 2: refused, nothing closed.
+- `reopen` exit 0: `open` or `reopened` with `workspace_id` and `pane_id`.
+  Exit 2: refused with a code.
+- `launch` refuses a workspace the record's `workspace_closed` names, before
+  any herdr call; run `reopen` first.
+- `dispatch-gate` checks the implement row's workspace against the task
+  worktree. When it is not open there, the gate reopens, re-reads the record,
+  and splits the recorded `workspace_root_pane`. A refusal or a null pane
+  returns `incomplete` with `step: reopen` (exit 3).
+
 ## Director transitions (sections 2a and 5)
 
 `python3 "$DISPATCH" accept-review` and `python3 "$DISPATCH" advance` take

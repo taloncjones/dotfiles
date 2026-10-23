@@ -583,6 +583,16 @@ when omitted, refuses a changed value, and drops it when the pin changes. The
 audit file is `artifacts/<task_id>/review-carry/<head>.json`, one per proved
 head, read by no decision.
 
+`workspace_closed` (`{"workspace_id", "ts"}`) is written only by `close-idle`
+after it closes the record's workspace; it keeps `worktree`, `branch` and
+`workspace_id`. `workspace_root_pane` (a pane id) is written only by `reopen`,
+in the same write as the new `workspace_id`: the pane a gate or repair launch
+splits or uses. `write-task` inherits both when omitted and refuses a changed
+value. While the record has `workspace_root_pane`, it also refuses a change
+to `workspace_id`. A `workspace_id` change without it drops `workspace_closed`.
+`reset-task` refuses both. `label_target` returns no workspace while
+`workspace_closed` names the record's `workspace_id`.
+
 `stop_recorded` (`{"launch_id", "ts"}`, or absent) names the done record of
 a paused or failed plan or implement attempt the director has recorded.
 While it equals the current done record's `launch_id` and `ts`, check-in
@@ -1065,7 +1075,8 @@ shell. Otherwise it prints
 and moves nothing. The `kept` codes: `other-worktree` (checkout is not the
 task worktree, or herdr could not say), `live-agent` (an agent in a pane,
 or a malformed agent row), `busy-pane` (a non-shell foreground process or
-failed inspection), `changed` (the pre-close re-check found a difference),
+failed inspection), `malformed-pane` (a pane row herdr cannot place, or no
+pane row for the workspace at all), `changed` (the pre-close re-check found a difference),
 `close-failed` (the close raised; a re-run polls fresh). `abandoned` and
 `failed` tasks never close a workspace.
 

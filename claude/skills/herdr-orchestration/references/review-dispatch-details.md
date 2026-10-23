@@ -125,3 +125,28 @@ review deadline, <launch_id>`, and never fabricate a review record,
   `references/auto-actions.md`. A review `changes-requested` verdict whose
   latest review row is not retired is not a deadline stop and keeps its
   handling.
+
+## Stale review verdicts
+
+SKILL.md section 4 points here.
+ A review state
+(`review-dispatched`, `reviewed`, or `changes-requested`) is honored only
+while its recorded `review_head_sha` equals current HEAD. If HEAD has advanced
+past it -- the branch moved during or after review, at any moment including
+just before a merge -- the verdict is stale. Recover it in three steps:
+(a) if a review agent for this task is still running, **stop it** using its
+recorded agent and pane identity (send `esc` to the named `rev-<...>` agent,
+then send `/exit`; close that exact review pane if it remains live; do
+**not** `herdr workspace close`, which would tear down the shared task worktree),
+since the review is now moot -- do this on every stale reset, whether it lands on
+`completed` or `in-progress`, because a reset to `in-progress` will not
+re-dispatch and so cannot rely on section 5's dispatch preflight to stop it;
+(b) reset the task to `completed` (or `in-progress` if the new HEAD is not a
+confirmed-complete revision); (c) clear `review_head_sha` to `null` and reset
+`merge_check` to `null` (a stale review invalidates any recorded merge
+check). Clearing the marker is what lets `should-dispatch-review` re-fire for
+the new HEAD (it
+compares `review_head_sha` against live HEAD, so a leftover value equal to HEAD
+would wrongly suppress the re-dispatch). This recovers every "branch advanced"
+case from whichever review state the task was in, so no review state is ever
+permanently stranded -- the next check-in corrects it.
