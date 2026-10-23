@@ -49,11 +49,19 @@ form is not a work-tree write for the guard; a launcher's call is logged as
 allowed.
 
 Accepted holes (allow), listed exactly and mirrored in install-layout.md:
-- Verbs outside GIT_WRITE_SUBCOMMANDS pass in any form: `read-tree`,
+- Verbs outside GIT_WRITE_SUBCOMMANDS pass in any form, including `add`,
+  `bisect`, `merge-file`, `mergetool`, `update-index`, `read-tree`,
   `checkout-index`, `submodule update`, `worktree add`, `branch -f`/`-D`,
   `update-ref`, `symbolic-ref`, `tag -f`, `reflog expire`, `gc --prune`,
   `filter-branch`, `sparse-checkout`.
-- Git alias verbs (`git ci`, from ~/.gitconfig) read as non-writers.
+- Git alias verbs (`git ci`, from ~/.gitconfig) read as non-writers, including
+  a `-c alias.*` value taken from a variable or command substitution.
+- A heredoc whose end marker is split by a backslash-newline, which hides the
+  body's commands.
+- Brace-expansion words, a verb passed from stdin to `xargs`, and the dashed
+  `git-commit` binary.
+- A mid-word `#` after a backslash-newline join, read as a comment by the
+  tokenizer (tracked as a separate todo).
 - Work-tree retargeting without a work-tree flag: `--git-dir=<repo>/.git` or
   `GIT_DIR=<repo>/.git` from a non-repo cwd, `-c core.worktree=<repo>`, and
   the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` env.
@@ -72,7 +80,8 @@ Accepted holes (allow), listed exactly and mirrored in install-layout.md:
   their existing handling).
 - The unknown-cd advisory never clearing after a later literal `cd` (it only
   over-refuses).
-This is a guard against drift, not evasion.
+This is a guard against drift, not evasion. The guard targets momentum
+mistakes; shapes that need deliberate obfuscation are accepted holes.
 
 Scanner seams that fail closed: scan_raw drops a backslash-newline as the
 shell does (an even backslash run is escaped backslashes, and a comment still
