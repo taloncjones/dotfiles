@@ -317,17 +317,9 @@ launch (`retired_review_launch_ids`), and the next check-in reports
 
 **`carry-review`.** A `reviewed` task whose HEAD moved, with an approval that
 still verifies at its pin, reports `carry-review` ahead of
-`stale-review-reset`. Run `$CORE carry-review --repo-slug <slug> --task-id <id>
---session <s> --fence <f>` without asking, as a long background run (it runs
-the pinned contract; wait on the `EXIT` line), and start no second run for a
-task while one runs. It proves every commit since the reviewed head is a clean
-main merge, runs the contract at HEAD, and records the proof in
-`artifacts/<task>/review-carry/`. Exit 0: re-pinned at HEAD with
-`review_carry`; the next check-in reports `ship`. Exit 3: the task is reset as
-the stale-verdict reset does and the next check-in reports `dispatch-review`.
-Exit 4: nothing written; for a held lock wait for the earlier run, else the
-next check-in offers it again, and repeated exit 4 goes to the user. Exit 2:
-integrity halt; surface it.
+`stale-review-reset`. Run it without asking, as a long background run; the
+command, exit codes and artifacts are in
+`references/ship-carry-forward.md` (Task review carry).
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
