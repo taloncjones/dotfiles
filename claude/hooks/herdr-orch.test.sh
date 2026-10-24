@@ -12970,13 +12970,42 @@ def refused(*a):
 refused("--repo-wide", "--question", "q?")
 run("away", *F, "--on")
 refused("--repo-wide", "--question", "")
-refused("--repo-wide", "--question", "x" * 501)
-refused("--repo-wide", "--question", "a\nb")
+refused("--repo-wide", "--question", "x" * 2001)
 refused("--repo-wide", "--question", "q?", "--option", "only")
 refused("--repo-wide", "--question", "q?", *[o for i in range(5) for o in ("--option", str(i))])
 refused("--repo-wide", "--question", "q?", "--option", "a", "--option", "b" * 101)
 refused("--repo-wide", "--question", "q?", "--option", "a", "--option", "b", "--recommend", "c")
 refused("--task", "PROJ-1", "--question", "q?", "--action", "ship")
+PY
+
+check "away: queue-ask stores a long multi-line gated-post question the post guard accepts" <<'PY'
+import os, sys
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+sys.path.insert(0, os.path.dirname(CORE))
+import pr_post_guard
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+draft = "\n".join(f"Line {i}: " + "x" * 60 for i in range(10))
+assert len(draft) >= 600, len(draft)
+question = "Post this reply?\n\n" + draft
+assert len(question) >= 700, len(question)
+run("queue-ask", *F, "--task", "PROJ-1", "--question", question, "--option", "Post", "--option", "Hold")
+stored = [a for a in read_jsonl("asks.jsonl") if a["event"] == "ask"][0]["question"]
+assert stored == question, stored
+assert pr_post_guard.shown(draft, stored)
+PY
+
+check "away: a malformed ask record is skipped, not a crash" <<'PY'
+import os
+exec(open(os.environ["AWAY_FIXTURE"]).read())
+fence = claim("S"); F = fl("S", fence)
+write_task("PROJ-1")
+run("away", *F, "--on")
+with open(os.path.join(rd, "asks.jsonl"), "a") as fh:
+    fh.write(json.dumps({"v": 1, "event": "ask", "id": "bad1", "question": "q?", "options": []}) + "\n")
+    fh.write(json.dumps({"v": 1, "event": "ask", "id": "bad2", "task": 7, "question": "q?", "options": []}) + "\n")
+assert any(l.startswith("away: on since ") and l.endswith(", 0 asks queued") for l in nxt("S", fence))
 PY
 
 check "away: an unreadable away.json reads as on" <<'PY'

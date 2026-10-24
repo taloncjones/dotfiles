@@ -19,7 +19,9 @@ and prints `owner: stale-fence` (exit 1, no write) under an old fence.
   It prints `away: on since <ts>, <n> asks queued`. A repeat keeps the first
   `since`.
 - Clear: `/back`, or the first owner chat message (a user turn that is not a
-  `<cross-session-message>`, a task notification or a watch line). Run
+  `<cross-session-message>`, a task notification, a watch line or the
+  rollover successor's launch prompt `resume director`, which is the
+  automatic rollover and never the owner). Run
   `away ... --off` before anything else in that turn. It prints
   `away: off, <n> asks queued`, then one JSON line per live ask, oldest first,
   with `task_status`. A repeat lists the same asks.
@@ -32,6 +34,9 @@ and prints `owner: stale-fence` (exit 1, no write) under an old fence.
   `python3 "$CORE" queue-ask --repo-slug <slug> --session <id> --fence <fence> (--task <task-id> | --repo-wide) --question '<text>' [--option <label>]... [--recommend <label>]`.
   That includes a work-repo merge prompt, a gated post prompt and a
   budget-spent prompt: queued with options and a recommendation, never skipped.
+  The question may run to 2000 characters over several lines: a gated post
+  puts its full draft text in the question, unchanged, so the return batch
+  shows it verbatim and the post guard accepts the answer.
   Then end the turn; do not wait.
 - A check-in `next: ask` line becomes a printed `next: run ... queue-ask` line
   with `--action` and the template as the question. Run it as printed. A task
@@ -66,6 +71,9 @@ and prints `owner: stale-fence` (exit 1, no write) under an old fence.
 - Lease change: only the current fence holder records an answer. If
   `answer-ask` prints `owner: stale-fence`, the answer is void; yield
   read-only (section 1) and let the new holder ask the live ask again.
+- Draft lost: the post guard keys a draft to its session and prunes it after
+  24 hours. After a rollover or a prune, the post guard refuses the answer
+  and the director registers the draft again and re-drafts. Failing closed.
 - Lost ask: a check-in ask lost mid-append reappears as a `queue-ask` line on
   the next `next`. A composed ask is regenerated when the director reaches the
   same decision point from task state. A rerun after lost output prints

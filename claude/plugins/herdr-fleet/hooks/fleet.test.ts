@@ -1543,6 +1543,20 @@ test('the queue tab lists queued owner asks above queued todos', async ($, on) =
   expect(all.join('\n')).not.toContain('Dropped question')
 })
 
+test('an unreadable queue still lists queued owner asks', async ($, on) => {
+  const w = newWorld({
+    ...owner('a'),
+    [`${ROOT}/a/queue.json`]: '{',
+    [`${ROOT}/a/asks.jsonl`]: JSON.stringify({ v: 1, event: 'ask', id: 'live1', task: null, question: 'Merge the batch?' }) + '\n',
+  })
+  const clock = stub(on, w)
+  await boot($, clock)
+  const ui = await pane($)
+  const all = (await tabLines(ui, 'tab-queue')).join('\n')
+  expect(all).toContain('queue unreadable')
+  expect(all).toContain('Merge the batch?')
+})
+
 test('an empty or missing queue draws no queue rows', async ($, on) => {
   const w = newWorld({ ...owner('a'), ...todoFile('q1', 'Backlog only') })
   const clock = stub(on, w)

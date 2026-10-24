@@ -5475,6 +5475,9 @@ def _adopt_rollover(ns) -> int:
     return 0
 
 
+ROLLOVER_PROMPT = "resume director"  # a user-turn prompt that is not the owner (away-mode.md)
+
+
 def rollover_launch(scope_kind, model=None, effort=None):
     """The shell line that starts the successor on this director's account."""
     parts = ["director"]
@@ -5484,7 +5487,7 @@ def rollover_launch(scope_kind, model=None, effort=None):
         parts += ["--model", shlex.quote(model)]
     if effort is not None:
         parts += ["--effort", shlex.quote(effort)]
-    parts.append("'resume director'")
+    parts.append(f"'{ROLLOVER_PROMPT}'")
     return " ".join(parts)
 
 
@@ -5914,7 +5917,7 @@ def _retire_decision(ns) -> int:
 
 AWAY_FILE = "away.json"
 ASKS_FILE = "asks.jsonl"
-ASK_QUESTION_MAX = 500
+ASK_QUESTION_MAX = 2000  # pr_post_guard.SHOWN_LIMIT: a gated-post question carries its full draft
 ASK_OPTION_MAX = 100
 ASK_OPTIONS_MAX = 4
 ASK_DROP_REASONS = ("stale", "withdrawn", "superseded")
@@ -5953,7 +5956,9 @@ def _jsonl_records(path):
 def read_asks(rd):
     """-> (asks oldest first, ids dropped, ids answered by a decision, retired or not)."""
     recs = _jsonl_records(Path(rd) / ASKS_FILE)
-    asks = [r for r in recs if r.get("event") == "ask" and isinstance(r.get("id"), str)]
+    asks = [r for r in recs if r.get("event") == "ask" and isinstance(r.get("id"), str)
+            and "task" in r and (r["task"] is None or isinstance(r["task"], str))
+            and isinstance(r.get("question"), str)]
     dropped = {r["drops"] for r in recs if r.get("event") == "drop" and isinstance(r.get("drops"), str)}
     answered = {r["ask"] for r in read_decisions(rd) if isinstance(r.get("ask"), str)}
     return asks, dropped, answered
@@ -6027,8 +6032,8 @@ def _away(ns) -> int:
 
 def _queue_ask(ns) -> int:
     question = ns.question.strip()
-    _require(question and len(question) <= ASK_QUESTION_MAX and "\n" not in question and "\r" not in question,
-             f"--question must be 1..{ASK_QUESTION_MAX} characters on one line")
+    _require(question and len(question) <= ASK_QUESTION_MAX,
+             f"--question must be 1..{ASK_QUESTION_MAX} characters")
     _require(ns.repo_wide or valid_task_id(ns.task), "invalid task id")
     _require(len(ns.option) != 1 and len(ns.option) <= ASK_OPTIONS_MAX,
              f"--option takes 2..{ASK_OPTIONS_MAX} labels, or none")
@@ -6566,7 +6571,7 @@ def _main(argv=None) -> int:
     qa_scope.add_argument("--task", default=None)
     qa_scope.add_argument("--repo-wide", action="store_true")
     add("answer-ask", "--id", "--text", fenced=True)
-    add("drop-ask", "--id", fenced=True).add_argument("--reason", choices=("stale", "withdrawn"), required=True)
+    add("drop-ask", "--id", fenced=True).add_argument("--reason", choices=[r for r in ASK_DROP_REASONS if r != "superseded"], required=True)
     sq = add("set-queue", fenced=True)
     sq.add_argument("--todo", action="append", default=[])
     ak = add("archive-task", "--task-id", fenced=True)

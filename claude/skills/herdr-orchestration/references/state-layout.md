@@ -286,8 +286,8 @@ off; an unparseable file reads as on. It gates only whether `next` prints
 `queue-ask` instead of `ask` and whether `queue-ask` accepts a write.
 
 `asks.jsonl`: append-only, `v: 1`, torn tails handled as in `decisions.jsonl`.
-`event: ask` (`id`, `ts`, `task` or null, `question` of at most 500
-characters, `options` of 0 or 2-4 labels, `recommendation`, `action` or null)
+`event: ask` (`id`, `ts`, `task` or null, `question` of at most 2000
+characters (newlines allowed), `options` of 0 or 2-4 labels, `recommendation`, `action` or null)
 is written by `queue-ask`. `event: drop` (`drops: <ask id>`, `reason`
 `stale`, `withdrawn` or `superseded`) is written by `drop-ask` and by a
 superseding `queue-ask`. `answer-ask` writes one `decisions.jsonl` record in
