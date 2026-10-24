@@ -14184,6 +14184,136 @@ for sha in (m1, m2):
 assert facts(fx)["action"] == "ship"
 PY
 
+check "carry-review: a clean main merge after a ship gate keeps the approval" <<PY
+$LOAD
+$CARRY
+fx = build()
+ship = {"phase": "ship", "workspace_id": "w4", "runtime": "claude", "launch_id": "S1",
+        "pane_id": "pane2", "source_head_sha": fx["H"]}
+task = dict(fx["task"], workers=fx["task"]["workers"] + [ship],
+            ship_launch_id="S1", ship_parked_head=fx["H"])
+r = cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(task))
+assert r.returncode == 0, r.stderr
+ld = fx["rd"] + "/artifacts/PROJ-1/ship-S1"
+os.makedirs(ld)
+open(ld + "/ship.json", "w").write(json.dumps(
+    {"task_id": "PROJ-1", "launch_id": "S1", "head_sha": fx["H"], "verdict": "APPROVE"}))
+f = facts(fx)
+assert f["action"] == "carry-review", f["action"]
+assert f["review_carry_due"] is True, f
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+head = git(fx["wt"], "rev-parse", "HEAD")
+task = json.loads(task_file(fx))
+assert task["review_head_sha"] == head and task["review_carry"]["head"] == head, task
+assert facts(fx)["action"] == "ship"
+pr = {"number": 7, "headRefOid": head, "baseRefName": "main"}
+out = c.merge_ready(c.Path(fx["rd"]), "slug-x", "PROJ-1", pr, {})
+codes = [x["code"] for x in out["reasons"]]
+assert out["ready"] is False and out["handoff_state"] == "stale" and "handoff" in codes, out
+PY
+
+check "carry-review: an old ship gate's handoff cannot merge the carried head" <<PY
+$LOAD
+$CARRY
+fx = build()
+ship = {"phase": "ship", "workspace_id": "w4", "runtime": "claude", "launch_id": "S1",
+        "pane_id": "pane2", "source_head_sha": fx["H"]}
+task = dict(fx["task"], workers=fx["task"]["workers"] + [ship],
+            ship_launch_id="S1", ship_parked_head=fx["H"])
+r = cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(task))
+assert r.returncode == 0, r.stderr
+assert carry(fx).returncode == 0
+head = git(fx["wt"], "rev-parse", "HEAD")
+tree = git(fx["wt"], "rev-parse", "HEAD^{tree}")
+ld = fx["rd"] + "/artifacts/PROJ-1/ship-S1"
+os.makedirs(ld + "/run")
+def sha(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+open(ld + "/run/report.json", "w").write("{}")
+open(ld + "/run/expected.json", "w").write(json.dumps(
+    {"head": fx["H"], "base": fx["base"], "tree": tree, "base_ref": "main"}))
+pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "state": "OPEN",
+      "isDraft": False, "mergeable": "MERGEABLE"}
+def ready(handoff_head):
+    open(ld + "/ship.json", "w").write(json.dumps(
+        {"task_id": "PROJ-1", "launch_id": "S1", "head_sha": handoff_head, "verdict": "APPROVE",
+         "base_sha": fx["base"], "report_path": ld + "/run/report.json",
+         "report_sha256": sha(ld + "/run/report.json"),
+         "expected_path": ld + "/run/expected.json",
+         "expected_sha256": sha(ld + "/run/expected.json")}))
+    out = c.merge_ready(c.Path(fx["rd"]), "slug-x", "PROJ-1", pr, {})
+    return out, [x["code"] for x in out["reasons"]]
+out, codes = ready(fx["H"])
+assert out["ready"] is False and out["handoff_state"] == "stale" and "handoff" in codes, out
+out, codes = ready(head)
+assert out["ready"] is False and out["handoff_state"] == "current" and "head-moved" in codes, out
+PY
+
+check "is_reviewed: a trailing ship row keeps the approval; a retired review or a later row does not" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+H = "a" * 40
+def row(phase, launch, ws):
+    return {"phase": phase, "workspace_id": ws, "runtime": "claude", "launch_id": launch,
+            "pane_id": "p" + launch, "source_head_sha": H}
+impl, rev, ship = row("implement", "I1", "w2"), row("review", "L1", "w3"), row("ship", "S1", "w4")
+done = dict(rev, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+def reviewed(workers, **extra):
+    task = {"task_id": "PROJ-1", "status": "reviewed", "review_head_sha": H, "workers": workers}
+    return c.is_reviewed(dict(task, **extra), done, H, "w3")
+assert c.TRAILING_PHASES["review"] == frozenset({"ship"})
+assert c.TRAILING_PHASES["implement"] == frozenset({"review"})
+assert reviewed([impl, rev]) is True
+assert reviewed([impl, rev, ship]) is True
+assert reviewed([impl, rev, ship, row("ship", "S2", "w4")]) is True
+assert reviewed([impl, rev, ship], retired_review_launch_ids=["L1"]) is False
+assert reviewed([impl, rev, ship, row("implement", "I2", "w2")]) is False
+assert reviewed([impl, rev, ship, row("plan", "P1", "w1")]) is False
+assert reviewed([impl, rev, ship, row("review", "L2", "w3")]) is False
+assert reviewed([impl, rev, ship, {"phase": "ship", "launch_id": "S9"}]) is False
+PY
+
+check "emit-review: a ship gate closes its review attempt to new verdicts" <<'SH'
+unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 $PWD/claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" remote add origin https://example.com/repo-rw.git
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+SLUG=$(python3 -c "import importlib.util; s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=importlib.util.module_from_spec(s); s.loader.exec_module(c); print(c.repo_slug('https://example.com/repo-rw.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"
+F=$($CLI claim-owner --repo-slug $SLUG --repo-path $WT --session S1 --host h --pid 1)
+I='{"role":"impl","launch_id":"impl-1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$BASE"'"}'
+R='{"role":"review","launch_id":"rev-1","phase":"review","runtime":"claude","workspace_id":"w1","pane_id":"w1:p2","source_head_sha":"'"$BASE"'"}'
+S='{"role":"ship","launch_id":"ship-1","phase":"ship","runtime":"claude","workspace_id":"w1","pane_id":"w1:p3","source_head_sha":"'"$BASE"'"}'
+$CLI write-task --repo-slug $SLUG --task-id td-sg --session S1 --fence "$F" \
+  --json '{"task_id":"td-sg","status":"completed","base_sha":"'"$BASE"'","workers":['"$I"','"$R"']}'
+mkdir -p "$CLAUDE_CONFIG_DIR/herdr-orch"
+FIND="$CLAUDE_CONFIG_DIR/herdr-orch/findings.md"; printf 'No findings. Inspected: fixture.\n' > "$FIND"
+emit() {
+  $CLI emit-review --repo-slug $SLUG --repo-path $WT --task-id td-sg --workspace w1 --agent rev-td-sg \
+    --outcome "$1" --reviewed-head-sha "$BASE" --blocking-count "$2" --findings-ref "$FIND" \
+    --runtime claude --launch-id rev-1 --pane-id w1:p2 --source-head-sha "$BASE"
+}
+emit approved 0
+cp "$RD/tasks/td-sg.review.json" "$CLAUDE_CONFIG_DIR/before.json"
+$CLI write-task --repo-slug $SLUG --task-id td-sg --session S1 --fence "$F" \
+  --json '{"task_id":"td-sg","status":"completed","base_sha":"'"$BASE"'","workers":['"$I"','"$R"','"$S"']}'
+rc=0
+emit changes-requested 1 2>"$ERRFILE" || rc=$?
+[ "$rc" -eq 2 ]
+grep -q 'a ship gate has closed this review attempt' "$ERRFILE"
+cmp "$RD/tasks/td-sg.review.json" "$CLAUDE_CONFIG_DIR/before.json"
+SH
+
 check "write-task: review_carry is inherited, never changed, and dropped on a re-pin" <<PY
 $LOAD
 $CARRY

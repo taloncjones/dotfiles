@@ -3176,8 +3176,10 @@ def require_not_consumed(rd, binding_id):
 
 # Rows that may follow a phase's latest row without superseding it. A live
 # repair worker keeps its implement attempt across a review dispatched into
-# the same workspace; a later plan or implement row still supersedes it.
-TRAILING_PHASES = {"implement": frozenset({"review"})}
+# the same workspace; a later plan or implement row still supersedes it. A
+# ship gate keeps the review attempt it gates, so a main merge after the gate
+# can still carry the approval.
+TRAILING_PHASES = {"implement": frozenset({"review"}), "review": frozenset({"ship"})}
 
 
 def attempt_matches(task, done, phase, workspace):
@@ -7149,6 +7151,11 @@ def _main(argv=None) -> int:
                         done["review_base_sha"] = ns.reviewed_base_sha
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
+                # A ship gate closes its review attempt to new verdicts; readers keep it.
+                _require(done["phase"] != "review"
+                         or not any(isinstance(w, dict) and w.get("phase") == "ship"
+                                    for w in (task.get("workers") or [])[-1:]),
+                         "a ship gate has closed this review attempt")
                 # Closes the overwrite-the-rejection path at one head: a binding-
                 # scoped review verdict at a given reviewed_head_sha cannot be
                 # replaced by a different outcome or a different reviewer session.
