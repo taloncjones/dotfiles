@@ -583,13 +583,62 @@ hook_case "G git log allowed" allow Bash "git log --oneline -3" "$R" "$SID_A"
 hook_case "G git -C repo pull --ff-only denied" deny Bash "git -C $R pull --ff-only" "$N" "$SID_A"
 hook_case "G owner python3 core sync-main allowed" allow Bash "python3 $HOME/.claude/hooks/herdr_orch_core.py sync-main --repo-slug s --repo-path $R --branch main" "$R" "$SID_A"
 hook_case "G git commit outside any work tree allowed" allow Bash "git commit -m x" "$N" "$SID_A"
-hook_case "G git -C variable target allowed (accepted gap)" allow Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
+hook_case "G git -C variable target denied (fail closed)" deny Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
 hook_case "G git commit from .todos cwd denied" deny Bash "git commit -m x" "$R/.todos" "$SID_A"
 hook_case "G git -C .todos reset --hard denied" deny Bash "git -C $R/.todos reset --hard" "$N" "$SID_A"
 hook_case "G git reset --hard from gitignored cwd denied" deny Bash "git reset --hard" "$R/ignored" "$SID_A"
 hook_case "G git -C gitignored dir commit denied" deny Bash "git -C $R/ignored commit -m x" "$N" "$SID_A"
 hook_case "G cd .todos then git commit denied" deny Bash "cd $R/.todos && git commit -m x" "$N" "$SID_A"
 hook_case "G plain session git commit allowed" allow Bash "git commit -m x" "$R" "$SID_C"
+
+# --- M: every SKILL.md writer verb, in the repo and under -C -------------
+hook_case "M git -C repo commit denied" deny Bash "git -C $R commit -m x" "$N" "$SID_A"
+hook_case "M git merge in the repo denied" deny Bash "git merge main" "$R" "$SID_A"
+hook_case "M git cherry-pick in the repo denied" deny Bash "git cherry-pick abc123" "$R" "$SID_A"
+hook_case "M git -C repo cherry-pick denied" deny Bash "git -C $R cherry-pick abc123" "$N" "$SID_A"
+hook_case "M git reset in the repo denied" deny Bash "git reset --hard" "$R" "$SID_A"
+hook_case "M git -C repo reset denied" deny Bash "git -C $R reset --hard" "$N" "$SID_A"
+hook_case "M git rebase in the repo denied" deny Bash "git rebase main" "$R" "$SID_A"
+hook_case "M git -C repo rebase denied" deny Bash "git -C $R rebase main" "$N" "$SID_A"
+hook_case "M git revert in the repo denied" deny Bash "git revert HEAD" "$R" "$SID_A"
+hook_case "M git -C repo revert denied" deny Bash "git -C $R revert HEAD" "$N" "$SID_A"
+hook_case "M git am in the repo denied" deny Bash "git am x.patch" "$R" "$SID_A"
+hook_case "M git -C repo am denied" deny Bash "git -C $R am x.patch" "$N" "$SID_A"
+hook_case "M git stash in the repo denied" deny Bash "git stash" "$R" "$SID_A"
+hook_case "M git -C repo stash denied" deny Bash "git -C $R stash" "$N" "$SID_A"
+hook_case "M git checkout -- path in the repo denied" deny Bash "git checkout -- tracked.txt" "$R" "$SID_A"
+hook_case "M git -C repo checkout -- path denied" deny Bash "git -C $R checkout -- tracked.txt" "$N" "$SID_A"
+hook_case "M git restore in the repo denied" deny Bash "git restore tracked.txt" "$R" "$SID_A"
+hook_case "M git -C repo restore denied" deny Bash "git -C $R restore tracked.txt" "$N" "$SID_A"
+
+# --- U/A: unresolved git targets fail closed ------------------------------
+hook_case "U incident: assigned variable -C merge denied" deny Bash 'W='"$R"'; git -C $W rev-parse HEAD; git -C $W merge --no-ff -m "eol: Merge A into B" main' "$N" "$SID_A"
+U2_CMD='R='"$R"'
+m() {
+    wt=$R/$1
+    git -C $wt merge --no-ff -m "$3" $2 2>&1 | tail -5
+}
+m . main "msg"'
+hook_case "U incident: shell function -C merge denied" deny Bash "$U2_CMD" "$N" "$SID_A"
+hook_case "U cd to a variable then git merge denied" deny Bash 'W='"$R"'; cd $W && git merge main' "$N" "$SID_A"
+hook_case "U -C command substitution commit denied" deny Bash 'git -C "$(git rev-parse --show-toplevel)" commit -m x' "$N" "$SID_A"
+hook_case "U --work-tree variable reset denied" deny Bash 'git --work-tree=$X --git-dir=$X/.git reset --hard' "$N" "$SID_A"
+hook_case "U -C glob commit denied" deny Bash "git -C $FIX/rep* commit -m x" "$N" "$SID_A"
+hook_case "U sh -c variable -C merge denied" deny Bash "sh -c 'git -C \$W merge main'" "$N" "$SID_A"
+hook_case "U unquoted substitution -C merge denied" deny Bash 'git -C $(git rev-parse --show-toplevel) merge main' "$N" "$SID_A"
+hook_case "U assigned substitution then -C merge denied" deny Bash 'W=$(git rev-parse --show-toplevel); git -C $W merge main' "$N" "$SID_A"
+hook_case "U newline-separated substitution -C merge denied" deny Bash 'W=$(git rev-parse --show-toplevel)
+git -C $W merge main' "$N" "$SID_A"
+hook_case "U attached -C variable merge denied" deny Bash 'git -C"$W" merge main' "$N" "$SID_A"
+hook_case "U unquoted substitution --work-tree reset denied" deny Bash 'git --work-tree=$(pwd) --git-dir=$(pwd)/.git reset --hard' "$N" "$SID_A"
+hook_case "A unquoted substitution -C status allowed" allow Bash 'git -C $(git rev-parse --show-toplevel) status' "$N" "$SID_A"
+hook_case "A unquoted substitution -C log allowed" allow Bash 'git -C $(pwd) log -1' "$N" "$SID_A"
+hook_case "A git -C variable status allowed" allow Bash 'git -C $W status' "$N" "$SID_A"
+hook_case "A git -C variable merge --abort denied (not a plain writer)" deny Bash 'git -C $W merge --abort' "$N" "$SID_A"
+hook_case "A git merge --abort in the repo allowed" allow Bash "git merge --abort" "$R" "$SID_A"
+hook_case "A git -C repo merge --abort allowed" allow Bash "git -C $R merge --abort" "$N" "$SID_A"
+hook_case "A plain session variable -C merge allowed" allow Bash 'git -C $W merge main' "$N" "$SID_C"
+hook_case "A cd to a variable inside a closed subshell does not carry" allow Bash '(cd $W && git status); git merge main' "$N" "$SID_A"
 
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
@@ -613,6 +662,248 @@ second_line_has() {   # LABEL SUBSTRING: second stderr line of the last run
     fi
 }
 
+U1_CMD='W='"$R"'; git -C $W rev-parse HEAD; git -C $W merge --no-ff -m "eol: Merge A into B" main'
+reset_log
+if run "$(payload Bash "$SID_A" "$U1_CMD" "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] \
+        && grep -qF '"why":"unresolved"' "$AUDIT" && grep -qF '"reason":"unresolved"' "$AUDIT" \
+        && grep -qF '"repo":""' "$AUDIT" && grep -qF '"path":"$W"' "$AUDIT" \
+        && grep -qF "\"session_id\":\"$SID_A\"" "$AUDIT" && grep -qF '"tool_use_id":"toolu_' "$AUDIT"; then
+    printf 'PASS  U unresolved denial is logged once with why unresolved\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U unresolved denial is logged once with why unresolved (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+reset_log
+if run "$(payload Bash "$SID_A" 'git -C $(git rev-parse --show-toplevel) merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U unquoted substitution -C denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U unquoted substitution -C denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'W=$(pwd); git -C $W merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U assigned substitution -C denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U assigned substitution -C denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'W=$(pwd)
+git -C $W merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U newline-separated substitution -C denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U newline-separated substitution -C denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'git -C"$W" merge main' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U attached -C variable denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U attached -C variable denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+if run "$(payload Bash "$SID_A" 'git --work-tree=$(pwd) reset --hard' "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+        && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ] && grep -qF '"why":"unresolved"' "$AUDIT"; then
+    printf 'PASS  U unquoted substitution --work-tree denial is logged once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U unquoted substitution --work-tree denial is logged once (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+# audit_deny LABEL CMD CWD: the hook denies CMD and writes exactly one denied record.
+audit_deny() {
+    reset_log
+    if run "$(payload Bash "$SID_A" "$2" "$3")"; then rc=0; else rc=$?; fi
+    if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-denied)" = 1 ] \
+            && [ "$(wc -l <"$AUDIT" | tr -d ' ')" = 1 ]; then
+        printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (rc=%s)\n' "$1" "$rc" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+audit_deny "U substitution after cd to the repo: merge denied" "cd $R && out=\$(git merge main 2>&1)" "$N"
+audit_deny "U substitution after cd to the repo: reset denied" "cd $R && result=\$(git reset --hard HEAD)" "$N"
+audit_deny "U substitution after cd to the repo: redirect denied" "cd $R && x=\$(echo hi > tracked.txt)" "$N"
+audit_deny "U substitution after cd to a variable: merge denied" 'cd $W && out=$(git merge main)' "$N"
+audit_deny "U backtick after cd to the repo: reset denied" "cd $R && out=\`git reset --hard\`" "$N"
+audit_deny "U backtick with arguments as -C target denied" "git -C \`printf %s $R\` reset --hard" "$N"
+audit_deny "U backtick command as -C target denied" 'git -C `git rev-parse --show-toplevel` merge main' "$N"
+audit_deny "U env -u wrapper hides variable -C reset" 'env -u X git -C "$W" reset --hard' "$N"
+audit_deny "U command -p wrapper hides variable -C reset" 'command -p git -C "$W" reset --hard' "$N"
+audit_deny "U env -u wrapper hides literal -C reset" "env -u HERDR_ENV git -C $R reset --hard" "$N"
+audit_deny "U command -p wrapper hides literal -C reset" "command -p git -C $R reset --hard" "$N"
+audit_deny "U env -C wrapper dir hides relative merge" "env -C \$W git merge main" "$N"
+audit_deny "U quoted capture variable -C reset denied" 'out="$(git -C "$W" reset --hard)"' "$N"
+audit_deny "U quoted capture literal -C reset denied" "out=\"\$(git -C $R reset --hard)\"" "$N"
+audit_deny "U quoted backtick capture literal -C reset denied" "out=\"\`git -C $R reset --hard\`\"" "$N"
+hook_case "A git -C variable clean -nd denied (no dry-run exemption)" deny Bash 'git -C "$W" clean -nd' "$N" "$SID_A"
+hook_case "A git -C variable clean --dry-run denied (no dry-run exemption)" deny Bash 'git -C "$W" clean --dry-run -d' "$N" "$SID_A"
+hook_case "A git -C variable clean -fd denied" deny Bash 'git -C "$W" clean -fd' "$N" "$SID_A"
+hook_case "A env -u wrapper git -C literal status allowed" allow Bash "env -u HERDR_ENV git -C $R status" "$N" "$SID_A"
+hook_case "A director substitution without a writer allowed" allow Bash "cd $R && out=\$(git log -1 --format=%H)" "$N" "$SID_A"
+hook_case "A director push of a sha to a branch allowed" allow Bash "git -C $R push origin abc123:refs/heads/br" "$N" "$SID_A"
+hook_case "A director gh and core verbs allowed" allow Bash "gh pr view 1 --json state; python3 $HOME/.claude/hooks/herdr_orch_core.py status" "$N" "$SID_A"
+hook_case "A plain session wrapper variable -C reset allowed" allow Bash 'env -u X git -C "$W" reset --hard' "$N" "$SID_C"
+
+# --- allowlist: only a plain literal `git [-C path] writer args` passes ----
+hook_case "AL B1 clean -fd -en (exclude n) denied" deny Bash 'git -C "$W" clean -fd -en' "$N" "$SID_A"
+hook_case "AL B1 clean -fdxenode_modules denied" deny Bash 'git -C "$W" clean -fdxenode_modules' "$N" "$SID_A"
+hook_case "AL B1 apply --apply --check denied" deny Bash 'git -C "$W" apply --apply --check p.patch' "$N" "$SID_A"
+hook_case "AL B1 apply --check --apply denied" deny Bash 'git -C "$W" apply --check --apply p.patch' "$N" "$SID_A"
+hook_case "AL B1 clean --dry-run --no-dry-run denied" deny Bash 'git -C "$W" clean -d --dry-run --no-dry-run -f' "$N" "$SID_A"
+hook_case "AL B1 apply --stat denied" deny Bash 'git -C "$W" apply --stat p.patch' "$N" "$SID_A"
+audit_deny "AL A1 env -iu bundled option hides writer" 'env -iu FOO git -C "$W" commit -m x' "$N"
+audit_deny "AL A1 sudo -nu bundled option hides writer" "sudo -nu root git -C $R commit -m x" "$N"
+audit_deny "AL A1 sudo --user long option hides writer" "sudo --user root git -C $R commit -m x" "$N"
+audit_deny "AL A1 env -S attached string hides writer" "env -S'git -C $R commit -m x'" "$N"
+audit_deny "AL A1 env --split-string hides writer" "env --split-string='git -C $R commit -m x'" "$N"
+audit_deny "AL A1 xargs long option hides writer" "xargs --max-args 1 git -C $R commit" "$N"
+audit_deny "AL A1 timeout hides literal writer" "timeout 5 git -C $R commit -m x" "$N"
+audit_deny "AL A1 stdbuf hides literal writer" "stdbuf -o0 git -C $R commit -m x" "$N"
+audit_deny "AL A1 time hides literal writer" "time git -C $R commit -m x" "$N"
+audit_deny "AL A1 nohup hides literal writer" "nohup git -C $R commit -m x" "$N"
+audit_deny "AL A1 exec hides literal writer" "exec git -C $R commit -m x" "$N"
+audit_deny "AL A1 builtin hides literal writer" "builtin git -C $R commit -m x" "$N"
+audit_deny "AL A1 bash -c hides literal writer" "bash -c 'git -C $R commit -m x'" "$N"
+audit_deny "AL A1 eval hides literal writer" "eval 'git -C $R commit -m x'" "$N"
+audit_deny "AL A1 xargs hides literal writer" "echo x | xargs git -C $R commit -m" "$N"
+audit_deny "AL A1 find -exec hides literal writer" "find . -exec git -C $R commit -m x {} +" "$N"
+audit_deny "AL A2 env -C moves sed -i" "env -C $R sed -i.bak s/a/b/ tracked.txt" "$N"
+audit_deny "AL A2 env -iC moves tee" "env -iC $R tee tracked.txt" "$N"
+audit_deny "AL A2 env -C moves git commit" "env -C $R git commit -m x" "$N"
+audit_deny "AL A3 variable option word before verb" 'git $OPTS commit -m x' "$N"
+audit_deny "AL A3 variable verb word" "git -C $R \$VERB -m x" "$N"
+audit_deny "AL A3 variable git command word" "\$GIT -C $R commit -m x" "$N"
+audit_deny "AL A3 variable command with default" "\${GIT:-git} -C $R commit -m x" "$N"
+audit_deny "AL A3 assigned command word" "g=git; \$g -C $R commit -m x" "$N"
+audit_deny "AL A3 substitution option word" 'git $(echo -C) $W commit -m x' "$N"
+audit_deny "AL A3 variable verb alone" 'git $VERB' "$N"
+audit_deny "AL A4 unquoted heredoc substitution" 'cat <<EOF
+$(git -C $W commit -m x)
+EOF' "$N"
+audit_deny "AL A4 heredoc around a literal writer" "cat <<EOF
+git -C $R commit -m x
+EOF" "$N"
+audit_deny "AL function definition around a literal writer" "f() { git -C $R commit -m x; }; f" "$N"
+audit_deny "AL function keyword around a literal writer" "function f { git -C $R commit -m x; }; f" "$N"
+audit_deny "AL seam line continuation after variable -C hides merge" "git -C \"\$W\" \\
+  merge --no-ff -m x main" "$N"
+audit_deny "AL seam line continuation before -C hides commit" "git \\
+  -C $R commit -m x" "$N"
+audit_deny "AL seam line continuation before verb hides reset" "git -C $R \\
+  reset --hard" "$N"
+audit_deny "AL seam line continuation inside a word hides verb" "git -C $R com\\
+mit -m x" "$N"
+audit_deny "AL seam GIT_WORK_TREE prefix with a variable" 'GIT_DIR=$W/.git GIT_WORK_TREE=$W git reset --hard' "$N"
+audit_deny "AL seam GIT_WORK_TREE export with a variable" 'export GIT_DIR=$W/.git GIT_WORK_TREE=$W; git reset --hard' "$N"
+audit_deny "AL seam GIT_WORK_TREE literal prefix targets the repo" "GIT_DIR=$R/.git GIT_WORK_TREE=$R git reset --hard" "$N"
+audit_deny "AL seam GIT_WORK_TREE declare -x with a variable" 'declare -x GIT_WORK_TREE=$W; git commit -m x' "$N"
+audit_deny "AL seam GIT_DIR prefix with a variable and -C literal" "GIT_DIR=\$W/.git git -C $R commit -m x" "$N"
+audit_deny "AL seam GIT_WORK_TREE inside sh -c after an export" "export GIT_WORK_TREE=$R; sh -c 'git reset --hard'" "$N"
+audit_deny "AL seam --config-env value hides the verb" "git --config-env user.name=HOME -C $R commit -m x" "$N"
+audit_deny "AL seam --attr-source value hides the verb" "git --attr-source HEAD -C $R commit -m x" "$N"
+audit_deny "AL seam -c alias hides the verb" "git -c alias.c=commit -C $R c -m x" "$N"
+audit_deny "AL seam -c alias with a writer verb" "git -c alias.reset=commit -C $R reset -m x" "$N"
+audit_deny "AL seam unknown global option --exec-path=" "git --exec-path=/x -C $R commit -m x" "$N"
+audit_deny "AL seam find -exec sh -c hides writer" "find . -name x -exec sh -c 'git -C $R commit -m x' {} \\;" "$N"
+audit_deny "AL seam find -execdir with a variable git hides writer" 'find . -execdir $G commit -m x {} \;' "$N"
+audit_deny "AL seam find -ok hides writer" "find . -ok git -C $R commit -m x {} \\;" "$N"
+audit_deny "AL seam parallel quoted command hides writer" "parallel 'git -C $R commit -m x' ::: a" "$N"
+audit_deny "AL seam su -c hides writer" "su -c 'git -C $R commit -m x'" "$N"
+audit_deny "AL seam flock -c hides writer" "flock /tmp/l -c 'git -C $R commit -m x'" "$N"
+audit_deny "AL seam ssh quoted command hides writer" "ssh host 'git -C $R commit -m x'" "$N"
+audit_deny "AL seam quoted command with a leading path git" "script -c '/usr/bin/git -C $R reset --hard' /dev/null" "$N"
+audit_deny "AL seam quoted multi-line command hides writer" "tmux send-keys 'cd x
+git commit -m y'" "$N"
+hook_case "AL seam line continuation read-only status allowed" allow Bash "git -C $R \\
+  status" "$N" "$SID_A"
+hook_case "AL seam GIT_DIR prefix read-only status allowed" allow Bash 'GIT_DIR=$W/.git git status' "$N" "$SID_A"
+hook_case "AL seam known bare option read-only allowed" allow Bash 'git --no-pager -C "$W" log -1' "$N" "$SID_A"
+hook_case "AL seam unknown option read-only allowed" allow Bash 'git --exec-path status' "$N" "$SID_A"
+hook_case "AL seam ssh without a git command allowed" allow Bash "ssh host 'ls -la'" "$N" "$SID_A"
+hook_case "AL seam find -exec without git allowed" allow Bash "find . -name x -exec grep -l commit {} \\;" "$N" "$SID_A"
+hook_case "AL seam gh body not starting with git allowed" allow Bash 'gh pr create --title "fix git commit" --body "see git merge notes"' "$N" "$SID_A"
+audit_deny "AL seam --super-prefix value hides the verb" "git --super-prefix x/ -C $R commit -m x" "$N"
+audit_deny "AL seam GIT_WORK_TREE with --git-dir flag and a variable" 'GIT_WORK_TREE=$W git --git-dir=/x/.git reset --hard' "$N"
+audit_deny "AL seam line continuation after an export hides reset" "export GIT_WORK_TREE=\$W; git \\
+  reset --hard" "$N"
+audit_deny "AL seam at runner quoted command hides writer" "at now <<< 'git -C $R commit -m x'" "$N"
+audit_deny "AL seam escaped backslash before newline still splits the commands" "git -C $R status \\\\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 echo comment ending in a backslash hides the next line" "echo hi # note \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 comment-only first line ending in a backslash" "# note \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 git status comment ending in a backslash" "git -C $R status # see \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 cd comment ending in a backslash then reset" "cd $R # go \\
+git reset --hard" "$N"
+audit_deny "AL B1 semicolon comment ending in a backslash" "true; # c \\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 comment inside a subshell ending in a backslash" "( echo hi # c \\
+git -C $R commit -m x )" "$N"
+audit_deny "AL B1 comment inside a substitution ending in a backslash" "x=\$(echo hi # c \\
+git -C $R commit -m x)" "$N"
+audit_deny "AL B1 comment before a variable target ending in a backslash" "echo hi # c \\
+git -C \"\$W\" commit -m x" "$N"
+audit_deny "AL B1 comment ending in an odd backslash run" "echo hi # c \\\\\\
+git -C $R commit -m x" "$N"
+audit_deny "AL B1 comment ending in an even backslash run" "echo hi # c \\\\
+git -C $R commit -m x" "$N"
+audit_deny "AL H1 mid-word hash in echo before semicolon merge" "echo PR#12; git -C $R merge main" "$N"
+audit_deny "AL H1 mid-word hash in echo before && merge" "echo PR#12 && git -C $R merge main" "$N"
+audit_deny "AL H1 url fragment before && merge" "git -C $R fetch https://h/r#frag && git -C $R merge main" "$N"
+audit_deny "AL H1 mid-word hash in ls before cd and merge" "ls a#b; cd $R && git merge main" "$N"
+hook_case "AL H1 real comment still hides the later merge" allow Bash "echo x #c; git -C $R merge main" "$N" "$SID_A"
+audit_deny "AL A1 flock -c time prefix hides writer" "flock /tmp/l -c 'time git commit -m x'" "$N"
+audit_deny "AL A1 flock -c brace form hides writer" "flock /tmp/l -c '{ git commit -m x; }'" "$N"
+audit_deny "AL A1 su -c GIT_WORK_TREE assignment hides writer" "su -c 'GIT_WORK_TREE=$R git reset --hard'" "$N"
+audit_deny "AL A1 ssh while loop hides writer" "ssh host 'while true; do git commit; done'" "$N"
+hook_case "AL A2 alias option with a read-only verb allowed" allow Bash 'git -c alias.foo=bar -C "$W" status' "$N" "$SID_A"
+audit_deny "AL literal writer with a variable argument" "git -C $R commit -m \"\$MSG\"" "$N"
+hook_case "AL variable-target status allowed" allow Bash 'git -C "$W" status' "$N" "$SID_A"
+hook_case "AL variable-target log allowed" allow Bash 'git -C "$W" log -1' "$N" "$SID_A"
+hook_case "AL variable-target diff allowed" allow Bash 'git -C "$W" diff --stat' "$N" "$SID_A"
+hook_case "AL variable-target rev-parse allowed" allow Bash 'git -C "$W" rev-parse HEAD' "$N" "$SID_A"
+hook_case "AL variable-target show allowed" allow Bash 'git -C "$W" show HEAD' "$N" "$SID_A"
+hook_case "AL variable-target fetch allowed" allow Bash 'git -C "$W" fetch origin' "$N" "$SID_A"
+hook_case "AL wrapped read-only git allowed" allow Bash 'timeout 5 git -C "$W" status' "$N" "$SID_A"
+hook_case "AL gh title naming a git verb allowed" allow Bash 'gh pr create --title "fix git commit hook"' "$N" "$SID_A"
+hook_case "AL plain session heredoc writer allowed" allow Bash 'cat <<EOF
+$(git -C $W commit -m x)
+EOF' "$N" "$SID_C"
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+hook_case "AL plain literal -C writer under a marker allowed" allow Bash "git -C $R commit -m x" "$N" "$SID_A"
+hook_case "AL variable-target writer still denied under a marker" deny Bash 'git -C "$W" commit -m x' "$N" "$SID_A"
+hook_case "AL wrapped literal writer still denied under a marker" deny Bash "env -u X git -C $R commit -m x" "$N" "$SID_A"
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
+
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+if run "$(payload Bash "$SID_A" "$U1_CMD" "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(audit_count orch-edit-claim)" = 0 ]; then
+    printf 'PASS  U marker does not allow an unresolved target and claims nothing\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U marker does not allow an unresolved target and claims nothing (rc=%s claims=%s)\n' "$rc" "$(audit_count orch-edit-claim)" >&2; FAIL=$((FAIL + 1))
+fi
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
+
+if run "$(payload Bash "$SID_A" "git -C $R merge --abort" "$N")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 0 ] && [ ! -s "$FIX/err" ] && [ "$(audit_count orch-edit-allowed)" = 1 ] \
+        && [ "$(audit_count orch-edit-claim)" = 0 ] \
+        && grep -qF '"reason":"merge-abort"' "$AUDIT" && grep -qF "\"cwd\":\"$N\"" "$AUDIT"; then
+    printf 'PASS  A director merge --abort is logged as allowed\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  A director merge --abort is logged as allowed (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log
+
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 if run "$(payload Bash "$SID_A" "git commit -m x" "$R")"; then rc=0; else rc=$?; fi
 if [ "$rc" = 0 ] && [ ! -s "$FIX/err" ] && [ "$(audit_count orch-edit-claim)" = 1 ] \
@@ -622,6 +913,64 @@ else
     printf 'FAIL  G git commit under a marker allowed and spends one write (rc=%s claims=%s)\n' "$rc" "$(audit_count orch-edit-claim)" >&2; FAIL=$((FAIL + 1))
 fi
 rm -f "$RD_A/orch-edit-allow.json"; reset_log
+
+# Quoted literal text does not expand; unquoted and double-quoted $ still do.
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
+hook_case "Q commit message with a question mark allowed" allow Bash "git -C $R commit -m \"Why does this fail?\"" "$N" "$SID_A"
+hook_case "Q commit message with brackets allowed" allow Bash "git -C $R commit -m \"[WARNING] fix\"" "$N" "$SID_A"
+hook_case "Q commit message with a quoted star allowed" allow Bash "git -C $R commit -m \"wip *\"" "$N" "$SID_A"
+hook_case "Q restore of a single-quoted bracket file allowed" allow Bash "git -C $R restore -- '[id].txt'" "$N" "$SID_A"
+hook_case "Q restore of a single-quoted dollar file allowed" allow Bash "git -C $R restore -- '\$name.txt'" "$N" "$SID_A"
+hook_case "Q single-quoted dollar in a commit message allowed" allow Bash "git -C $R commit -m 'fix: preserve \$HOME'" "$N" "$SID_A"
+hook_case "Q commit message with a call-shaped word allowed" allow Bash "git -C $R commit -m \"fix: function call()\"" "$N" "$SID_A"
+hook_case "Q double-quoted variable in a message still denied" deny Bash "git -C $R commit -m \"fix \$HOME\"" "$N" "$SID_A"
+hook_case "Q double-quoted substitution in a message still denied" deny Bash "git -C $R commit -m \"\$(date)\"" "$N" "$SID_A"
+hook_case "Q unquoted glob operand still denied" deny Bash "git -C $R restore -- *.txt" "$N" "$SID_A"
+hook_case "Q escaped dollar variable in a message allowed" allow Bash "git -C $R commit -m \"bump \\\$VERSION handling\"" "$N" "$SID_A"
+hook_case "Q escaped dollar digit in a message allowed" allow Bash "git -C $R commit -m \"price is \\\$5\"" "$N" "$SID_A"
+hook_case "Q escaped backticks in a message allowed" allow Bash "git -C $R commit -m \"use \\\`git log\\\` here\"" "$N" "$SID_A"
+hook_case "Q escaped quote before a variable still denied" deny Bash "git -C $R commit -m \"a\\\"\$X\"" "$N" "$SID_A"
+hook_case "Q escaped backslash before a variable still denied" deny Bash "git -C $R commit -m \"a\\\\\$X\"" "$N" "$SID_A"
+hook_case "Q dollar digit in a message still denied" deny Bash "git -C $R commit -m \"price \$5\"" "$N" "$SID_A"
+rm -f "$RD_A/orch-edit-allow.json"; reset_log
+
+# Quoted or commented text is not a function definition, heredoc or here-string.
+hook_case "S log --grep with call-shaped text allowed" allow Bash "git -C $R log --grep='merge()'" "$N" "$SID_A"
+hook_case "S log -S with conflict markers allowed" allow Bash "git -C $R log -S'<<<<<<<' -- merge.py" "$N" "$SID_A"
+hook_case "S status with a commented call-shaped word allowed" allow Bash "git -C $R status # commit f()" "$N" "$SID_A"
+hook_case "S unquoted function definition still denied" deny Bash "f() { git -C $R commit -m x; }; f" "$N" "$SID_A"
+
+# A heredoc inside a double-quoted $(...) whose end the scanner cannot find fails closed.
+reset_log
+B1_CMD="OUT=\"\$(bash <<'EOF'
+echo don't
+git -C $R commit -m x
+EOF
+)\""
+hook_case "S heredoc in quoted substitution with an apostrophe denied" deny Bash "$B1_CMD" "$N" "$SID_A"
+if [ "$(audit_count orch-edit-denied)" = 1 ]; then
+    printf 'PASS  S heredoc in quoted substitution is audited once\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  S heredoc in quoted substitution is audited once (n=%s)\n' "$(audit_count orch-edit-denied)" >&2; FAIL=$((FAIL + 1))
+fi
+B1_CMD="cd $R && bash <<'EOF'
+echo don't
+git commit -m x
+EOF"
+hook_case "S cd then heredoc with an apostrophe denied" deny Bash "$B1_CMD" "$N" "$SID_A"
+B1_CMD="OUT=\"\$(bash <<'EOF'
+# note (x
+git -C $R commit -m x
+EOF
+)\""
+hook_case "S heredoc in quoted substitution with an open paren denied" deny Bash "$B1_CMD" "$N" "$SID_A"
+reset_log
+
+# A subshell closed by `)` glued to the next operator ends there.
+hook_case "P glued close paren then reset denied" deny Bash "(git status --short); git reset --hard HEAD" "$R" "$SID_A"
+hook_case "P close paren newline then reset denied" deny Bash "(git status --short)
+git reset --hard HEAD" "$R" "$SID_A"
+hook_case "P subshell cd then glued close paren merge denied" deny Bash "(cd $R && git status); git -C $R merge main" "$N" "$SID_A"
 
 reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 hook_case "AC5 valid marker allows Edit tracked" allow Edit "$R/tracked.txt" "$R" "$SID_A"
@@ -1301,6 +1650,15 @@ hook_case "LG lead edit inside its workspace allowed" allow Write "$LWS/wsfile.t
 hook_case "LG lead edit of the main checkout denied" deny Edit "$R/tracked.txt" "$R" "$SID_C"
 hook_case "G lead git commit inside its workspace allowed" allow Bash "git commit -m x" "$LWS" "$SID_C"
 hook_case "G lead git -C main checkout commit denied" deny Bash "git -C $R commit -m x" "$LWS" "$SID_C"
+U10_BEFORE=$(audit_count orch-edit-denied)
+if run "$(payload Bash "$SID_C" 'git -C $W commit -m x' "$LWS")"; then rc=0; else rc=$?; fi
+if [ "$rc" = 2 ] && [ "$(wc -l <"$FIX/err" | tr -d ' ')" = 3 ] \
+        && head -n 1 "$FIX/err" | grep -q '^Blocked: orch-edit-guard' \
+        && [ "$(audit_count orch-edit-denied)" = "$U10_BEFORE" ]; then
+    printf 'PASS  U lead variable -C commit denied and not audited\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  U lead variable -C commit denied and not audited (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
 hook_case "AC-G lead inside workspace: new nested file allowed" allow Write "$LWS/sub/deep/new.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead inside workspace: nested dir allowed" allow Write "$LWS/nested/x.txt" "$LWS" "$SID_C"
 hook_case "AC-G lead outside: sibling workspace denied" deny Write "$LWS2/wsfile.txt" "$LWS2" "$SID_C"

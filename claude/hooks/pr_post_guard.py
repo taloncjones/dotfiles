@@ -703,8 +703,9 @@ def normalize_endpoint(raw: str) -> str | None:
     """Canonical `gh api` endpoint: scheme, host, query, fragment and empty
     segments dropped. None when percent escapes, dot segments or a backslash
     still hide the real path, as do the `{branch}` and `:branch` placeholders gh
-    expands after the `repos/<owner>/<repo>` prefix (the prefix itself may hold
-    them: only the tail can turn into `reviews`); callers treat that as
+    expands after the `repos/<owner>/<repo>` prefix. Only the exact `{owner}`/
+    `:owner` and `{repo}`/`:repo` tokens are allowed in the prefix, since only
+    the tail can turn into `reviews`; callers treat that as
     unknown for any write."""
     path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
     segments = path.split("/")

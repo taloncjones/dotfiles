@@ -1580,6 +1580,8 @@ cases = [
     (["api", "repos/:owner/:repo/issues/5/labels", "-f", "labels[]=x"], None),
     (["api", "-X", "POST", "repos/o/{branch}/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
     (["api", "-X", "POST", "repos/x:branch/r/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/{owner}x/{repo}/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/:owner:branch/r/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
     (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/5/reviews", "-f", "event=APPROVE", "-f", "commit_id=" + "a" * 40], "approve"),
     (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], "unknown"),
 ]

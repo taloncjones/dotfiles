@@ -3482,6 +3482,8 @@ def resolve_task_workers(rec, prior, bound):
 
 RETIRED_REVIEWS_KEY = "retired_review_launch_ids"
 REVIEW_CARRY_KEY = "review_carry"
+WORKSPACE_CLOSED_KEY = "workspace_closed"
+WORKSPACE_ROOT_PANE_KEY = "workspace_root_pane"
 
 
 def review_retired(task, done) -> bool:
@@ -3559,6 +3561,33 @@ def apply_review_carry(rec, prior) -> None:
         return
     _require(REVIEW_CARRY_KEY in prior_rec and rec[REVIEW_CARRY_KEY] == prior_rec[REVIEW_CARRY_KEY],
              "review_carry is written only by carry-review")
+
+
+def workspace_closed(task) -> bool:
+    """True while close-idle's marker names the record's own workspace."""
+    marker = task.get(WORKSPACE_CLOSED_KEY)
+    return (isinstance(marker, dict) and isinstance(task.get("workspace_id"), str)
+            and marker.get("workspace_id") == task["workspace_id"])
+
+
+def apply_workspace_keys(rec, prior) -> None:
+    """Keep workspace_closed and workspace_root_pane single-writer (close-idle,
+    reopen): inherited when omitted, refused when supplied changed. A record
+    that has been reopened also pins workspace_id, so a stale full-record copy
+    cannot restore the closed workspace."""
+    prior_rec = prior if isinstance(prior, dict) else {}
+    if rec.get("workspace_id") != prior_rec.get("workspace_id"):
+        _require(WORKSPACE_ROOT_PANE_KEY not in prior_rec,
+                 "workspace_id is written only by reopen after a reopen")
+        rec.pop(WORKSPACE_CLOSED_KEY, None)
+        prior_rec = {k: v for k, v in prior_rec.items() if k != WORKSPACE_CLOSED_KEY}
+    for key in (WORKSPACE_CLOSED_KEY, WORKSPACE_ROOT_PANE_KEY):
+        if key not in rec:
+            if key in prior_rec:
+                rec[key] = prior_rec[key]
+            continue
+        _require(key in prior_rec and rec[key] == prior_rec[key],
+                 f"{key} is written only by close-idle and reopen")
 
 
 def is_completed(task, done, live_head_sha, workspace) -> bool:
@@ -3762,7 +3791,7 @@ _REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"
 
 # Rules that read a live herdr poll. `pending` runs without one, so it skips them.
 POLL_RULES = frozenset({"unknown", "abandoned-candidate", "blocked", "unblocked",
-                        "reprompt-stalled", "exit-idle-worker"})
+                        "reprompt-stalled", "exit-idle-worker", "close-idle"})
 
 # Idle time before a worker with no done record counts as stalled; keeps a
 # fresh launch, reprompt or subagent wait quiet.
@@ -3801,6 +3830,7 @@ def checkin_rules(f):
         ("reprompt-stalled", f.get("stalled")),
         ("exit-idle-worker", f.get("idle_settled")),
         ("ship", f.get("ship_pending")),
+        ("close-idle", f.get("idle_close")),
     )
 
 
@@ -3838,6 +3868,7 @@ NEXT_ACTIONS = {
     "confirm-plan": ("run", "advance"),
     "confirm-review": ("run", "accept-review"),
     "exit-idle-worker": ("run", "settle"),
+    "close-idle": ("run", "close-idle"),
     "reprompt-stalled": ("run", "reprompt"),
     "confirm-completion": ("read", "SKILL.md section 4, then section 5"),
     "dispatch-review": ("read", "SKILL.md section 5: write the focus file, then "
@@ -3879,6 +3910,10 @@ def next_line(task, facts, ctx):
         args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
                 "--workspace-id", facts["idle_ws"], "--cwd", task.get("worktree") or "",
                 "--launch-id", facts["idle_launch"], *account]
+    elif template == "close-idle":
+        args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
+                "--workspace-id", facts["idle_close_ws"], "--cwd", task.get("worktree") or "",
+                *account]
     elif template == "reprompt":
         args = ["--repo-slug", ctx["repo_slug"], "--task-id", facts["task_id"], *fenced,
                 "--workspace-id", facts["stall_ws"], "--launch-id", facts["stall_launch"],
@@ -4243,6 +4278,18 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
     stalled = _stalled_row(task, latest, poll_agents, done, events,
                            time.time_ns() if now_ns is None else now_ns)
 
+    # A parked reviewed task whose workspace holds no agent: the director
+    # closes it (close-idle) and reopens it before any step that needs a pane.
+    own_ws = task.get("workspace_id")
+    idle_close = bool(
+        poll is not None and worktree_exists and status == "reviewed"
+        and task.get("review_head_sha")
+        and task["review_head_sha"] == task.get("ship_parked_head")
+        and valid_workspace_id(own_ws) and own_ws in poll["known"]
+        and isinstance(poll["worktrees"].get(own_ws), str)
+        and os.path.realpath(poll["worktrees"][own_ws]) == os.path.realpath(worktree)
+        and not poll_agents.get(own_ws))
+
     stop = task.get("stop_recorded")
     stop_recorded = bool(done and isinstance(stop, dict)
                          and _nonempty_str(stop.get("launch_id"))
@@ -4274,6 +4321,7 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "idle_settled": idle_settled,
         "idle_launch": idle_launch, "idle_ws": idle_ws,
+        "idle_close": idle_close, "idle_close_ws": own_ws if idle_close else None,
         "stalled": stalled is not None,
         "stall_launch": stalled and latest["launch_id"], "stall_ws": stalled and latest["workspace_id"],
         "stall_phase": stalled and latest["phase"], "stall_runtime": stalled and latest["runtime"],
@@ -4517,8 +4565,11 @@ def task_label(task, ship_handoff=None):
 
 
 def label_target(task):
-    """The task's own workspace: the record's, else its last launched plan/implement row's."""
+    """The task's own workspace: the record's, else its last launched plan/implement row's.
+    None while close-idle has the record's workspace closed."""
     ws = task.get("workspace_id")
+    if workspace_closed(task):
+        return None
     if isinstance(ws, str) and valid_workspace_id(ws):
         return ws
     for row in reversed(_launched_rows(task, ("plan", "implement", "mechanical"))):
@@ -4546,7 +4597,7 @@ def apply_workspace_label(task, label, *, herdr_cli=None, env=None, workspace=No
     try:
         worktree = task.get("worktree")
         if ws is None:
-            out["reason"] = "no-workspace"
+            out["reason"] = "workspace-closed" if workspace_closed(task) else "no-workspace"
             return out
         if not isinstance(worktree, str) or not worktree:
             out["reason"] = "no-worktree"
@@ -6452,6 +6503,7 @@ def _main(argv=None) -> int:
             else:
                 apply_retired_reviews(rec, prior, rec["workers"])
             apply_review_carry(rec, prior)
+            apply_workspace_keys(rec, prior)
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
@@ -6478,6 +6530,8 @@ def _main(argv=None) -> int:
                  "a reset opens with no retired review launches")
         _require("reset_from" not in rec, "reset_from is set by the verb")
         _require(REVIEW_CARRY_KEY not in rec, "review_carry is written only by carry-review")
+        for key in (WORKSPACE_CLOSED_KEY, WORKSPACE_ROOT_PANE_KEY):
+            _require(key not in rec, f"{key} is written only by close-idle and reopen")
         with _fenced_scoped(ns) as (rd, base):
             tasks = base / "tasks"
             _require(read_prior_task(tasks / f"{ns.task_id}.json") is not PRIOR_ABSENT,

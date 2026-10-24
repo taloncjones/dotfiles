@@ -126,6 +126,8 @@ def skipped_keyword(tokens: list[str], stripped: list[str]) -> bool:
 
 def strip_line_comments(command: str) -> str:
     """Remove an unquoted `# ...` through end of line, keeping the newline.
+    A `#` starts a comment only at a word start (input start, after
+    whitespace or one of `;&|()`), as in a shell; `a#b` is one word.
     Quote-aware so a stray apostrophe or quote inside a comment can never
     desync the tokenizer below: shlex's own `#` handling reads to end of
     line too, but via `readline()`, which consumes the newline itself and
@@ -149,7 +151,7 @@ def strip_line_comments(command: str) -> str:
             out.append(ch)
             i += 1
             out.append(command[i])
-        elif ch == "#":
+        elif ch == "#" and (not out or out[-1] in " \t\n;&|()"):
             while i < n and command[i] != "\n":
                 i += 1
             continue

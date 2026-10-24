@@ -66,7 +66,7 @@ goes through the reviews API with the gated head pinned.
 The guard also refuses these forms, because gh could post an unpinned event:
 
 - `gh pr review` with no event flag. A false `--comment` value (`--comment=false`, `-c=0`) counts as no flag. Repeated `--comment` flags are last-wins, as in gh.
-- A `gh api` endpoint with `%` escapes, dot segments, a backslash, or a `{branch}` or `:branch` placeholder after `repos/<owner>/<repo>`. The `{owner}`/`{repo}` placeholders in that prefix are allowed, and a reviews call through them still needs the `commit_id` pin.
+- A `gh api` endpoint with `%` escapes, dot segments, a backslash, or a `{branch}` or `:branch` placeholder after `repos/<owner>/<repo>`. Only the exact `{owner}`/`:owner` and `{repo}`/`:repo` tokens are allowed in that prefix (`{owner}x` or `:owner:branch` is refused), and a reviews call through them still needs the `commit_id` pin.
 
 Before the prompt, read the live head and this account's reviews:
 
