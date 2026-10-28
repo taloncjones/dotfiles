@@ -19,6 +19,8 @@ import agent_runtime
 # refresh path is a follow-up.
 LAUNCH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 NOT_AT_SHELL = "designated pane is not at an interactive shell"
+TIMEOUT_FLOOR_ENV = "DOTFILES_HERDR_TIMEOUT_FLOOR_SECS"
+TIMEOUT_FLOOR_MAX_SECS = 3600
 
 
 def _dispatch_error(message: str) -> RuntimeError:
@@ -62,6 +64,19 @@ def result_object(output: str, operation: str) -> dict[str, Any]:
     return result
 
 
+def herdr_call_timeout(timeout_secs: float, env: dict[str, str] | None) -> float:
+    """timeout_secs, raised to a test-only floor the env sets; production sets none."""
+    raw = (os.environ if env is None else env).get(TIMEOUT_FLOOR_ENV, "")
+    try:
+        floor = float(raw)
+    except ValueError:
+        return timeout_secs
+    # Also rejects nan and inf; a huge finite value overflows subprocess.
+    if not 0 < floor <= TIMEOUT_FLOOR_MAX_SECS:
+        return timeout_secs
+    return max(timeout_secs, floor)
+
+
 def run_herdr(
     executable: str,
     argv: list[str],
@@ -77,7 +92,7 @@ def run_herdr(
             check=False,
             capture_output=True,
             text=True,
-            timeout=timeout_secs,
+            timeout=herdr_call_timeout(timeout_secs, env),
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
         # UnicodeDecodeError: text=True decodes in subprocess.run, so a partial

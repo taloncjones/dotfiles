@@ -132,6 +132,7 @@ Used to make test suites deterministic. Never set in production.
 | `WS_GH_CAP`                 | `ws_gather_github()` in `claude/skills/lib/work-state.sh`                | `200`                       | Per-query `gh pr list --limit`; results at the cap set `truncated:true`. Tests set `WS_GH_CAP=1`                                                                              |
 | `GH`                        | `claude/skills/lib/work-state.sh` (`: "${GH:=gh}"`)                      | `gh`                        | Path to the gh binary; tests substitute a stub                                                                                                                                |
 | `SWEEP_TEST_BEFORE_RECHECK` | `sweep_retired_claude_plugins` prune in `install/common/claude-links.sh` | unset                       | A shell command run with `sh -c` after the prune writes its temp file and before it re-reads the registry, so `install/claude-links.test.sh` can simulate a concurrent writer |
+| `DOTFILES_HERDR_TIMEOUT_FLOOR_SECS` | `herdr_call_timeout()` in `claude/hooks/herdr_dispatch_cli.py` | unset (no floor) | Raises each herdr call timeout to this many seconds (0 to 3600; other values ignored); `herdr-dispatch.test.sh` sets 60 so a slow fake-herdr start under load does not time out |
 
 ## Environment variables -- internal (do not set)
 

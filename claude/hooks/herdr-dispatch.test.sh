@@ -34,6 +34,8 @@ import herdr_orch_core as core
 # Test-process globals; production keeps 0.5 s.
 herdr_dispatch.SHELL_READY_POLL_SECS = 0
 herdr_dispatch.SETTLE_POLL_SECS = 0
+# Fake herdr is a python3 script; its start can outlast a 5-15 s call timeout under load.
+os.environ["DOTFILES_HERDR_TIMEOUT_FLOOR_SECS"] = "60"
 
 
 PASS = 0
@@ -4679,6 +4681,7 @@ def test_apply_label_failures_never_raise():
         refused = core.apply_workspace_label(label_task(fx), "x", herdr_cli=str(fx.bin), env=fx.env)
         assert refused["status"] == "unsupported", refused
         assert "rename_refused" in refused["reason"], refused
+        fx.env.pop("DOTFILES_HERDR_TIMEOUT_FLOOR_SECS", None)  # the hang exercises the real timeout
         fx.env["FAKE_HERDR_MODE"] = "rename-hang"
         hung = core.apply_workspace_label(label_task(fx), "x", herdr_cli=str(fx.bin),
                                           env=fx.env, timeout_secs=1)
@@ -4789,6 +4792,7 @@ def test_present_all_exit_and_stop_rules():
         assert refused.returncode == 0, refused.stderr
         tried = [c for c in fx.calls()[before:] if c[:2] == ["workspace", "rename"]]
         assert len(tried) == 2, tried
+        fx.env.pop("DOTFILES_HERDR_TIMEOUT_FLOOR_SECS", None)  # the hang exercises the real timeout
         fx.env["FAKE_HERDR_MODE"] = "rename-hang"
         fx.env["FAKE_HANG_SECS"] = "3"
         results, stopped = core.present_all(fx.rd, apply=True, herdr_cli=str(fx.bin),
@@ -7051,6 +7055,57 @@ def test_ship_gate_relaunch_keeps_the_reopened_workspace_id():
         fx.close()
 
 
+def test_timeout_floor_lets_slow_herdr_call_finish():
+    fx = Fixture()
+    try:
+        write_workspaces(fx, [ws_entry("w1", "x", fx.repo.resolve())])
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "1"
+        herdr_dispatch_cli.run_herdr(str(fx.bin), ["workspace", "rename", "w1", "x"],
+                                     env=fx.env, timeout_secs=0.2)
+        assert ["workspace", "rename", "w1", "x"] in fx.calls(), fx.calls()
+    finally:
+        fx.close()
+
+
+def test_timeout_floor_still_fails_a_hang_past_it():
+    fx = Fixture()
+    try:
+        write_workspaces(fx, [ws_entry("w1", "x", fx.repo.resolve())])
+        fx.env["DOTFILES_HERDR_TIMEOUT_FLOOR_SECS"] = "1"
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "30"
+        try:
+            herdr_dispatch_cli.run_herdr(str(fx.bin), ["workspace", "rename", "w1", "x"],
+                                         env=fx.env, timeout_secs=0.2)
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("Herdr command failed"), exc
+            assert isinstance(exc.__cause__, subprocess.TimeoutExpired), exc.__cause__
+        else:
+            raise AssertionError("a hang past the floor did not fail")
+    finally:
+        fx.close()
+
+
+def test_invalid_timeout_floor_keeps_given_timeout():
+    fx = Fixture()
+    try:
+        write_workspaces(fx, [ws_entry("w1", "x", fx.repo.resolve())])
+        fx.env["DOTFILES_HERDR_TIMEOUT_FLOOR_SECS"] = "soon"
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "30"
+        try:
+            herdr_dispatch_cli.run_herdr(str(fx.bin), ["workspace", "rename", "w1", "x"],
+                                         env=fx.env, timeout_secs=0.5)
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("Herdr command failed"), exc
+            assert isinstance(exc.__cause__, subprocess.TimeoutExpired), exc.__cause__
+        else:
+            raise AssertionError("an invalid floor did not keep the given timeout")
+    finally:
+        fx.close()
+
+
 
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
@@ -7222,6 +7277,9 @@ for name, test in (
     ("workspace label applies once then reports unchanged", test_apply_label_applies_once_then_unchanged),
     ("workspace label refuses a checkout-path mismatch", test_apply_label_refuses_checkout_mismatch),
     ("workspace label failures never raise", test_apply_label_failures_never_raise),
+    ("herdr timeout floor lets a slow herdr call finish", test_timeout_floor_lets_slow_herdr_call_finish),
+    ("herdr call that hangs past the timeout floor still fails", test_timeout_floor_still_fails_a_hang_past_it),
+    ("invalid herdr timeout floor keeps the given timeout", test_invalid_timeout_floor_keeps_given_timeout),
     ("present-task prints a label without herdr", test_present_task_prints_label_without_herdr),
     ("present-task --apply renames under the fence", test_present_task_apply_renames_under_fence),
     ("present-task --apply refuses a stale fence before herdr", test_present_task_apply_refuses_stale_fence),
