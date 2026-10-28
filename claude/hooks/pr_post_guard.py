@@ -754,6 +754,9 @@ def review_endpoint(raw: str) -> str | None:
     tail = segments[3:] if in_repo else segments
     holders = [bool(PLACEHOLDER_RE.search(seg)) for seg in tail]
     if any(holders):
+        # A placeholder can expand to several segments, so `pulls/{branch}` may become `pulls/5/reviews`.
+        if holders[0] or tail[0].lower() == "pulls":
+            return None
         for shape in REVIEW_SHAPES:
             if len(shape) == len(tail) and all(
                 holders[k] or want is None or want == tail[k].lower() for k, want in enumerate(shape)

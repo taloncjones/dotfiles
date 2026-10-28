@@ -1609,6 +1609,8 @@ cases = [
     (["api", "-X", "POST", "repos/o/r/pulls/{x}/reviews", *rev], "unknown"),
     (["api", "-X", "POST", "repos/o/r/{x}/5/reviews", *rev], "unknown"),
     (["api", "-X", "POST", "repos/o/r/pulls/5/{x}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/{branch}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{branch}", *rev], "unknown"),
     (["pr", "review", "--help"], None),
     (["pr", "review", "5", "--help"], None),
     (["pr", "review", "-h"], None),
