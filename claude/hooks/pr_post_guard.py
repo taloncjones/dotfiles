@@ -66,6 +66,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from urllib.parse import unquote
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -153,6 +154,8 @@ LOOSE_REVIEW_PATH = re.compile(r"pulls/[^/]*/reviews(?:/[^/]*/events)?$")
 REVIEW_POST_PATH = re.compile(r"repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews")
 SHA40_RE = re.compile(r"[0-9a-f]{40}")
 GRAPHQL_EVENT_RE = re.compile(r"\b(?:APPROVE|REQUEST_CHANGES)\b")
+GRAPHQL_REVIEW_MUTATION_RE = re.compile(r"\b(?:add|submit)PullRequestReview\w*")
+GRAPHQL_EVENT_LITERAL_RE = re.compile(r"\bevent\s*:\s*(?:APPROVE|REQUEST_CHANGES)\b")
 API_EVENTS = {"APPROVE": "approve", "REQUEST_CHANGES": "request-changes", "COMMENT": None}
 # Option verb a draft's review event needs; an `unknown` event has none.
 EVENT_VERBS = {None: "Post", "approve": "Approve", "request-changes": "Request changes"}
@@ -689,8 +692,11 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
 
 
 # GitHub routes graphql case-insensitively; Enterprise Server serves it at
-# api/graphql and api/v3/graphql, so match by lowercase suffix.
-GRAPHQL_PATHS = "graphql"
+# api/graphql and api/v3/graphql, so match the final segment, lowercased.
+def is_graphql_path(path: str) -> bool:
+    return path.rstrip("/").rsplit("/", 1)[-1].lower() == "graphql"
+
+
 API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
 
 
@@ -722,6 +728,40 @@ def normalize_endpoint(raw: str) -> str | None:
     return "/".join(seg for seg in segments if seg)
 
 
+REVIEW_SHAPES = (("pulls", None, "reviews"), ("pulls", None, "reviews", None, "events"))
+
+
+def review_endpoint(raw: str) -> str | None:
+    """Percent-decoded canonical endpoint for the review check, or None when
+    it cannot be read (bad escape, a decoded slash, backslash or dot segment) or
+    a `{branch}`-style placeholder sits where a reviews path could form."""
+    path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
+    if "\\" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
+        return None
+    segments = []
+    for seg in path.split("/"):
+        try:
+            seg = unquote(seg, errors="strict")
+        except UnicodeDecodeError:
+            return None
+        if "/" in seg or "\\" in seg or seg in (".", ".."):
+            return None
+        segments.append(seg)
+    segments = [seg for seg in segments if seg]
+    in_repo = segments[:1] == ["repos"] and len(segments) >= 3
+    if in_repo and not all(seg in OWNER_REPO_TOKENS or not PLACEHOLDER_RE.search(seg) for seg in segments[1:3]):
+        return None
+    tail = segments[3:] if in_repo else segments
+    holders = [bool(PLACEHOLDER_RE.search(seg)) for seg in tail]
+    if any(holders):
+        for shape in REVIEW_SHAPES:
+            if len(shape) == len(tail) and all(
+                holders[k] or want is None or want == tail[k].lower() for k, want in enumerate(shape)
+            ):
+                return None
+    return "/".join(segments)
+
+
 def classify_api(args: list[str]) -> str:
     normalized = normalize_api_args(args)
     if normalized is None:
@@ -729,7 +769,7 @@ def classify_api(args: list[str]) -> str:
     method, path, _host, has_field = parse_api(normalized)
     if path is not None:
         path = normalize_endpoint(path)
-    if path is not None and path.lower().endswith(GRAPHQL_PATHS):
+    if path is not None and is_graphql_path(path):
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
             return "reply"
         return "read"
@@ -813,10 +853,9 @@ def _pr_review_event(rest: list[str]) -> str | None:
             name = tok.split("=", 1)[0]
             if name == "--comment":
                 commented = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
-            elif name == "--approve":
-                found.add("approve")
-            elif name == "--request-changes":
-                found.add("request-changes")
+            elif name in ("--approve", "--request-changes"):
+                if "=" not in tok or tok.split("=", 1)[1] in GO_TRUE:
+                    found.add("approve" if name == "--approve" else "request-changes")
         elif tok.startswith("-") and len(tok) > 1:
             for pos, ch in enumerate(tok[1:], 1):
                 if ch in "bFR":
@@ -837,8 +876,10 @@ def _pr_review_event(rest: list[str]) -> str | None:
 
 
 def _graphql_event(api: list[str], cwd: str) -> str | None:
-    """A graphql reply naming an approval enum is unpinnable: `unknown`."""
-    if classify_api(api) != "reply":
+    """A graphql call that submits a review with an approval enum is
+    unpinnable: `unknown`. An enum only inside a body or search string is
+    not; a mutation whose text this cannot read still fails closed."""
+    if not (graphql_query_from_file(api) or any("mutation" in a for a in api)):
         return None
     texts = list(api)
     for path in draft_files(["api", *api]):
@@ -850,7 +891,11 @@ def _graphql_event(api: list[str], cwd: str) -> str | None:
             texts.extend(_json_strings(json.loads(text)))
         except ValueError:
             pass
-    return "unknown" if any(GRAPHQL_EVENT_RE.search(t) for t in texts) else None
+    if not any(GRAPHQL_EVENT_RE.search(t) for t in texts):
+        return None
+    named = any(GRAPHQL_REVIEW_MUTATION_RE.search(t) or GRAPHQL_EVENT_LITERAL_RE.search(t) for t in texts)
+    visible = any("mutation" in t for t in texts)
+    return "unknown" if named or not visible else None
 
 
 def _json_strings(node) -> list[str]:
@@ -865,11 +910,18 @@ def _json_strings(node) -> list[str]:
 
 
 def repeated_api_flags(api: list[str]) -> bool:
-    """True when a gh api argv repeats --input or the method flag, so the
-    guard and gh could read different occurrences."""
+    """True when a gh api argv repeats --input or gives the method flag
+    different values, so the guard and gh could read different occurrences."""
     inputs = sum(1 for t in api if t == "--input" or t.startswith("--input="))
-    methods = sum(1 for t in api if t in ("-X", "--method") or t.startswith(("--method=", "-X")))
-    return inputs > 1 or methods > 1
+    methods = set()
+    for k, tok in enumerate(api):
+        if tok in ("-X", "--method") and k + 1 < len(api):
+            methods.add(api[k + 1].upper())
+        elif tok.startswith("--method="):
+            methods.add(tok.split("=", 1)[1].upper())
+        elif tok.startswith("-X") and len(tok) > 2:
+            methods.add(tok[2:].upper())
+    return inputs > 1 or len(methods) > 1
 
 
 def review_event(args: list[str], cwd: str | None = None) -> str | None:
@@ -883,10 +935,10 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
             return "unknown"
         raw_method, raw_path, _host, has_field = parse_api(api)
         method = raw_method or ("POST" if has_field else "GET")
-        path = normalize_endpoint(raw_path or "")
+        path = review_endpoint(raw_path or "")
         if path is None:
             return "unknown" if method != "GET" else None
-        if path.lower().endswith(GRAPHQL_PATHS):
+        if is_graphql_path(path):
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
             return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
@@ -910,6 +962,8 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
         events = {API_EVENTS.get(v, "unknown") if isinstance(v, str) else "unknown" for v in values}
         return events.pop() if len(events) == 1 else ("unknown" if events else None)
     if tuple(args[k] for k in (i, j) if k < len(args)) == ("pr", "review"):
+        if args[-1:] in (["-h"], ["--help"]) and not args[-2].startswith("-"):
+            return None
         return _pr_review_event(args[j + 1:])
     return None
 

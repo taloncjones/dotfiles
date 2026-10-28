@@ -1590,5 +1590,50 @@ print("ok" if not bad else bad)
 '
 
 
+expect_py "RE19 review_event lets ordinary calls through and still refuses event shapes" ok '
+import json, os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "m.md"), "w") as f:
+    f.write("APPROVE this when ready")
+rev = ["-f", "commit_id=" + "a" * 40, "-f", "event=APPROVE"]
+mut = "query=mutation{addComment(input:{body:\"x\"}){clientMutationId}}"
+cases = [
+    (["api", "-X", "DELETE", "repos/me/repo/issues/5/labels/needs%20review"], None),
+    (["api", "-X", "PUT", "repos/me/repo/contents/a%20b.txt", "-f", "message=m"], None),
+    (["api", "-X", "DELETE", "repos/{owner}/{repo}/branches/{branch}/protection"], None),
+    (["api", "-X", "PATCH", "repos/{owner}/{repo}/git/refs/heads/{branch}", "-f", "sha=abc"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/review%73", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/%2e%2e/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5/labels/%zz", "-f", "x=y"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/{x}/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{x}/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/{x}", *rev], "unknown"),
+    (["pr", "review", "--help"], None),
+    (["pr", "review", "5", "--help"], None),
+    (["pr", "review", "-h"], None),
+    (["pr", "review", "5", "--approve", "--help"], "approve"),
+    (["api", "-X", "GET", "-X", "GET", "repos/o/r/issues/5"], None),
+    (["api", "-X", "POST", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-XPOST", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "-X", "PUT", "repos/o/r/issues/5/comments", "-f", "body=x"], "unknown"),
+    (["pr", "review", "5", "--approve=false"], "unknown"),
+    (["pr", "review", "5", "--request-changes=false"], "unknown"),
+    (["pr", "review", "5", "--approve=false", "--comment"], None),
+    (["pr", "review", "5", "--request-changes=false", "--comment"], None),
+    (["pr", "review", "5", "--approve=false", "--request-changes"], "request-changes"),
+    (["api", "graphql", "-f", mut, "-f", "body=APPROVE"], None),
+    (["api", "graphql", "-f", mut, "-F", "b=@m.md"], None),
+    (["api", "graphql", "-f", "query=query { search(query: \"APPROVE\") { issueCount } }"], None),
+    (["api", "graphql", "-f", "query=mutation($e:PullRequestReviewEvent!){addPullRequestReview(input:{event:$e}){clientMutationId}}", "-f", "e=APPROVE"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation($e:PullRequestReviewEvent!){submitPullRequestReview(input:{event:$e}){clientMutationId}}", "-f", "e=REQUEST_CHANGES"], "unknown"),
+    (["api", "-X", "PUT", "repos/o/r/contents/schema.graphql", "-f", "message=add mutation", "-f", "content=APPROVE"], None),
+]
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+if g.classify_gh(["api", "-X", "PUT", "repos/o/r/contents/schema.graphql", "-f", "message=add mutation"]) != "write":
+    bad.append("schema.graphql classify")
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
