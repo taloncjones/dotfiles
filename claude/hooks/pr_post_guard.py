@@ -697,47 +697,86 @@ def is_graphql_path(path: str) -> bool:
     return path.rstrip("/").rsplit("/", 1)[-1].lower() == "graphql"
 
 
+# gh's fillPlaceholders token grammar (Go RE2: `\b` is ASCII-only, so re.ASCII).
+PLACEHOLDER_RE = re.compile(r":(owner|repo|branch)\b|\{(owner|repo|branch)\}", re.ASCII)
+OWNER_REPO_VALUES = {"{owner}": "owner", ":owner": "owner", "{repo}": "repo", ":repo": "repo"}
+
+
+def current_branch(cwd: str) -> str | None:
+    """The branch gh substitutes for `{branch}`: `git symbolic-ref --short HEAD`."""
+    try:
+        done = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=cwd, capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = done.stdout.strip()
+    return name if done.returncode == 0 and name else None
+
+
+def fill_placeholders(text: str, cwd: str) -> str | None:
+    """`text` as gh api expands it: {owner}/{repo} become one fixed segment
+    each and {branch} the current branch, which may hold slashes. None when a
+    branch token cannot be resolved (detached HEAD, git error)."""
+    if not PLACEHOLDER_RE.search(text):
+        return text
+    branch = current_branch(cwd) if "branch" in text else None
+    values = {**OWNER_REPO_VALUES, ":branch": branch, "{branch}": branch}
+    expanded = PLACEHOLDER_RE.sub(lambda m: values[m.group()] or "\0", text)
+    return None if "\0" in expanded else expanded
+
+
+def fill_typed_fields(api: list[str], cwd: str) -> list[str] | None:
+    """The normalized `gh api` argv with placeholders expanded in -F/--field
+    values (gh expands those, not -f); None when a branch token is unresolved."""
+    out, k = [], 0
+    while k < len(api):
+        tok = api[k]
+        k += 1
+        if tok in ("-F", "--field") and k < len(api):
+            value = fill_placeholders(api[k], cwd)
+            if value is None:
+                return None
+            out += [tok, value]
+            k += 1
+        elif tok.startswith("--field="):
+            value = fill_placeholders(tok[len("--field="):], cwd)
+            if value is None:
+                return None
+            out.append("--field=" + value)
+        else:
+            out.append(tok)
+    return out
+
+
 API_URL_PREFIX = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*", re.IGNORECASE)
-
-
-PLACEHOLDER_RE = re.compile(r"\{|:(owner|repo|branch)\b")
-OWNER_REPO_TOKENS = frozenset({"{owner}", ":owner", "{repo}", ":repo"})
-REPO_PREFIX_RE = re.compile(r"/*repos/[^/]*/[^/]*(?=/|$)")
 
 
 def normalize_endpoint(raw: str) -> str | None:
     """Canonical `gh api` endpoint: scheme, host, query, fragment and empty
     segments dropped. None when percent escapes, dot segments or a backslash
-    still hide the real path, as do the `{branch}` and `:branch` placeholders gh
-    expands after the `repos/<owner>/<repo>` prefix. Only the exact `{owner}`/
-    `:owner` and `{repo}`/`:repo` tokens are allowed in the prefix, since only
-    the tail can turn into `reviews`; callers treat that as
-    unknown for any write."""
-    path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
-    segments = path.split("/")
-    if "%" in path or "\\" in path or "." in segments or ".." in segments:
+    still hide the real path, or a gh placeholder (host included) could expand
+    into one; callers treat that as unknown for any write. A whole-segment
+    {owner} or {repo} expands to one segment and is read as a literal."""
+    prefix = API_URL_PREFIX.match(raw)
+    if prefix and PLACEHOLDER_RE.search(prefix.group()):
         return None
-    prefix = REPO_PREFIX_RE.match(path)
-    checked = path
-    if prefix and all(
-        seg in OWNER_REPO_TOKENS or not PLACEHOLDER_RE.search(seg) for seg in prefix.group().split("/")[-2:]
-    ):
-        checked = path[prefix.end():]
-    if PLACEHOLDER_RE.search(checked):
+    path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
+    segments = [OWNER_REPO_VALUES.get(seg, seg) for seg in path.split("/")]
+    if PLACEHOLDER_RE.search("/".join(segments)):
+        return None
+    path = "/".join(segments)
+    if "%" in path or "\\" in path or "." in segments or ".." in segments:
         return None
     return "/".join(seg for seg in segments if seg)
 
 
-REVIEW_SHAPES = (("pulls", None, "reviews"), ("pulls", None, "reviews", None, "events"))
-
-
 def review_endpoint(raw: str) -> str | None:
     """Percent-decoded canonical endpoint for the review check, or None when
-    it cannot be read (bad escape, a decoded slash, backslash or dot segment) or
-    a `{branch}`-style placeholder is not confined to a literal non-`pulls`
-    first segment under a full `repos/<owner>/<repo>` prefix."""
+    it cannot be read (bad escape, a decoded slash, backslash or dot segment,
+    or a leftover brace). `raw` is already placeholder-expanded."""
     path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
-    if "\\" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
+    if "\\" in path or "{" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
         return None
     segments = []
     for seg in path.split("/"):
@@ -748,24 +787,7 @@ def review_endpoint(raw: str) -> str | None:
         if "/" in seg or "\\" in seg or seg in (".", ".."):
             return None
         segments.append(seg)
-    segments = [seg for seg in segments if seg]
-    in_repo = segments[:1] == ["repos"] and len(segments) >= 3
-    if in_repo and not all(seg in OWNER_REPO_TOKENS or not PLACEHOLDER_RE.search(seg) for seg in segments[1:3]):
-        return None
-    tail = segments[3:] if in_repo else segments
-    holders = [bool(PLACEHOLDER_RE.search(seg)) for seg in tail]
-    if any(holders):
-        if not in_repo:
-            return None
-        # A placeholder can expand to several segments, so `pulls/{branch}` may become `pulls/5/reviews`.
-        if holders[0] or tail[0].lower() == "pulls":
-            return None
-        for shape in REVIEW_SHAPES:
-            if len(shape) == len(tail) and all(
-                holders[k] or want is None or want == tail[k].lower() for k, want in enumerate(shape)
-            ):
-                return None
-    return "/".join(segments)
+    return "/".join(seg for seg in segments if seg)
 
 
 def classify_api(args: list[str]) -> str:
@@ -941,14 +963,17 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
             return "unknown"
         raw_method, raw_path, _host, has_field = parse_api(api)
         method = raw_method or ("POST" if has_field else "GET")
-        path = review_endpoint(raw_path or "")
+        filled_api = fill_typed_fields(api, cwd)
+        expanded = fill_placeholders(raw_path or "", cwd)
+        path = review_endpoint(expanded) if expanded is not None and filled_api is not None else None
         if path is None:
             return "unknown" if method != "GET" else None
+        api = filled_api
         if is_graphql_path(path):
             return _graphql_event(api, cwd)
         if not REVIEW_EVENT_PATH.search(path):
             return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
-        if path != raw_path:
+        if path != "/".join(OWNER_REPO_VALUES.get(seg, seg) for seg in (raw_path or "").split("/")):
             return "unknown" if method != "GET" else None
         values = [
             "@file" if typed and value.startswith("@") else value

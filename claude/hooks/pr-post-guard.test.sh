@@ -1591,7 +1591,7 @@ print("ok" if not bad else bad)
 
 
 expect_py "RE19 review_event lets ordinary calls through and still refuses event shapes" ok '
-import json, os, tempfile
+import json, os, subprocess, tempfile
 d = tempfile.mkdtemp()
 with open(os.path.join(d, "m.md"), "w") as f:
     f.write("APPROVE this when ready")
@@ -1600,8 +1600,6 @@ mut = "query=mutation{addComment(input:{body:\"x\"}){clientMutationId}}"
 cases = [
     (["api", "-X", "DELETE", "repos/me/repo/issues/5/labels/needs%20review"], None),
     (["api", "-X", "PUT", "repos/me/repo/contents/a%20b.txt", "-f", "message=m"], None),
-    (["api", "-X", "DELETE", "repos/{owner}/{repo}/branches/{branch}/protection"], None),
-    (["api", "-X", "PATCH", "repos/{owner}/{repo}/git/refs/heads/{branch}", "-f", "sha=abc"], None),
     (["api", "-X", "POST", "repos/o/r/pulls/5/review%73", *rev], "unknown"),
     (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], "unknown"),
     (["api", "-X", "POST", "repos/o/r/pulls/%2e%2e/reviews", *rev], "unknown"),
@@ -1637,8 +1635,72 @@ cases = [
     (["api", "-X", "PUT", "repos/o/r/contents/schema.graphql", "-f", "message=add mutation", "-f", "content=APPROVE"], None),
 ]
 bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+# {branch} refs resolve through git, so these two ordinary rows run in a repository on a plain branch.
+gd = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", "-b", "feature", gd], check=True)
+for a in (["api", "-X", "DELETE", "repos/{owner}/{repo}/branches/{branch}/protection"],
+          ["api", "-X", "PATCH", "repos/{owner}/{repo}/git/refs/heads/{branch}", "-f", "sha=abc"]):
+    if g.review_event(a, gd) is not None:
+        bad.append((a, g.review_event(a, gd), None))
 if g.classify_gh(["api", "-X", "PUT", "repos/o/r/contents/schema.graphql", "-f", "message=add mutation"]) != "write":
     bad.append("schema.graphql classify")
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE20 review_event expands gh placeholders before classifying" ok '
+import os, subprocess, tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+rc = ["-f", "commit_id=" + sha, "-f", "event=REQUEST_CHANGES", "-f", "body=no"]
+gq = "mutation($e: PullRequestReviewEvent!){ addPullRequestReview(input:{pullRequestId:\"x\", event:$e}){id} }"
+gq_inline = "mutation { addPullRequestReview(input:{pullRequestId:\"x\", event: {branch}}){id} }"
+cases = {
+    "api.github.com/repos/o/r/pulls/5/reviews": [
+        (["api", "-X", "POST", "https://{branch}", *rev], "unknown"),
+        (["api", "-X", "POST", "https://x@{branch}", *rc], "unknown"),
+        (["api", "-X", "POST", "https://:branch", *rev], "unknown"),
+    ],
+    "o/r/pulls/5/reviews#": [
+        (["api", "-X", "POST", "repos/:branch\u00e9", *rev], "unknown"),
+        (["api", "-X", "POST", "repos/:branch\u00fc", *rev], "unknown"),
+    ],
+    "APPROVE": [
+        (["api", "graphql", "-f", "query=" + gq, "-F", "e={branch}"], "unknown"),
+        (["api", "graphql", "-F", "query=" + gq_inline], "unknown"),
+        (["api", "graphql", "-f", "query=" + gq, "--field", "e={branch}"], "unknown"),
+        (["api", "graphql", "-f", "query=" + gq, "--field=e={branch}"], "unknown"),
+        (["api", "graphql", "-f", "query=" + gq, "-f", "e={branch}"], None),
+        (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-F", "event={branch}", "-f", "commit_id=" + sha], "approve"),
+    ],
+    "feature": [
+        (["api", "-X", "PUT", "user/starred/{owner}/{repo}"], None),
+        (["api", "-X", "PUT", "user/subscriptions/{owner}/{repo}"], None),
+        (["api", "-X", "POST", "orgs/{owner}/repos", "-f", "name=x"], None),
+        (["api", "-X", "POST", "orgs/:owner/repos", "-f", "name=x"], None),
+        (["api", "-X", "PUT", "orgs/{owner}/teams/t/repos/{owner}/{repo}", "-f", "permission=push"], None),
+        (["api", "-X", "PUT", "orgs/{owner}/actions/permissions/repositories/1"], None),
+        (["api", "-X", "DELETE", "users/{owner}/x"], None),
+        (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/5/reviews", *rev], "approve"),
+        (["api", "-X", "POST", "repos/{owner}x/{repo}/pulls/5/reviews", *rev], "unknown"),
+        (["api", "-X", "POST", "repos/o/r/pulls/{branch}", *rev], None),
+        (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-F", "body={branch}"], None),
+    ],
+}
+bad = []
+for branch, rows in cases.items():
+    d = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", d], check=True)
+    subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/heads/" + branch], check=True)
+    bad += [(branch, a, g.review_event(a, d), w) for a, w in rows if g.review_event(a, d) != w]
+detached = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", detached], check=True)
+with open(os.path.join(detached, ".git", "HEAD"), "w") as f:
+    f.write(sha + "\n")
+for a in (["api", "-X", "POST", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=abc"],
+          ["api", "-X", "POST", "repos/o/r/issues", "-F", "title={branch}"]):
+    if g.review_event(a, detached) != "unknown":
+        bad.append(("detached", a, g.review_event(a, detached)))
 print("ok" if not bad else bad)
 '
 

@@ -913,12 +913,53 @@ else
     fail "RV26 the shim refuses repos/{branch} carrying event=APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
+# {branch} resolves through git in the call's cwd, so each row runs in a repository on a named branch.
+branch_repo() {
+    git init -q "$T/br-$1" && git -C "$T/br-$1" symbolic-ref HEAD "refs/heads/$2"
+}
+branch_repo plain feature
+branch_repo host api.github.com/repos/o/r/pulls/5/reviews
+branch_repo unicode 'o/r/pulls/5/reviews#'
+branch_repo enum APPROVE
+
 fresh_gate
-gh api -X PATCH "repos/{owner}/{repo}/git/refs/heads/{branch}" -f sha=abc >"$T/out" 2>"$T/err"; rc=$?
+(cd "$T/br-plain" && gh api -X PATCH "repos/{owner}/{repo}/git/refs/heads/{branch}" -f sha=abc >"$T/out" 2>"$T/err"); rc=$?
 if ! grep -q "must be the reviews API call" "$T/err"; then
     pass "RV27 the shim does not refuse an ordinary {branch} ref write"
 else
     fail "RV27 the shim refuses an ordinary {branch} ref write (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-host" && gh api -X POST 'https://{branch}' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV28 the shim refuses a review whose URL host is a {branch} placeholder"
+else
+    fail "RV28 the shim refuses a review whose URL host is a {branch} placeholder (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-unicode" && gh api -X POST 'repos/:branch'$'\303\251' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV29 the shim refuses a review through :branch followed by a non-ASCII letter"
+else
+    fail "RV29 the shim refuses a review through :branch followed by a non-ASCII letter (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-enum" && gh api graphql -f 'query=mutation($e: PullRequestReviewEvent!){ addPullRequestReview(input:{pullRequestId:"x", event:$e}){id} }' -F 'e={branch}' >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV30 the shim refuses a graphql approval hidden in a -F {branch} value"
+else
+    fail "RV30 the shim refuses a graphql approval hidden in a -F {branch} value (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-plain" && gh api -X PUT 'user/starred/{owner}/{repo}' >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV31 the shim does not refuse exact {owner}/{repo} outside a repos prefix"
+else
+    fail "RV31 the shim refuses exact {owner}/{repo} outside a repos prefix (rc=$rc err=$(cat "$T/err"))"
 fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
