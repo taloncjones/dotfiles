@@ -905,5 +905,21 @@ else
     fail "RV25 the shim refuses an issue comment through placeholders (rc=$rc err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+gh api -X POST "repos/{branch}" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV26 the shim refuses repos/{branch} carrying event=APPROVE"
+else
+    fail "RV26 the shim refuses repos/{branch} carrying event=APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X PATCH "repos/{owner}/{repo}/git/refs/heads/{branch}" -f sha=abc >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV27 the shim does not refuse an ordinary {branch} ref write"
+else
+    fail "RV27 the shim refuses an ordinary {branch} ref write (rc=$rc err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

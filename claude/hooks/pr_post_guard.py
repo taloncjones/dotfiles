@@ -734,7 +734,8 @@ REVIEW_SHAPES = (("pulls", None, "reviews"), ("pulls", None, "reviews", None, "e
 def review_endpoint(raw: str) -> str | None:
     """Percent-decoded canonical endpoint for the review check, or None when
     it cannot be read (bad escape, a decoded slash, backslash or dot segment) or
-    a `{branch}`-style placeholder sits where a reviews path could form."""
+    a `{branch}`-style placeholder is not confined to a literal non-`pulls`
+    first segment under a full `repos/<owner>/<repo>` prefix."""
     path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
     if "\\" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
         return None
@@ -754,6 +755,8 @@ def review_endpoint(raw: str) -> str | None:
     tail = segments[3:] if in_repo else segments
     holders = [bool(PLACEHOLDER_RE.search(seg)) for seg in tail]
     if any(holders):
+        if not in_repo:
+            return None
         # A placeholder can expand to several segments, so `pulls/{branch}` may become `pulls/5/reviews`.
         if holders[0] or tail[0].lower() == "pulls":
             return None
