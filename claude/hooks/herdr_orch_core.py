@@ -4235,6 +4235,15 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
     # carry-review decides whether a clean main merge keeps it.
     review_carry_due = bool(status == "reviewed" and review_stale and rev_ws
                             and is_reviewed(task, review, task["review_head_sha"], rev_ws))
+    # A ship gate that returned anything but APPROVE at the pin must be handled
+    # before the approval is carried past it.
+    for row in task.get("workers") or []:
+        if isinstance(row, dict) and row.get("phase") == "ship":
+            ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
+            sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
+            if sh and sh.get("head_sha") == task.get("review_head_sha") \
+                    and sh.get("verdict") != "APPROVE":
+                review_carry_due = False
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
     # Section 5 writes review-dispatched only once a launch is accepted, so a
@@ -5344,6 +5353,13 @@ def _carry_review(ns) -> int:
                  and is_reviewed(task, review, pin, rev_ws)
                  and isinstance(base_ref, str) and re.fullmatch(r"origin/[A-Za-z0-9._/-]+", base_ref),
                  "task is not an approved review with a moved head and an origin/<branch> base_ref")
+        for row in task.get("workers") or []:
+            if isinstance(row, dict) and row.get("phase") == "ship":
+                ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
+                sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
+                if sh and sh.get("head_sha") == pin and sh.get("verdict") != "APPROVE":
+                    return _carry_report("inconclusive", tid, head,
+                                         ["a ship gate returned a non-APPROVE verdict at the pin"])
         status = ("--no-optional-locks", "status", "--porcelain")
         if _git(wt, *status) != "":
             return _carry_report("inconclusive", tid, head, ["worktree is dirty or unreadable"])
