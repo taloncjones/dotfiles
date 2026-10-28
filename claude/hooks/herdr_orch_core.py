@@ -5475,6 +5475,9 @@ def _adopt_rollover(ns) -> int:
     return 0
 
 
+ROLLOVER_PROMPT = "resume director"  # a user-turn prompt that is not the owner (away-mode.md)
+
+
 def rollover_launch(scope_kind, model=None, effort=None):
     """The shell line that starts the successor on this director's account."""
     parts = ["director"]
@@ -5484,7 +5487,7 @@ def rollover_launch(scope_kind, model=None, effort=None):
         parts += ["--model", shlex.quote(model)]
     if effort is not None:
         parts += ["--effort", shlex.quote(effort)]
-    parts.append("'resume director'")
+    parts.append(f"'{ROLLOVER_PROMPT}'")
     return " ".join(parts)
 
 
@@ -5673,11 +5676,8 @@ def decision_id():
     return secrets.token_hex(6)
 
 
-def append_decision(rd, *recs):
-    """Append decision-log records as one write, so a batch is never interleaved.
-    A torn last line (no newline) gets one first, so it cannot swallow this
-    batch; every writer holds the owner lock, so the check cannot race."""
-    path = Path(rd) / DECISIONS_FILE
+def _append_jsonl(path, recs):
+    """Append records as one write; a torn last line (no newline) gets one first."""
     data = "".join(json.dumps(r, sort_keys=True) + "\n" for r in recs).encode("utf-8")
     try:
         tail = read_payload_bytes(path)[-1:]
@@ -5686,6 +5686,13 @@ def append_decision(rd, *recs):
     if tail not in (b"", b"\n"):
         data = b"\n" + data
     append_payload(path, data)
+
+
+def append_decision(rd, *recs):
+    """Append decision-log records as one write, so a batch is never interleaved.
+    A torn last line (no newline) gets one first, so it cannot swallow this
+    batch; every writer holds the owner lock, so the check cannot race."""
+    _append_jsonl(Path(rd) / DECISIONS_FILE, recs)
 
 
 LESSON_PHASES = ("plan", "implement", "repair", "review", "ship", "mech", "director")
@@ -5853,10 +5860,15 @@ def append_carry_decisions(rd, carry, batch, session, fence):
     return True
 
 
-def _note_decision(ns) -> int:
-    text = ns.text.strip()
+def _decision_text(raw) -> str:
+    text = raw.strip()
     _require(text and len(text) <= DECISION_TEXT_MAX and not any(c in text for c in "\n\r\x00"),
              f"--text must be 1..{DECISION_TEXT_MAX} characters on one line without NUL")
+    return text
+
+
+def _note_decision(ns) -> int:
+    text = _decision_text(ns.text)
     _require(ns.repo_wide or valid_task_id(ns.task), "invalid task id")
     with _fenced(ns) as rd:
         did = decision_id()
@@ -5900,6 +5912,193 @@ def _retire_decision(ns) -> int:
         append_decision(rd, {"v": 1, "ts": now_iso(), "id": decision_id(), "event": "retire",
                              "retires": ns.id, "session": ns.session, "fence": ns.fence})
     print(f"retired: {ns.id}")
+    return 0
+
+
+AWAY_FILE = "away.json"
+ASKS_FILE = "asks.jsonl"
+ASK_QUESTION_MAX = 2000  # pr_post_guard.SHOWN_LIMIT: a gated-post question carries its full draft
+ASK_OPTION_MAX = 100
+ASK_OPTIONS_MAX = 4
+ASK_DROP_REASONS = ("stale", "withdrawn", "superseded")
+
+
+def read_away(rd):
+    """-> (state, since): "on", "off" or "unreadable". A missing file is off; a file
+    that is not a v1 record reads as on, so a damaged flag never reopens the stall."""
+    try:
+        rec = json.loads(read_payload_text(Path(rd) / AWAY_FILE))
+    except FileNotFoundError:
+        return "off", None
+    except (OSError, ValueError):
+        return "unreadable", None
+    if not isinstance(rec, dict) or rec.get("v") != 1 or not isinstance(rec.get("on"), bool):
+        return "unreadable", None
+    return ("on", rec.get("since")) if rec["on"] else ("off", None)
+
+
+def _jsonl_records(path):
+    try:
+        text = read_payload_text(path)
+    except FileNotFoundError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("v") == 1 and isinstance(rec.get("id", ""), str):
+            out.append(rec)
+    return out
+
+
+def read_asks(rd):
+    """-> (asks oldest first, ids dropped, ids answered by a decision, retired or not)."""
+    recs = _jsonl_records(Path(rd) / ASKS_FILE)
+    asks = [r for r in recs if r.get("event") == "ask" and isinstance(r.get("id"), str)
+            and "task" in r and (r["task"] is None or isinstance(r["task"], str))
+            and isinstance(r.get("question"), str)]
+    dropped = {r["drops"] for r in recs if r.get("event") == "drop" and isinstance(r.get("drops"), str)}
+    answered = {r["ask"] for r in read_decisions(rd) if isinstance(r.get("ask"), str)}
+    return asks, dropped, answered
+
+
+def live_asks(rd):
+    asks, dropped, answered = read_asks(rd)
+    return [a for a in asks if a["id"] not in dropped and a["id"] not in answered]
+
+
+def away_line(state, since, count):
+    if state == "on":
+        return f"away: on since {since}, {count} asks queued"
+    if state == "unreadable":
+        return f"away: unreadable (treated as on), {count} asks queued"
+    return f"away: off, {count} asks queued" if count else None
+
+
+def away_ask_line(line, facts, state, live, ctx):
+    """Rewrite a check-in `next: ask` line while asks are queued (SKILL.md section 4)."""
+    mine = next((a for a in live if a["task"] == facts["task_id"]), None)
+    if mine and (state == "off" or mine["action"] in (None, facts["action"])):
+        return f"  next: queued {mine['id']}"
+    if state == "off":
+        return line
+    return "  next: run " + _command(
+        Path(__file__).resolve(), "queue-ask", "--repo-slug", ctx["repo_slug"],
+        "--session", ctx["session"], "--fence", ctx["fence"], "--task", facts["task_id"],
+        "--action", facts["action"], "--question", line[len("  next: ask "):])
+
+
+@contextlib.contextmanager
+def _fenced_or_stale(ns):
+    """Yield rd under the owner lock, or None after printing owner: stale-fence."""
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    rd = repo_dir(ns.repo_slug)
+    with owner_transaction(rd) as tx:
+        if tx.check(ns.session, ns.fence):
+            yield rd
+        else:
+            print("owner: stale-fence")
+            yield None
+
+
+def _away(ns) -> int:
+    with _fenced_or_stale(ns) as rd:
+        if rd is None:
+            return 1
+        state, since = read_away(rd)
+        if ns.on:
+            if state != "on":
+                since = now_iso()
+                write_json_atomic(Path(rd) / AWAY_FILE, {"v": 1, "on": True, "since": since,
+                                                         "session": ns.session, "fence": ns.fence})
+            print(away_line("on", since, len(live_asks(rd))))
+            return 0
+        write_json_atomic(Path(rd) / AWAY_FILE, {"v": 1, "on": False, "since": None,
+                                                 "session": ns.session, "fence": ns.fence})
+        live = live_asks(rd)
+        print(f"away: off, {len(live)} asks queued")
+        for ask in live:
+            status = None
+            if valid_task_id(ask["task"]):
+                try:
+                    status = json.loads(read_payload_text(Path(rd) / "tasks" / f"{ask['task']}.json")).get("status")
+                except (OSError, ValueError, AttributeError):
+                    pass
+            print(json.dumps({**ask, "task_status": status}, sort_keys=True))
+    return 0
+
+
+def _queue_ask(ns) -> int:
+    question = ns.question.strip()
+    _require(question and len(question) <= ASK_QUESTION_MAX,
+             f"--question must be 1..{ASK_QUESTION_MAX} characters")
+    _require(ns.repo_wide or valid_task_id(ns.task), "invalid task id")
+    _require(len(ns.option) != 1 and len(ns.option) <= ASK_OPTIONS_MAX,
+             f"--option takes 2..{ASK_OPTIONS_MAX} labels, or none")
+    _require(all(0 < len(o) <= ASK_OPTION_MAX for o in ns.option),
+             f"--option must be 1..{ASK_OPTION_MAX} characters")
+    _require(ns.recommend is None or ns.recommend in ns.option, "--recommend must be one of the options")
+    ask_actions = [name for name, (kind, _) in NEXT_ACTIONS.items() if kind == "ask"]
+    _require(ns.action is None or ns.action in ask_actions,
+             f"--action must be one of {', '.join(ask_actions)}")
+    with _fenced_or_stale(ns) as rd:
+        if rd is None:
+            return 1
+        _require(read_away(rd)[0] != "off", "away mode is off; ask with AskUserQuestion")
+        task = None if ns.repo_wide else ns.task
+        old = next((a for a in live_asks(rd) if a["task"] == task and (task or a["question"] == question)),
+                   None)
+        recs = []
+        if old and not (task and old["action"] and ns.action and old["action"] != ns.action):
+            print(f"ask: {old['id']} already queued")
+            return 0
+        if old:
+            recs.append({"v": 1, "event": "drop", "drops": old["id"], "reason": "superseded",
+                         "ts": now_iso(), "session": ns.session, "fence": ns.fence})
+        aid = decision_id()
+        recs.append({"v": 1, "event": "ask", "id": aid, "ts": now_iso(), "task": task,
+                     "question": question, "options": ns.option, "recommendation": ns.recommend,
+                     "action": ns.action, "session": ns.session, "fence": ns.fence})
+        _append_jsonl(Path(rd) / ASKS_FILE, recs)
+    print(f"ask: {aid} supersedes {old['id']}" if old else f"ask: {aid}")
+    return 0
+
+
+def _answer_ask(ns) -> int:
+    text = _decision_text(ns.text)
+    with _fenced_or_stale(ns) as rd:
+        if rd is None:
+            return 1
+        asks, dropped, answered = read_asks(rd)
+        ask = next((a for a in asks if a["id"] == ns.id), None)
+        _require(ask is not None, "unknown ask id")
+        if ns.id in answered:
+            print(f"ask: {ns.id} already answered")
+            return 0
+        _require(ns.id not in dropped, "ask was dropped")
+        did = decision_id()
+        append_decision(rd, {"v": 1, "ts": now_iso(), "id": did, "event": "decision",
+                             "task": ask["task"], "source": "owner", "batch": None, "text": text,
+                             "ask": ns.id, "session": ns.session, "fence": ns.fence})
+    print(f"decision: {did}")
+    return 0
+
+
+def _drop_ask(ns) -> int:
+    with _fenced_or_stale(ns) as rd:
+        if rd is None:
+            return 1
+        asks, dropped, answered = read_asks(rd)
+        _require(any(a["id"] == ns.id for a in asks), "unknown ask id")
+        if ns.id in dropped or ns.id in answered:
+            print(f"ask: {ns.id} already closed")
+            return 0
+        _append_jsonl(Path(rd) / ASKS_FILE, [{"v": 1, "event": "drop", "drops": ns.id,
+                                              "reason": ns.reason, "ts": now_iso(),
+                                              "session": ns.session, "fence": ns.fence}])
+    print(f"ask: {ns.id} dropped")
     return 0
 
 
@@ -6360,6 +6559,19 @@ def _main(argv=None) -> int:
     scope_group.add_argument("--task", default=None)
     scope_group.add_argument("--repo-wide", action="store_true")
     add("retire-decision", "--id", fenced=True)
+    aw = add("away", fenced=True)
+    aw_mode = aw.add_mutually_exclusive_group(required=True)
+    aw_mode.add_argument("--on", action="store_true")
+    aw_mode.add_argument("--off", action="store_true")
+    qa = add("queue-ask", "--question", fenced=True)
+    qa.add_argument("--option", action="append", default=[])
+    qa.add_argument("--recommend", default=None)
+    qa.add_argument("--action", default=None)
+    qa_scope = qa.add_mutually_exclusive_group(required=True)
+    qa_scope.add_argument("--task", default=None)
+    qa_scope.add_argument("--repo-wide", action="store_true")
+    add("answer-ask", "--id", "--text", fenced=True)
+    add("drop-ask", "--id", fenced=True).add_argument("--reason", choices=[r for r in ASK_DROP_REASONS if r != "superseded"], required=True)
     sq = add("set-queue", fenced=True)
     sq.add_argument("--todo", action="append", default=[])
     ak = add("archive-task", "--task-id", fenced=True)
@@ -6469,6 +6681,14 @@ def _main(argv=None) -> int:
         return _note_decision(ns)
     if ns.cmd == "retire-decision":
         return _retire_decision(ns)
+    if ns.cmd == "away":
+        return _away(ns)
+    if ns.cmd == "queue-ask":
+        return _queue_ask(ns)
+    if ns.cmd == "answer-ask":
+        return _answer_ask(ns)
+    if ns.cmd == "drop-ask":
+        return _drop_ask(ns)
     if ns.cmd == "set-queue":
         return _set_queue(ns)
     if ns.cmd == "carry-review":
@@ -8306,7 +8526,16 @@ def _main(argv=None) -> int:
             ctx = {"repo_slug": ns.repo_slug, "runtime": ns.runtime, "personal": ns.personal,
                    "repo_path": _PAYLOAD_SELECTION.get()["context"]["root"],
                    "session": ns.session, "fence": ns.fence}
+        away_state, away_since = read_away(rd)
+        try:
+            queued = live_asks(rd)
+        except (OSError, ValueError):
+            queued = []
         for line, task, facts in checkin_report(ns, rd):
+            if line.startswith("changed: "):
+                notice = away_line(away_state, away_since, len(queued))
+                if notice:
+                    print(notice)
             if ctx and line.startswith("changed: "):
                 print("next: run " + _command(Path(__file__).resolve(), "present-task",
                                               "--repo-slug", ns.repo_slug, "--session", ns.session,
@@ -8317,6 +8546,8 @@ def _main(argv=None) -> int:
             extra = None
             if facts is not None:
                 extra = next_line(task, facts, ctx)
+                if extra and extra.startswith("  next: ask "):
+                    extra = away_ask_line(extra, facts, away_state, queued, ctx)
             elif line.startswith("review-overdue "):
                 extra = "  next: read references/review-dispatch-details.md (Review deadline bound)"
             elif line.startswith("rollover-due "):

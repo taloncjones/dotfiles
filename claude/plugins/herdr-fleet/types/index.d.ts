@@ -53,9 +53,10 @@ export type FleetPrRow = {
   isFork: boolean
 }
 export type FleetQueueRow = { id: string; title: string }
+export type FleetAskRow = { id: string; task: string | null; question: string }
 export type FleetQueue =
-  | { slug: string; state: 'unreadable' }
-  | { slug: string; state: 'ok'; rows: FleetQueueRow[] }
+  | { slug: string; state: 'unreadable'; asks: FleetAskRow[] }
+  | { slug: string; state: 'ok'; rows: FleetQueueRow[]; asks: FleetAskRow[] }
 export type FleetLease =
   | { kind: 'none' }
   | { kind: 'ambiguous'; slugs: string[] }

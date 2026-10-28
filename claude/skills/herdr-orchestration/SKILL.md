@@ -349,7 +349,8 @@ directive. It prints `decision: <id>`. Retire a superseded or expired one
 `python3 "$CORE" retire-decision --repo-slug <slug> --session <id> --fence <fence> --id <id>`.
 Entries for a failed, abandoned or merged task drop out on their own.
 Write each note so it reads without the session: it is re-injected into a
-fresh context later. Name any label (R12, a run number) by its substance.
+fresh context later. Name any label (R12, a run number) by its substance. While the owner is away (`/afk`, an `away:` line), queue
+questions instead of asking: `references/away-mode.md`.
 
 Queue the todos you plan to start next so the fleet panel's Queue tab shows
 them (fenced; at most 10 pending todo ids, in start order; no `--todo` clears):

@@ -2,6 +2,7 @@ import type {
   FleetDeadline,
   FleetGroup,
   FleetPrRow,
+  FleetAskRow,
   FleetQueueRow,
   FleetSnapshot,
   FleetTaskRow,
@@ -820,6 +821,20 @@ export function parseQueue(text: string | null): string[] | null {
   }
   const ids = queue.todos as unknown[]
   return ids.every(id => todoIdOf(id) !== null) ? (ids as string[]) : null
+}
+
+/** Live owner asks from `asks.jsonl`: no drop names one and no decision (`decisions.jsonl`) answers it. */
+export function parseAsks(asksText: string | null, decisionsText: string | null): FleetAskRow[] {
+  const records = (text: string | null) =>
+    (text ?? '').split('\n').map(line => parseJson(line)).filter(rec => rec && rec.v === 1)
+  const closed = new Set<unknown>([
+    ...records(asksText).filter(r => r.event === 'drop').map(r => r.drops),
+    ...records(decisionsText).map(r => r.ask),
+  ])
+  return records(asksText)
+    .filter(r => r.event === 'ask' && typeof r.id === 'string' && typeof r.question === 'string')
+    .filter(r => !closed.has(r.id))
+    .map(r => ({ id: r.id as string, task: typeof r.task === 'string' ? r.task : null, question: r.question as string }))
 }
 
 /** A queued todo's title: its frontmatter `title:` through labelTitle, else the id. */

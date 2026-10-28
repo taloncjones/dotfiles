@@ -4,6 +4,7 @@ import type { Hook, Register } from 'claude-code'
 import type {
   FleetLease,
   FleetPrRow,
+  FleetAskRow,
   FleetQueueRow,
   FleetSnapshot,
   FleetTab,
@@ -20,6 +21,7 @@ import {
   boardHref,
   clip,
   jiraHref,
+  parseAsks,
   parseQueue,
   plain,
   queueTitle,
@@ -248,14 +250,15 @@ function createFleet($: Dollar, generation: number) {
     slug: string,
     repoRoot: string | null,
   ): Promise<FleetSnapshot['queue']> {
+    const asks = parseAsks(await readText(`${dir}/asks.jsonl`), await readText(`${dir}/decisions.jsonl`))
     const ids = parseQueue(await readText(`${dir}/queue.json`))
-    if (ids === null) return { slug, state: 'unreadable' }
+    if (ids === null) return { slug, state: 'unreadable', asks }
     const rows: FleetQueueRow[] = []
     for (const id of repoRoot === null ? [] : ids) {
       const text = await readText(`${repoRoot}/.todos/pending/${id}.md`)
       if (text !== null) rows.push({ id, title: queueTitle(id, text) })
     }
-    return { slug, state: 'ok', rows }
+    return { slug, state: 'ok', rows, asks }
   }
 
   async function refreshArchive(): Promise<void> {
@@ -552,14 +555,26 @@ function groupLines(
   return lines
 }
 
-function queueLines(rows: FleetQueueRow[], width: number, board: string | null): Line[] {
+function queueLines(
+  asks: FleetAskRow[],
+  rows: FleetQueueRow[],
+  width: number,
+  board: string | null,
+): Line[] {
   const titleWidth = Math.max(12, width - 4)
-  return rows.map((r, i) => ({
-    cells: row([
-      [`${i + 1}.`, 3],
-      [fitTitle(plain(r.title), titleWidth), titleWidth, boardHref(board, r.id)],
-    ]),
-  }))
+  const askWidth = Math.max(12, width - 2)
+  return [
+    ...asks.map(a => ({
+      cells: row([[fitTitle(plain(`? ${a.task ?? 'repo'}: ${a.question}`), askWidth), askWidth]]),
+      color: 'yellow' as const,
+    })),
+    ...rows.map((r, i) => ({
+      cells: row([
+        [`${i + 1}.`, 3],
+        [fitTitle(plain(r.title), titleWidth), titleWidth, boardHref(board, r.id)],
+      ]),
+    })),
+  ]
 }
 
 // Head, PR and verdict show only when some row has one and the title keeps 24 columns.
@@ -662,13 +677,14 @@ export const register: Register = on => {
     const active = activeRows(live)
     const done = doneRows(live, archived)
     const queued = queue && queue.state === 'ok' ? visibleQueue(queue.rows, [...live, ...archived]) : []
+    const asks = queue ? queue.asks : []
     const stacks = prStacks(prs)
     const links: Links = { board, jiraUrl: snap.jiraUrl, prs, stacks }
     const tabs: Array<[FleetTab, string, string]> = [
       ['tasks', '1', `tasks (${active.length})`],
       ['prs', '2', `PRs (${prPart ? prs.length : '?'})`],
       ['done', '3', `done (${done.length})`],
-      ['queue', '4', `queue (${queued.length})`],
+      ['queue', '4', `queue (${asks.length + queued.length})`],
     ]
     let header = NO_LEASE
     if (snap.lease.kind === 'ambiguous') {
@@ -708,9 +724,11 @@ export const register: Register = on => {
         }
       } else if (tab === 'queue') {
         if (queue === null) add('reading...')
-        else if (queue.state === 'unreadable') add('queue unreadable')
-        else if (queued.length === 0) add('nothing queued')
-        else lines.push(...queueLines(queued, width, board))
+        else {
+          if (queue.state === 'unreadable') add('queue unreadable')
+          else if (asks.length + queued.length === 0) add('nothing queued')
+          if (asks.length + queued.length > 0) lines.push(...queueLines(asks, queued, width, board))
+        }
       } else {
         if (ghError) {
           add(

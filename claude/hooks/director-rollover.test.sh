@@ -1116,6 +1116,18 @@ test "$rc" = 2
 test ! -e "$FX/herdr.log"
 SH
 
+check "rollover prompt is named in the away-mode clear rule" <<'SH'
+python3 - <<'PY'
+import os, sys
+root = os.environ["REPO_ROOT"]
+sys.path.insert(0, root + "/claude/hooks")
+import herdr_orch_core as c
+doc = open(root + "/claude/skills/herdr-orchestration/references/away-mode.md").read()
+assert c.ROLLOVER_PROMPT in c.rollover_launch("work")
+assert f"`{c.ROLLOVER_PROMPT}`" in doc, "away-mode.md must name the rollover prompt as a non-owner turn"
+PY
+SH
+
 check "rollover_launch: personal scope adds --personal" <<'SH'
 python3 - <<'PY'
 import os, sys
