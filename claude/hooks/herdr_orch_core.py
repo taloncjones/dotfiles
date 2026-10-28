@@ -3176,8 +3176,10 @@ def require_not_consumed(rd, binding_id):
 
 # Rows that may follow a phase's latest row without superseding it. A live
 # repair worker keeps its implement attempt across a review dispatched into
-# the same workspace; a later plan or implement row still supersedes it.
-TRAILING_PHASES = {"implement": frozenset({"review"})}
+# the same workspace; a later plan or implement row still supersedes it. A
+# ship gate keeps the review attempt it gates, so a main merge after the gate
+# can still carry the approval.
+TRAILING_PHASES = {"implement": frozenset({"review"}), "review": frozenset({"ship"})}
 
 
 def attempt_matches(task, done, phase, workspace):
@@ -4233,6 +4235,15 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
     # carry-review decides whether a clean main merge keeps it.
     review_carry_due = bool(status == "reviewed" and review_stale and rev_ws
                             and is_reviewed(task, review, task["review_head_sha"], rev_ws))
+    # A ship gate that returned CHANGES at the pin must be handled
+    # before the approval is carried past it.
+    for row in task.get("workers") or []:
+        if isinstance(row, dict) and row.get("phase") == "ship":
+            ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
+            sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
+            if sh and sh.get("head_sha") == task.get("review_head_sha") \
+                    and sh.get("verdict") == "CHANGES":
+                review_carry_due = False
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
     # Section 5 writes review-dispatched only once a launch is accepted, so a
@@ -5342,6 +5353,13 @@ def _carry_review(ns) -> int:
                  and is_reviewed(task, review, pin, rev_ws)
                  and isinstance(base_ref, str) and re.fullmatch(r"origin/[A-Za-z0-9._/-]+", base_ref),
                  "task is not an approved review with a moved head and an origin/<branch> base_ref")
+        for row in task.get("workers") or []:
+            if isinstance(row, dict) and row.get("phase") == "ship":
+                ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
+                sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
+                if sh and sh.get("head_sha") == pin and sh.get("verdict") == "CHANGES":
+                    return _carry_report("inconclusive", tid, head,
+                                         ["a ship gate returned a CHANGES verdict at the pin"])
         status = ("--no-optional-locks", "status", "--porcelain")
         if _git(wt, *status) != "":
             return _carry_report("inconclusive", tid, head, ["worktree is dirty or unreadable"])
@@ -7369,6 +7387,11 @@ def _main(argv=None) -> int:
                         done["review_base_sha"] = ns.reviewed_base_sha
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
+                # A ship gate closes its review attempt to new verdicts; readers keep it.
+                _require(done["phase"] != "review"
+                         or not any(isinstance(w, dict) and w.get("phase") == "ship"
+                                    for w in (task.get("workers") or [])[-1:]),
+                         "a ship gate has closed this review attempt")
                 # Closes the overwrite-the-rejection path at one head: a binding-
                 # scoped review verdict at a given reviewed_head_sha cannot be
                 # replaced by a different outcome or a different reviewer session.
