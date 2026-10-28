@@ -4235,14 +4235,14 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
     # carry-review decides whether a clean main merge keeps it.
     review_carry_due = bool(status == "reviewed" and review_stale and rev_ws
                             and is_reviewed(task, review, task["review_head_sha"], rev_ws))
-    # A ship gate that returned anything but APPROVE at the pin must be handled
+    # A ship gate that returned CHANGES at the pin must be handled
     # before the approval is carried past it.
     for row in task.get("workers") or []:
         if isinstance(row, dict) and row.get("phase") == "ship":
             ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
             sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
             if sh and sh.get("head_sha") == task.get("review_head_sha") \
-                    and sh.get("verdict") != "APPROVE":
+                    and sh.get("verdict") == "CHANGES":
                 review_carry_due = False
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
@@ -5357,9 +5357,9 @@ def _carry_review(ns) -> int:
             if isinstance(row, dict) and row.get("phase") == "ship":
                 ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
                 sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
-                if sh and sh.get("head_sha") == pin and sh.get("verdict") != "APPROVE":
+                if sh and sh.get("head_sha") == pin and sh.get("verdict") == "CHANGES":
                     return _carry_report("inconclusive", tid, head,
-                                         ["a ship gate returned a non-APPROVE verdict at the pin"])
+                                         ["a ship gate returned a CHANGES verdict at the pin"])
         status = ("--no-optional-locks", "status", "--porcelain")
         if _git(wt, *status) != "":
             return _carry_report("inconclusive", tid, head, ["worktree is dirty or unreadable"])

@@ -14238,6 +14238,28 @@ assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
 assert task_file(fx) == before
 PY
 
+check "carry-review: a ship gate INCOMPLETE verdict at the pin still carries" <<PY
+$LOAD
+$CARRY
+fx = build()
+ship = {"phase": "ship", "workspace_id": "w4", "runtime": "claude", "launch_id": "S1",
+        "pane_id": "pane2", "source_head_sha": fx["H"]}
+task = dict(fx["task"], workers=fx["task"]["workers"] + [ship],
+            ship_launch_id="S1", ship_parked_head=fx["H"])
+r = cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(task))
+assert r.returncode == 0, r.stderr
+ld = fx["rd"] + "/artifacts/PROJ-1/ship-S1"
+os.makedirs(ld)
+open(ld + "/ship.json", "w").write(json.dumps(
+    {"task_id": "PROJ-1", "launch_id": "S1", "head_sha": fx["H"], "verdict": "INCOMPLETE"}))
+f = facts(fx)
+assert f["action"] == "carry-review", f["action"]
+assert f["review_carry_due"] is True, f
+r = carry(fx)
+assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+PY
+
 check "carry-review: an old ship gate's handoff cannot merge the carried head" <<PY
 $LOAD
 $CARRY
