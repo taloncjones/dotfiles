@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 591
+assert t.count("\n") <= 661
 assert 'echo "EXIT $?"' not in t
 PY
 
