@@ -851,7 +851,7 @@ fi
 
 fresh_gate
 gh api -X POST repos/o/r/issues/5/comments --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
-if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "needs the owner's go" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
     pass "RV21 the shim refuses an issue comment with two --input files"
 else
     fail "RV21 the shim refuses an issue comment with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
@@ -1102,6 +1102,37 @@ if [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
     pass "RV43 the shim runs gh pr review with --help anywhere"
 else
     fail "RV43 the shim refuses gh pr review --help (rc=$rc1$rc2 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X PUT repos/o/r/contents/file.txt --input "$T/one.json" --input "$T/two.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ]; then
+    pass "RV44 the shim runs a non-review write with two --input files"
+else
+    fail "RV44 the shim refused a non-review write with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+h=$(draft pr review 5 --comment -b x -a=false)
+approve "$h"
+(cd "$T/work" && gh pr review 5 --comment -b x -a=false >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$h.spent" ]; then
+    pass "RV45 the shim runs a drafted comment review with a false short -a and spends the draft"
+else
+    fail "RV45 the shim refused a comment review with -a=false (h=$h rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api repos/o/r/pulls/5/reviews -f event=APPROVE --help >"$T/out" 2>"$T/err"; rc1=$?
+n1=$(log_lines)
+gh api repos/o/r/pulls/5/reviews -f event=APPROVE --help --help=false >"$T/out" 2>"$T/err"; rc2=$?
+err2=$(cat "$T/err")
+(cd "$T/work" && gh api --help repos/o/r/pulls/5/reviews -f event=APPROVE >"$T/out" 2>"$T/err"); rc3=$?
+if [ "$rc1" = 0 ] && [ "$n1" = 1 ] && [ "$rc2" != 0 ] && printf '%s' "$err2" | grep -q "must be the reviews API call" \
+    && [ "$rc3" != 0 ] && [ "$(log_lines)" = 1 ] && grep -q "needs the owner's go" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV46 the shim runs a trailing gh api help, pins a help-then-false call, gates a leading help in a work repo"
+else
+    fail "RV46 the shim mishandled gh api help forms (rc=$rc1/$rc2/$rc3 log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"

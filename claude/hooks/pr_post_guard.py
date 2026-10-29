@@ -920,11 +920,12 @@ GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 
 
 def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
-    """(events, commented, helped) of `gh pr review` flags: `--approve`,
-    `--request-changes` or their short forms inside a cluster before any value
-    flag; `--help`/`-h` anywhere outside a value shows help."""
-    found: set[str] = set()
-    commented = helped = False
+    """(events, commented, helped) of `gh pr review` flags. Like pflag, the last
+    value of each event flag wins across long and short forms (`-a=false`,
+    `--approve --approve=false`). A short `h` is help whatever follows; the
+    long `--help` is a last-wins Go bool. Help outside a value shows help."""
+    events: dict[str, bool] = {}
+    commented = short_help = long_help = False
     k = 0
     while k < len(rest):
         tok = rest[k]
@@ -932,34 +933,34 @@ def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
         if tok in ("-b", "--body", "-F", "--body-file", "-R", "--repo"):
             k += 1
         elif tok.startswith("--"):
-            name = tok.split("=", 1)[0]
+            name, eq, value = tok.partition("=")
+            on = not eq or value in GO_TRUE
             if name == "--help":
-                helped = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
+                long_help = on
             elif name == "--comment":
-                commented = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
-            elif name in ("--approve", "--request-changes"):
-                if "=" not in tok or tok.split("=", 1)[1] in GO_TRUE:
-                    found.add("approve" if name == "--approve" else "request-changes")
+                commented = on
+            elif name == "--approve":
+                events["approve"] = on
+            elif name == "--request-changes":
+                events["request-changes"] = on
         elif tok.startswith("-") and len(tok) > 1:
             for pos, ch in enumerate(tok[1:], 1):
                 if ch in "bFR":
                     k += pos == len(tok) - 1
                     break
                 if ch == "h":
-                    value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
-                    helped = value is None or value in GO_TRUE
-                    if value is not None:
+                    short_help = True
+                    break
+                if ch in "car":
+                    eq = tok[pos + 1:pos + 2] == "="
+                    on = not eq or tok[pos + 2:] in GO_TRUE
+                    if ch == "c":
+                        commented = on
+                    else:
+                        events["approve" if ch == "a" else "request-changes"] = on
+                    if eq:
                         break
-                elif ch == "c":
-                    value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
-                    commented = value is None or value in GO_TRUE
-                    if value is not None:
-                        break
-                elif ch == "a":
-                    found.add("approve")
-                elif ch == "r":
-                    found.add("request-changes")
-    return found, commented, helped
+    return {e for e, on in events.items() if on}, commented, short_help or long_help
 
 
 def _pr_review_event(rest: list[str]) -> str | None:
@@ -1034,6 +1035,37 @@ def repeated_input(api: list[str]) -> bool:
     return sum(1 for t in api if t == "--input" or t.startswith("--input=")) > 1
 
 
+def api_help(api: list[str]) -> bool:
+    """True when gh prints help for this raw gh api argv instead of sending it:
+    a short cluster reaches pflag's help shorthand `h` (any `=value`), or the
+    last long --help is Go-true. A value flag's value and words after `--`
+    are never help."""
+    long_help, i = False, 0
+    while i < len(api):
+        tok = api[i]
+        i += 1
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name == "--help":
+                long_help = not eq or value in GO_TRUE
+            elif not eq and name in VALUE_FLAGS + ("--method",):
+                i += 1
+            continue
+        if not tok.startswith("-") or tok == "-":
+            continue
+        for pos, ch in enumerate(tok[1:], 1):
+            if ch == "h":
+                return True
+            if ch in API_VALUE_SHORTS:
+                i += pos == len(tok) - 1
+                break
+            if ch not in API_BOOL_SHORTS:
+                break
+    return long_help
+
+
 def api_methods(api: list[str]) -> set[str]:
     """Every method a gh api argv names; gh uses the last one."""
     methods = set()
@@ -1060,6 +1092,8 @@ def _api_review_event(api: list[str], cwd: str, owner: str, repo: str, cache: di
     if path is None:
         return "unknown" if method != "GET" else None
     api = filled_api
+    if repeated_input(api) and (is_graphql_path(path) or LOOSE_REVIEW_PATH.search(path)):
+        return "unknown"
     if is_graphql_path(path):
         return _graphql_event(api, cwd)
     if method == "GET":
@@ -1096,9 +1130,9 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
     cwd = cwd or os.getcwd()
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
+        if api_help(args[i + 1:]):
+            return None
         api = normalize_api_args(args[i + 1:]) or args[i + 1:]
-        if repeated_input(api):
-            return "unknown"
         cache: dict = {}
         base = _api_review_event(api, cwd, "owner", "repo", cache, False)
         raw_method, raw_path, _host, has_field = parse_api(api)

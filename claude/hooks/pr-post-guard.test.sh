@@ -1572,7 +1572,7 @@ cases = [
     (["api", "-X", "POST", "repos/o/r/pulls/./5/reviews", *rev], "unknown"),
     (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", *rev], None),
     (["api", "repos/o/r/pulls/5/reviews/"], None),
-    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], None),
     (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], None),
@@ -1828,7 +1828,7 @@ cases = [
     (["pr", "review", "5", "-ah"], None),
     (["pr", "review", "5", "--body", "--help", "--approve"], "approve"),
     (["pr", "review", "5", "--approve", "--help=false"], "approve"),
-    (["pr", "review", "5", "--approve", "-h=false"], "approve"),
+    (["pr", "review", "5", "--approve", "-h=false"], None),
     (["pr", "review", "5", "--approve", "--help=true"], None),
 ]
 bad = []
@@ -1844,6 +1844,75 @@ print("ok" if not bad else bad)
 
 expect_class "RE25 pr review with --help after other flags is a read" read pr review 5 --approve --help
 expect_class "RE25 pr review --help before the number is a read" read pr review --help 5
+
+expect_py "RE26 pr review reads event flags last-wins with Go bool values" ok '
+cases = [
+    (["pr", "review", "5", "--comment", "-b", "x", "-a=false"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-r=false"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-a=0"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-a=F"], None),
+    (["pr", "review", "5", "-ca=false", "-b", "x"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "--approve", "--approve=false"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-a", "-a=false"], None),
+    (["pr", "review", "5", "--approve", "-a=false", "--approve", "-b", "x"], "approve"),
+    (["pr", "review", "5", "-a=false", "-a", "-b", "x"], "approve"),
+    (["pr", "review", "5", "--approve=false", "--approve", "-b", "x"], "approve"),
+    (["pr", "review", "5", "-ra=false", "-b", "x"], "request-changes"),
+    (["pr", "review", "5", "-a", "-a=false", "-r", "-b", "x"], "request-changes"),
+    (["pr", "review", "5", "-a", "-r=false", "-b", "x"], "approve"),
+    (["pr", "review", "5", "-a", "-r", "-b", "x"], "unknown"),
+    (["pr", "review", "5", "--approve", "-h=false"], None),
+    (["pr", "review", "5", "-c", "-b", "x", "-ah=false"], None),
+    (["pr", "review", "5", "-a", "-h", "--help=false"], None),
+    (["pr", "review", "5", "-a", "--help", "--help=false"], "approve"),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE27 repeated --input is refused only on a reviews or graphql endpoint" ok '
+cases = [
+    (["api", "-X", "PUT", "repos/o/r/contents/file.txt", "--input", "one.json", "--input", "two.json"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "a.json", "--input", "b.json"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", "c.json", "--input", "a.json"], "unknown"),
+    (["api", "graphql", "--input", "c.json", "--input", "a.json"], "unknown"),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE28 a gh api call gh answers with help is not a review event" ok '
+rv = ["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"]
+cases = [
+    (rv + ["--help"], None),
+    (rv + ["-h"], None),
+    (rv + ["-h=false"], None),
+    (rv + ["-ih"], None),
+    (rv + ["--help=1"], None),
+    (["api", "--help"] + rv[1:], None),
+    (rv + ["--input", "x", "--input", "y", "--help"], None),
+    (rv + ["--help", "--help=false"], "approve"),
+    (rv + ["--help=false"], "approve"),
+    (rv + ["-q", "--help"], "approve"),
+    (rv + ["-H", "--help"], "approve"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-Xh"], "approve"),
+    (rv + ["--", "--help"], "approve"),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
