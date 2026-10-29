@@ -1914,5 +1914,26 @@ for a, want in cases:
 print("ok" if not bad else bad)
 '
 
+expect_py "RE29 a two --input write hashes both files and input_path reads the last" ok '
+import os, subprocess, tempfile
+d = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "remote", "add", "origin", "https://github.com/o/r.git"], check=True)
+def put(name, text):
+    with open(os.path.join(d, name), "w") as f:
+        f.write(text)
+put("one.json", "{\"body\": \"first\"}")
+put("two.json", "{\"body\": \"last\"}")
+argv = ["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "one.json", "--input", "two.json"]
+first = g.draft_hash(argv, d)
+put("two.json", "{\"body\": \"swapped\"}")
+last_changed = first != g.draft_hash(argv, d)
+put("two.json", "{\"body\": \"last\"}")
+put("one.json", "{\"body\": \"swapped\"}")
+first_changed = first != g.draft_hash(argv, d)
+last = g.input_path(argv[4:]) == "two.json" and g.input_path(["--input=a", "--input", "b"]) == "b"
+print("ok" if (last_changed and first_changed and last) else (last_changed, first_changed, last))
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

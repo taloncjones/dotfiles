@@ -1135,5 +1135,17 @@ else
     fail "RV46 the shim mishandled gh api help forms (rc=$rc1/$rc2/$rc3 log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+printf '{"body":"first"}' >"$T/work/one.json"; printf '{"body":"approved"}' >"$T/work/two.json"
+h=$(draft api -X POST repos/o/r/issues/5/comments --input one.json --input two.json)
+approve "$h"
+printf '{"body":"swapped"}' >"$T/work/two.json"
+gh api -X POST repos/o/r/issues/5/comments --input one.json --input two.json >"$T/out" 2>"$T/err"; rc=$?
+if [ -n "$h" ] && [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "needs the owner's go" "$T/err"; then
+    pass "RV47 the shim refuses a two --input comment whose last file changed after approval"
+else
+    fail "RV47 the shim ran a two --input comment with a swapped last file (h=$h rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
