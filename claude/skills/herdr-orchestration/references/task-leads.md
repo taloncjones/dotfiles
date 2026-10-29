@@ -200,12 +200,16 @@ Constraints and recovery:
 
 A lead that already coded the change itself (no bound implement or review
 attempt, so `emit-envelope` refuses `pr_ready`): never hand-write the missing
-attempts. The lead emits its own launcher `emit-done --phase implement` at the
-PR head. The director runs `teardown-binding --binding <bid> --abandon`, which
-is allowed only while no consumption record exists, then `reconcile-leads`,
-records the PR number on the task record, and runs the normal review gate and
-ship gate. Re-run a step only after reading its result: the done record,
-`inspect --binding <bid>`, the binding status.
+attempts. This note holds only when the lead has no bound worker rows;
+`teardown-binding` refuses on outstanding descendants. The lead emits its own
+launcher `emit-done --phase implement` at the PR head. The director runs
+`teardown-binding --binding <bid> --abandon`, which is allowed only while no
+consumption record exists, then `reconcile-leads`. Both take the launcher's
+`--session` and `--fence`. `reconcile-leads` without `--apply` is a dry run
+that only reports; add `--apply` to change state. Then record the PR number on
+the task record and run the normal review gate and ship gate. Re-run a step
+only after reading its result: the done record, `inspect --binding <bid>`,
+the binding status.
 
 ## Rolling back task leads
 

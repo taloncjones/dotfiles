@@ -948,7 +948,10 @@ def render_brief(rd, record, ns, repo_root):
         values["findings_ref"] = ns.findings
     if ns.phase == "ship":
         values.update(_brief_ship_values(rd, record, ns, head, blocks, config))
-    values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"], values)
+    # The lead's done record is phase implement, and the harvester has no lead phase.
+    tag_phase = spec["emit"] if ns.phase == "lead" else ns.phase
+    values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"],
+                                         dict(values, phase=tag_phase))
     text = "\n\n".join(_brief_fill(blocks[name], values) for name in spec["blocks"])
     left = set(BRIEF_TOKEN_RE.findall(text)) - BRIEF_WORKER_FIELDS - {"<task-body>"}
     _require(not left, f"brief template left unfilled tokens: {', '.join(sorted(left))}")
