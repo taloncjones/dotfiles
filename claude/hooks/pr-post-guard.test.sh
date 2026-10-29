@@ -1704,5 +1704,87 @@ for a in (["api", "-X", "POST", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=
 print("ok" if not bad else bad)
 '
 
+expect_py "RE21 review_event resolves {branch} as gh does (symbolic-ref --quiet, strip refs/heads/)" ok '
+import subprocess, tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+d = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/heads/5/reviews"], check=True)
+tree = subprocess.run(["git", "-C", d, "mktree"], input="", capture_output=True, text=True, check=True).stdout.strip()
+subprocess.run(["git", "-C", d, "update-ref", "refs/tags/5/reviews", tree], check=True)
+bad = []
+if g.current_branch(d) != "5/reviews":
+    bad.append(("branch with same-named tag", g.current_branch(d)))
+row = ["api", "-X", "POST", "repos/o/r/pulls/{branch}", *rev]
+if g.review_event(row, d) != "unknown":
+    bad.append((row, g.review_event(row, d)))
+subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/remotes/o/main"], check=True)
+if g.current_branch(d) != "refs/remotes/o/main":
+    bad.append(("HEAD outside refs/heads", g.current_branch(d)))
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE22 review_event refuses owner/repo values that turn the endpoint into a review call" ok '
+import tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+gq = "query=mutation{addPullRequestReview(input:{pullRequestId:\"x\", event: APPROVE}){id}}"
+cases = [
+    (["api", "-X", "POST", "repos/o/r/pulls/5/{repo}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/:repo", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{owner}/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{owner}/{repo}/reviews", *rev], "unknown"),
+    (["api", "{repo}", "-f", gq], "unknown"),
+    (["api", "{owner}", "-f", gq], "unknown"),
+    (["api", "-X", "PUT", "user/starred/{owner}/{repo}"], None),
+    (["api", "-X", "PUT", "user/subscriptions/{owner}/{repo}"], None),
+    (["api", "-X", "POST", "orgs/{owner}/repos", "-f", "name=x"], None),
+    (["api", "-X", "POST", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/5/reviews", *rev], "approve"),
+    (["api", "-X", "GET", "repos/o/r/pulls/5/{repo}"], None),
+]
+d = tempfile.mkdtemp()
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE23 review_event expands -F values only, keeps %2F in ordinary writes, survives a non-UTF-8 branch" ok '
+import os, subprocess, tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+d = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/heads/ent"], check=True)
+gd = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", gd], check=True)
+with open(os.path.join(gd, ".git", "HEAD"), "wb") as f:
+    f.write(b"ref: refs/heads/caf\xe9-\xff\n")
+bad = []
+for a, cwd, want in [
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-F", "ev{branch}=APPROVE", "-f", "commit_id=" + sha], d, None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-F", "event={branch}", "-f", "commit_id=" + sha], d, "unknown"),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/feat%2Fx"], d, None),
+    (["api", "-X", "PUT", "repos/o/r/branches/talon%2Ffoo/protection", "-f", "x=y"], d, None),
+    (["api", "-X", "POST", "repos/o/r/branches/talon%2Ffoo/rename", "-f", "new_name=y"], d, None),
+    (["api", "-X", "PUT", "repos/o/r/contents/a%2Fb.txt", "-f", "message=m"], d, None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], d, "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls%2F5/reviews", *rev], d, "unknown"),
+    (["api", "-X", "POST", "%2Fgraphql", "-f", "query=mutation{x}"], d, "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], d, "unknown"),
+    (["api", "-X", "PUT", "user/starred/o/r", "-f", "x=y"], gd, None),
+    (["api", "-X", "PATCH", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=abc"], gd, "unknown"),
+]:
+    try:
+        got = g.review_event(a, cwd)
+    except Exception as exc:
+        got = repr(exc)
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

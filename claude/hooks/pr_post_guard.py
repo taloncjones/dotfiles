@@ -700,50 +700,65 @@ def is_graphql_path(path: str) -> bool:
 # gh's fillPlaceholders token grammar (Go RE2: `\b` is ASCII-only, so re.ASCII).
 PLACEHOLDER_RE = re.compile(r":(owner|repo|branch)\b|\{(owner|repo|branch)\}", re.ASCII)
 OWNER_REPO_VALUES = {"{owner}": "owner", ":owner": "owner", "{repo}": "repo", ":repo": "repo"}
+# gh fills {owner}/{repo} from GH_REPO or the git remote, both caller-controlled,
+# so the guard tries each of these names for a write.
+HOSTILE_NAMES = ("pulls", "reviews", "graphql", "events", "comments", "5", "..")
 
 
 def current_branch(cwd: str) -> str | None:
-    """The branch gh substitutes for `{branch}`: `git symbolic-ref --short HEAD`."""
+    """The branch gh substitutes for `{branch}`: `git symbolic-ref --quiet HEAD`
+    minus a leading `refs/heads/` (a HEAD outside it keeps its full ref). None
+    when git fails or the name is not UTF-8."""
     try:
-        done = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"], cwd=cwd, capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.SubprocessError):
+        done = subprocess.run(["git", "symbolic-ref", "--quiet", "HEAD"], cwd=cwd, capture_output=True, timeout=10)
+        name = done.stdout.decode("utf-8").rstrip("\n")
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
-    name = done.stdout.strip()
+    name = name.removeprefix("refs/heads/")
     return name if done.returncode == 0 and name else None
 
 
-def fill_placeholders(text: str, cwd: str) -> str | None:
-    """`text` as gh api expands it: {owner}/{repo} become one fixed segment
-    each and {branch} the current branch, which may hold slashes. None when a
-    branch token cannot be resolved (detached HEAD, git error)."""
+def fill_placeholders(text: str, cwd: str, owner: str = "owner", repo: str = "repo", cache: dict | None = None) -> str | None:
+    """`text` as gh api expands it: {owner}/{repo} become the given names and
+    {branch} the current branch, which may hold slashes. None when a branch
+    token cannot be resolved (detached HEAD, git error, non-UTF-8 name)."""
     if not PLACEHOLDER_RE.search(text):
         return text
-    branch = current_branch(cwd) if "branch" in text else None
-    values = {**OWNER_REPO_VALUES, ":branch": branch, "{branch}": branch}
+    cache = {} if cache is None else cache
+    branch = None
+    if "branch" in text:
+        if "branch" not in cache:
+            cache["branch"] = current_branch(cwd)
+        branch = cache["branch"]
+    values = {"{owner}": owner, ":owner": owner, "{repo}": repo, ":repo": repo, ":branch": branch, "{branch}": branch}
     expanded = PLACEHOLDER_RE.sub(lambda m: values[m.group()] or "\0", text)
     return None if "\0" in expanded else expanded
 
 
-def fill_typed_fields(api: list[str], cwd: str) -> list[str] | None:
+def fill_typed_fields(api: list[str], cwd: str, owner: str = "owner", repo: str = "repo", cache: dict | None = None) -> list[str] | None:
     """The normalized `gh api` argv with placeholders expanded in -F/--field
-    values (gh expands those, not -f); None when a branch token is unresolved."""
+    values (gh expands those, not keys or -f); None when a branch token is
+    unresolved."""
+    def fill_word(word: str) -> str | None:
+        key, eq, value = word.partition("=")
+        value = fill_placeholders(value, cwd, owner, repo, cache)
+        return None if value is None else key + eq + value
+
     out, k = [], 0
     while k < len(api):
         tok = api[k]
         k += 1
         if tok in ("-F", "--field") and k < len(api):
-            value = fill_placeholders(api[k], cwd)
-            if value is None:
+            word = fill_word(api[k])
+            if word is None:
                 return None
-            out += [tok, value]
+            out += [tok, word]
             k += 1
         elif tok.startswith("--field="):
-            value = fill_placeholders(tok[len("--field="):], cwd)
-            if value is None:
+            word = fill_word(tok[len("--field="):])
+            if word is None:
                 return None
-            out.append("--field=" + value)
+            out.append("--field=" + word)
         else:
             out.append(tok)
     return out
@@ -771,23 +786,37 @@ def normalize_endpoint(raw: str) -> str | None:
     return "/".join(seg for seg in segments if seg)
 
 
-def review_endpoint(raw: str) -> str | None:
+def review_endpoint(raw: str, collapse_dots: bool = False) -> str | None:
     """Percent-decoded canonical endpoint for the review check, or None when
-    it cannot be read (bad escape, a decoded slash, backslash or dot segment,
-    or a leftover brace). `raw` is already placeholder-expanded."""
+    it cannot be read (bad escape, backslash or dot segment, leftover brace,
+    or a decoded slash in a path that could be a review, graphql or comment
+    call). `raw` is already placeholder-expanded. `collapse_dots` resolves
+    dot segments lexically instead of refusing them."""
     path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
     if "\\" in path or "{" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
         return None
-    segments = []
+    segments, slash = [], False
     for seg in path.split("/"):
         try:
             seg = unquote(seg, errors="strict")
         except UnicodeDecodeError:
             return None
-        if "/" in seg or "\\" in seg or seg in (".", ".."):
+        if "\\" in seg:
+            return None
+        slash = slash or "/" in seg
+        if seg in (".", "..") and collapse_dots:
+            if seg == ".." and segments:
+                segments.pop()
+            continue
+        if seg in (".", ".."):
             return None
         segments.append(seg)
-    return "/".join(seg for seg in segments if seg)
+    path = "/".join(seg for seg in segments if seg)
+    if slash and any(
+        pat.search(path) for pat in (LOOSE_REVIEW_PATH, REVIEW_EVENT_PATH, REPLY_PATH, COMMENT_PATH, ISSUE_COMMENT_PATH, BODY_PATH)
+    ) or (slash and is_graphql_path(path)):
+        return None
+    return path
 
 
 def classify_api(args: list[str]) -> str:
@@ -952,46 +981,70 @@ def repeated_api_flags(api: list[str]) -> bool:
     return inputs > 1 or len(methods) > 1
 
 
+def _api_review_event(api: list[str], cwd: str, owner: str, repo: str, cache: dict, hostile: bool) -> str | None:
+    """Review event of one normalized `gh api` argv once {owner}/{repo} are
+    filled with the given names. `hostile` resolves dot segments lexically."""
+    raw_method, raw_path, _host, has_field = parse_api(api)
+    method = raw_method or ("POST" if has_field else "GET")
+    filled_api = fill_typed_fields(api, cwd, owner, repo, cache)
+    expanded = fill_placeholders(raw_path or "", cwd, owner, repo, cache)
+    path = None
+    if expanded is not None and filled_api is not None:
+        path = review_endpoint(expanded, collapse_dots=hostile)
+    if path is None:
+        return "unknown" if method != "GET" else None
+    api = filled_api
+    if is_graphql_path(path):
+        return _graphql_event(api, cwd)
+    if not REVIEW_EVENT_PATH.search(path):
+        return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
+    if not hostile and path != "/".join(OWNER_REPO_VALUES.get(seg, seg) for seg in (raw_path or "").split("/")):
+        return "unknown" if method != "GET" else None
+    values = [
+        "@file" if typed and value.startswith("@") else value
+        for typed, key, value in api_fields(api) if key == "event"
+    ]
+    source = input_path(api)
+    if source is not None:
+        state, raw = read_text(source, cwd)
+        try:
+            data = json.loads(raw) if state == "text" else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return "unknown"
+        if "event" in data:
+            values.append(data["event"])
+    events = {API_EVENTS.get(v, "unknown") if isinstance(v, str) else "unknown" for v in values}
+    return events.pop() if len(events) == 1 else ("unknown" if events else None)
+
+
 def review_event(args: list[str], cwd: str | None = None) -> str | None:
     """Review event a gh call submits: "approve", "request-changes",
-    "unknown" (an event this cannot read or name) or None for any other call."""
+    "unknown" (an event this cannot read or name) or None for any other call.
+    gh fills {owner}/{repo} with real names the guard cannot see, so a write
+    that uses those tokens is also tried with each of HOSTILE_NAMES; any try
+    that differs from the plain result makes the call "unknown"."""
     cwd = cwd or os.getcwd()
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
         api = normalize_api_args(args[i + 1:]) or args[i + 1:]
         if repeated_api_flags(api):
             return "unknown"
+        cache: dict = {}
+        base = _api_review_event(api, cwd, "owner", "repo", cache, False)
         raw_method, raw_path, _host, has_field = parse_api(api)
-        method = raw_method or ("POST" if has_field else "GET")
-        filled_api = fill_typed_fields(api, cwd)
-        expanded = fill_placeholders(raw_path or "", cwd)
-        path = review_endpoint(expanded) if expanded is not None and filled_api is not None else None
-        if path is None:
-            return "unknown" if method != "GET" else None
-        api = filled_api
-        if is_graphql_path(path):
-            return _graphql_event(api, cwd)
-        if not REVIEW_EVENT_PATH.search(path):
-            return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
-        if path != "/".join(OWNER_REPO_VALUES.get(seg, seg) for seg in (raw_path or "").split("/")):
-            return "unknown" if method != "GET" else None
-        values = [
-            "@file" if typed and value.startswith("@") else value
-            for typed, key, value in api_fields(api) if key == "event"
-        ]
-        source = input_path(api)
-        if source is not None:
-            state, raw = read_text(source, cwd)
-            try:
-                data = json.loads(raw) if state == "text" else None
-            except ValueError:
-                data = None
-            if not isinstance(data, dict):
-                return "unknown"
-            if "event" in data:
-                values.append(data["event"])
-        events = {API_EVENTS.get(v, "unknown") if isinstance(v, str) else "unknown" for v in values}
-        return events.pop() if len(events) == 1 else ("unknown" if events else None)
+        if (raw_method or ("POST" if has_field else "GET")) == "GET" or base == "unknown":
+            return base
+        text = " ".join([raw_path or "", *api])
+        kinds = {m.group(1) or m.group(2) for m in PLACEHOLDER_RE.finditer(text)} & {"owner", "repo"}
+        owners = HOSTILE_NAMES if "owner" in kinds else ("owner",)
+        repos = HOSTILE_NAMES if "repo" in kinds else ("repo",)
+        for owner in owners:
+            for repo in repos:
+                if _api_review_event(api, cwd, owner, repo, cache, True) != base:
+                    return "unknown"
+        return base
     if tuple(args[k] for k in (i, j) if k < len(args)) == ("pr", "review"):
         if args[-1:] in (["-h"], ["--help"]) and not args[-2].startswith("-"):
             return None

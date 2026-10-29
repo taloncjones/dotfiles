@@ -962,5 +962,57 @@ else
     fail "RV31 the shim refuses exact {owner}/{repo} outside a repos prefix (rc=$rc err=$(cat "$T/err"))"
 fi
 
+# A real owner or repo name can equal a path word, so the shim refuses a write the expansion could turn into a review.
+fresh_gate
+gh api -X POST 'repos/o/r/pulls/5/{repo}' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV32 the shim refuses a review reached through a {repo} that could name reviews"
+else
+    fail "RV32 the shim refuses a review reached through a {repo} that could name reviews (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api '{repo}' -f 'query=mutation{addPullRequestReview(input:{pullRequestId:"x", event: APPROVE}){id}}' >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV33 the shim refuses a graphql approval reached through a {repo} that could name graphql"
+else
+    fail "RV33 the shim refuses a graphql approval reached through a {repo} that could name graphql (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST 'repos/{owner}/{repo}/issues/5/comments' -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV34 the shim does not refuse an issue comment under hostile owner and repo names"
+else
+    fail "RV34 the shim refuses an issue comment under hostile owner and repo names (rc=$rc err=$(cat "$T/err"))"
+fi
+
+git init -q "$T/br-tag" && git -C "$T/br-tag" symbolic-ref HEAD refs/heads/5/reviews \
+    && git -C "$T/br-tag" update-ref refs/tags/5/reviews "$(git -C "$T/br-tag" mktree </dev/null)"
+fresh_gate
+(cd "$T/br-tag" && gh api -X POST 'repos/o/r/pulls/{branch}' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV35 the shim refuses {branch} on a branch that has a same-named tag"
+else
+    fail "RV35 the shim refuses {branch} on a branch that has a same-named tag (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X DELETE 'repos/o/r/git/refs/heads/feat%2Fx' >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV36 the shim does not refuse an encoded slash in an ordinary ref delete"
+else
+    fail "RV36 the shim refuses an encoded slash in an ordinary ref delete (rc=$rc err=$(cat "$T/err"))"
+fi
+
+git init -q "$T/br-bytes" && printf 'ref: refs/heads/caf\351-\377\n' >"$T/br-bytes/.git/HEAD"
+fresh_gate
+(cd "$T/br-bytes" && gh api -X PUT 'user/starred/o/r' >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "internal error" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV37 the shim runs a call with no branch token on a non-UTF-8 branch"
+else
+    fail "RV37 the shim crashes or refuses a call with no branch token on a non-UTF-8 branch (rc=$rc err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
