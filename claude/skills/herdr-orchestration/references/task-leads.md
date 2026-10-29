@@ -134,16 +134,27 @@ you did not see, read `task-lead-status` first. If it reads
 only with a fresh go, because a deactivation may have landed in between and a
 blind retry would undo it.
 
+## When to use a task lead
+
+A lead is for one task with several slices to coordinate on one branch. Small
+independent tickets get plain parallel implement workers through the normal
+kickoff: a lead adds a binding handshake and gains nothing there. A lead
+never edits task files itself; even a one-line change goes to a bound worker.
+
 ## Dispatching a task lead (director side)
 
 1. Preconditions: `task-lead-status` reads `gate_enabled: true`, `procedure: 1`
    and `admit: true` (see "Enabling task leads"). Plan and confirm the task as
    usual, then settle the plan row. Do not run `advance`; the lead replaces the
    launch.
-2. Launch the lead as the task's implement row with `herdr_dispatch.py launch
-   --phase implement`. The prompt is the rendered implement brief plus a lead
-   section: the claim, `write-task --binding`, worker, review, PR and envelope
-   steps below, and the rule to start agents only through `launch --binding`.
+2. Render the lead's prompt with `render-brief --phase lead` (template
+   `brief-template.md`, blocks `brief:lead` and `brief:close-lead`). Launch it
+   as the task's implement row: `herdr_dispatch.py launch --phase implement`
+   with the printed `agent` as `--agent` and `brief_path` as `--prompt-file`.
+   The block tells the lead to dispatch only: claim, `write-task --binding`,
+   workers and reviewer through `launch --binding`, PR, and envelope. Never
+   hand-write or append a lead section to another phase's brief; the implement
+   Close forbids the PR a lead must open.
 3. Handshake: the lead's first turn prints `lead-session $CLAUDE_CODE_SESSION_ID`
    and stops. The stop gate refuses that first stop; the lead does not emit.
    Read the line with `herdr pane read <lead pane> --source detection --lines 50`.
@@ -186,6 +197,15 @@ Constraints and recovery:
   blocks later launcher reprompts of the lead. If the binding reads `claimed`,
   the lead holds it and the run continues; otherwise stop for the owner, who
   ends the lead and runs `teardown-binding --abandon` and `reconcile-leads`.
+
+A lead that already coded the change itself (no bound implement or review
+attempt, so `emit-envelope` refuses `pr_ready`): never hand-write the missing
+attempts. The lead emits its own launcher `emit-done --phase implement` at the
+PR head. The director runs `teardown-binding --binding <bid> --abandon`, which
+is allowed only while no consumption record exists, then `reconcile-leads`,
+records the PR number on the task record, and runs the normal review gate and
+ship gate. Re-run a step only after reading its result: the done record,
+`inspect --binding <bid>`, the binding status.
 
 ## Rolling back task leads
 

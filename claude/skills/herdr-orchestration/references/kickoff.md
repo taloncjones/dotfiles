@@ -177,7 +177,7 @@ phase-appropriate brief (references/brief-template.md) and model.
    launch is recorded as failed; never erase it to make the task look unstarted.
 
    Render the brief with
-   `python3 "$CORE" render-brief --repo-slug <slug> --repo-path <canonical repo root> --runtime <claude|codex> --task-id <task_id> --phase <plan|implement|repair|review|ship> [--focus-file <file>] [--findings <path>] [--artifact-class advisory|behavior] [--no-workflow] [--tier delta --prior-handoff <ship.json>]`.
+   `python3 "$CORE" render-brief --repo-slug <slug> --repo-path <canonical repo root> --runtime <claude|codex> --task-id <task_id> --phase <plan|implement|repair|review|ship|lead> [--focus-file <file>] [--findings <path>] [--artifact-class advisory|behavior] [--no-workflow] [--tier delta --prior-handoff <ship.json>]`.
    Write only the task-specific focus file (intended behavior, what to check,
    owner direction) under the scratchpad. The verb prints `agent` and
    `brief_path`; pass them to the adapter as `--agent` and `--prompt-file`.

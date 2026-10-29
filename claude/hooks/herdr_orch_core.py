@@ -736,9 +736,10 @@ BRIEF_TEMPLATE_PATH = (Path(__file__).resolve().parents[1] / "skills" / "herdr-o
                        / "references" / "brief-template.md")
 BRIEF_BLOCK_RE = re.compile(r"^```brief:([a-z0-9-]+)\n(.*?)\n```$", re.M | re.S)
 BRIEF_TOKEN_RE = re.compile(r"<[A-Za-z][^<>\s]{0,40}>")
-# Left for the worker; the adapter's attempt context supplies the first three.
+# Left for the briefed agent; the adapter's attempt context supplies the first three.
 BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>",
-                                 "<outcome>", "<n>", "<artifact-list-json>"})
+                                 "<outcome>", "<n>", "<artifact-list-json>", "<binding_id>",
+                                 "<lead_fence>"})
 BRIEF_OPTIONS = ("focus_file", "findings", "artifact_class", "prd_cap", "no_workflow", "tier",
                  "prior_handoff")
 _BRIEF_WORK_BLOCKS = ("workspace", "routing", "ground-rules")
@@ -749,6 +750,9 @@ BRIEF_PHASES = {
     "implement": {"prefix": "impl", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
                   "requires": (), "allows": ("focus_file", "no_workflow"),
                   "blocks": ("intro-work", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "close-implement")},
+    "lead": {"prefix": "lead", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
+             "requires": (), "allows": ("focus_file", "no_workflow"),
+             "blocks": ("intro-lead", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "lead", "close-lead")},
     "repair": {"prefix": "repair", "emit": "implement", "lessons": "lessons-open-worker", "todo": False,
                "requires": ("focus_file", "findings"), "allows": ("no_workflow",),
                "blocks": ("intro-repair", "task", "repair-findings", "artifacts", *_BRIEF_WORK_BLOCKS,
@@ -922,6 +926,7 @@ def render_brief(rd, record, ns, repo_root):
         "base_ref": record["base_ref"], "base_sha": record["base_sha"], "head_sha": head,
         "phase": ns.phase, "emit_phase": spec["emit"], "workspace_id": record["workspace_id"],
         "core-command": f'python3 "{Path(__file__).resolve()}"',
+        "dispatch-command": f'python3 "{Path(__file__).resolve().parent / "herdr_dispatch.py"}"',
         "core-context": (f'--repo-path "{repo_root}" --runtime {ns.runtime}'
                          + (" --personal" if ns.personal else "")),
         "routing-lines": _brief_routing(ns.runtime, config),

@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 591
+assert t.count("\n") <= 661
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13471,6 +13471,47 @@ put(dict(record, pr_number=None)); refused("--phase", "ship", "--focus-file", fo
 put(dict(record, review_head_sha=A)); refused("--phase", "ship", "--focus-file", focus)
 put(record)
 out, _ = rendered("--phase", "ship", "--focus-file", focus)
+PY
+
+check "render-brief: lead brief dispatches only and leaves the binding tokens" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "lead")
+assert out["phase"] == "lead" and out["emit_phase"] == "implement", out
+assert out["agent"].startswith("lead-"), out
+flat = " ".join(brief.split())
+for phrase in ("dispatch only", "even a one-line change", "launch --binding", "emit-artifacts",
+               "emit-envelope", "herdr_dispatch.py", "--phase implement"):
+    assert phrase in flat, phrase
+assert not re.search(r"implement (small work )?directly|code the change yourself", flat, re.I)
+assert "do NOT open a PR" not in flat
+left = set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", brief.replace(focus_text, "")))
+assert left <= WORKER | {"<binding_id>", "<lead_fence>"}, left
+rendered("--phase", "lead", "--no-workflow")
+rendered("--phase", "lead", "--focus-file", focus)
+assert render("--phase", "lead", "--artifact-class", "behavior").returncode == 2
+_, impl = rendered("--phase", "implement")
+assert "launch --binding" not in " ".join(impl.split())
+PY
+
+check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'
+import importlib.util, subprocess
+s = importlib.util.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(s); s.loader.exec_module(c)
+path = "claude/skills/herdr-orchestration/references/brief-template.md"
+b = c.brief_blocks(open(path).read())
+lead = " ".join((b["lead"] + " " + b["close-lead"]).split())
+for phrase in ("Never edit, stage or commit task files", "launch --binding <binding_id> --phase implement",
+               "another pane", "lead-session", "write-task --binding", "--control-tier lead",
+               "before any retry", "end the prior worker", "replace two ground rules",
+               "verify-contract", "<lessons-step>", "emit-done"):
+    assert phrase in lead, phrase
+base = subprocess.run(["git", "merge-base", "origin/main", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+old = subprocess.run(["git", "show", base + ":" + path], check=True, capture_output=True, text=True).stdout
+for name, body in c.brief_blocks(old).items():
+    assert b.get(name) == body, name
+row = c.BRIEF_PHASES["lead"]
+assert row["prefix"] == "lead" and row["emit"] == "implement" and set(row["allows"]) == {"focus_file", "no_workflow"}
 PY
 
 HEADER_FIXTURE=$(mktemp); export HEADER_FIXTURE
@@ -14026,6 +14067,19 @@ for bad in (None, 7):
     open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(done))
     marker = {"launch_id": "i1"} if bad is None else {"launch_id": "i1", "ts": bad}
     assert c.checkin_facts(rd, dict(task, stop_recorded=marker), idle, payload)["action"] == "paused", bad
+PY
+
+check "docs: task-leads renders the lead brief, states when to use a lead and the recovery" <<'PY'
+import re
+t = " ".join(open("claude/skills/herdr-orchestration/references/task-leads.md").read().split())
+for phrase in ("render-brief --phase lead", "brief-template.md", "brief:lead", "brief:close-lead", "brief_path",
+               "--prompt-file", "parallel implement workers", "several slices", "emit-done --phase implement",
+               "reconcile-leads", "review gate", "ship gate", "hand-write the missing"):
+    assert phrase in t, phrase
+assert "rendered implement brief plus a lead section" not in t
+assert re.search(r"## When to use a task lead", t)
+assert re.search(r"teardown-binding[^.]{0,80}--abandon", t)
+assert "--phase <plan|implement|repair|review|ship|lead>" in open("claude/skills/herdr-orchestration/references/kickoff.md").read()
 PY
 
 check "docs: section 4 records a stop with stop_recorded" <<'PY'
