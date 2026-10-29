@@ -84,6 +84,17 @@ class CoReviewSkillText(unittest.TestCase):
         for needle in ("```co-review-seat", "mktemp", "foreground", "functional_behavior", "exit_code"):
             self.assertIn(needle, text)
 
+    def test_seat_report_bounds_suite_reruns(self):
+        text = " ".join((REPO / "claude/skills/co-review/references/seat-report.md")
+                        .read_text(encoding="utf-8").split())
+        self.assertNotIn("a targeted test, the owning suite, or an executable probe", text)
+        for needle in ("(a targeted test case or an executable probe)",
+                       "Outside the small tier, do not rerun a test suite that a passing check in "
+                       "the `## CI evidence` section ran at the reviewed head.",
+                       "cite the check in `coverage.checklist.functional_behavior`,",
+                       "finish within five minutes"):
+            self.assertIn(needle, text)
+
     def test_policy_and_entrypoints_state_the_seat_block_rules(self):
         sentence = "The coordinator never writes a `co-review-seat` block for a seat."
         self.assertIn(sentence, CO_REVIEW)
