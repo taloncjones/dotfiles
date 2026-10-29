@@ -208,7 +208,10 @@ dispatches a first gate or a re-dispatch in one command.
 - Review steps: `sweep`, `render-brief`, `pane split --no-focus` off the
   implement pane, `launch --sandbox read-only`, one `write-task --present`
   (`review-dispatched` and `review_head_sha`), then `write-index` (role
-  `review`). Ship steps: `render-brief`, the `ship_relaunch_head` write (a
+  `review`). `write-task` refuses that claim unless the newest row is a
+  fresh launched review at the pinned head (`review_dispatch_launch_id`
+  records the launch used); never write `review-dispatched` by hand after a
+  failed launch, because `workers[-1]` may be the implement row. Ship steps: `render-brief`, the `ship_relaunch_head` write (a
   stopped run only), the pane split, the read-only launch, the
   `ship_launch_id` write, then `settle` of the old pinned row (`superseded`).
 - Output: `{status: dispatched, phase, task_id, launch_id, agent, pane_id,

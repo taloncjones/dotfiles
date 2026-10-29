@@ -589,10 +589,12 @@ F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 # no task/review yet -> not reviewed
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"h1"}'
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"h1","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched","source_head_sha":"h1"}]}'
+# legacy emit-review records carry no source_head_sha, so the legacy row drops it
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); del d["workers"][0]["source_head_sha"]; json.dump(d, open(p, "w"))' "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 # task dispatched at h1 but no review.json yet -> not reviewed
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
   --reviewed-head-sha h1 --outcome approved
 # dispatched == reviewed == HEAD (h1), right workspace, no blocking -> merge-ready
 $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1
@@ -601,15 +603,15 @@ if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w8 --head
 # HEAD advanced to h2 after a clean review of h1 -> gate holds
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h2 2>/dev/null; then exit 1; fi
 # reviewer records the new live SHA h2 though dispatch was h1 -> still rejected
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
   --reviewed-head-sha h2 --outcome approved
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h2 2>/dev/null; then exit 1; fi
 # approved but blocking findings remain -> rejected
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
   --reviewed-head-sha h1 --outcome approved --blocking-count 1
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 # a changes-requested review is never merge-ready
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
   --reviewed-head-sha h1 --outcome changes-requested
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 SH
@@ -5877,7 +5879,7 @@ FR="$root/herdr-orch/slug-x/artifacts/PROJ-1/review-L2/findings.md"
 mkdir -p "$(dirname "$FR")"; printf 'Inspected everything; no findings.\n' > "$FR"
 DIGEST=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$FR")
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'"}]}'
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'","status":"launched"}]}'
 write_review() {
 python3 - "$root/herdr-orch/slug-x/tasks/PROJ-1.review.json" "$1" "$2" "$SHA40" <<'PY'
 import json, sys
@@ -6611,6 +6613,114 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-r
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+SH
+
+check "write-task refuses review-dispatched without a fresh launched review at the pinned head" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+H=$(printf 'a%.0s' $(seq 1 40)); H2=$(printf 'c%.0s' $(seq 1 40))
+rec="$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+IMPL='{"phase":"implement","launch_id":"I1","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$H"'","status":"launched"}'
+rev() { printf '{"phase":"review","launch_id":"%s","runtime":"claude","workspace_id":"w1","pane_id":"w1:p2","source_head_sha":"%s","status":"%s"}' "$1" "$2" "$3"; }
+w() { $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json "$1"; }
+refused() {
+  before=$(cat "$rec")
+  if w "$2" 2>"$ERRFILE"; then exit 1; fi
+  grep -q -- "$1" "$ERRFILE"
+  [ "$(cat "$rec")" = "$before" ]
+}
+claim() { printf '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":%s,"workers":[%s]}' "$1" "$2"; }
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":null,"workers":['"$IMPL"']}'
+ROW='review-dispatched needs the newest workers row to be a launched review attempt'
+# the incident: the newest row is the implement attempt
+refused "$ROW" "$(claim "\"$H\"" "$IMPL")"
+refused "$ROW" "$(claim "\"$H\"" "$IMPL,$(rev L0 $H launch_failed)")"
+refused "$ROW" "$(claim "\"$H\"" "$IMPL,$(rev L0 $H starting)")"
+refused 'review_head_sha must equal the launched review' "$(claim "\"$H\"" "$IMPL,$(rev L0 $H2 launched)")"
+refused 'review_head_sha must equal the launched review' "$(claim null "$IMPL,$(rev L0 $H launched)")"
+w "$(claim "\"$H\"" "$IMPL,$(rev L1 $H launched)")"
+# a verdict without retirement, then the same launch backing a new claim
+w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'"}'
+w '{"task_id":"PROJ-1","status":"in-progress","review_head_sha":"'"$H"'"}'
+STALE='already backed a review-dispatched write or is retired'
+refused "$STALE" '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'"}'
+# a retired launch that never backed a claim cannot back one
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":null,"workers":['"$IMPL"','"$(rev L1 $H launched)"','"$(rev L5 $H launched)"'],"retired_review_launch_ids":["L5"]}'
+refused "$STALE" "$(claim "\"$H\"" "$IMPL,$(rev L1 $H launched),$(rev L5 $H launched)")"
+SH
+
+check "write-task accepts review-dispatched backed by a fresh launched review and records its launch" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+H=$(printf 'a%.0s' $(seq 1 40))
+rec="$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+IMPL='{"phase":"implement","launch_id":"I1","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$H"'","status":"launched"}'
+R1='{"phase":"review","launch_id":"L1","runtime":"claude","workspace_id":"w1","pane_id":"w1:p2","source_head_sha":"'"$H"'","status":"launched"}'
+R2='{"phase":"review","launch_id":"L2","runtime":"claude","workspace_id":"w1","pane_id":"w1:p3","source_head_sha":"'"$H"'","status":"launched"}'
+w() { $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json "$1"; }
+key() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("review_dispatch_launch_id"))' "$rec"; }
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$IMPL"','"$R1"']}'
+test "$(key)" = L1
+# a note on the same claim is not a new claim
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","note":"running"}'
+# the key is single-writer
+if w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","review_dispatch_launch_id":"L9"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'review_dispatch_launch_id is written only by write-task' "$ERRFILE"
+# verdict, deadline stop with retirement, stale-verdict reset, fresh launch
+w '{"task_id":"PROJ-1","status":"reviewed","review_head_sha":"'"$H"'"}'
+w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","retired_review_launch_ids":["L1"]}'
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":null}'
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$IMPL"','"$R1"','"$R2"']}'
+test "$(key)" = L2
+# a stale full-record copy carrying the previous key is refused
+if w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","review_dispatch_launch_id":"L1"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'review_dispatch_launch_id is written only by write-task' "$ERRFILE"
+# a pin with another status claims no review and stays accepted
+$CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-2","status":"completed","review_head_sha":"'"$H"'","workers":['"$IMPL"']}'
+SH
+
+check "write-task --binding: a pre-launch pin is accepted and review-dispatched needs a fresh bound review row" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-reviewclaim.git
+root=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" \
+   --session L1 --fence "$f" --task-id td-x --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" \
+   --session S1 --host h --pid 2 --control-tier lead --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40)); B0=$(printf 'b%.0s' $(seq 1 40))
+tf="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+ROW() { printf '{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"%s","review_base_sha":"%s","status":"%s"}' "$H" "$B0" "$1"; }
+wt() { CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug "$LF_SLUG" --session S1 --fence "$lf" \
+   --binding "$bid" --task-id td-x --json "$1"; }
+# the pre-launch pin (task-leads.md) carries no review claim
+wt '{"task_id":"td-x","base_sha":"'"$B0"'","status":"in-progress","review_head_sha":"'"$H"'","workers":[]}'
+# claiming without a launched row is refused and leaves the file alone
+before=$(cat "$tf")
+if wt '{"task_id":"td-x","base_sha":"'"$B0"'","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$(ROW starting)"']}' 2>"$root/e1"; then exit 1; fi
+grep -q 'needs the newest workers row to be a launched review attempt' "$root/e1"
+[ "$(cat "$tf")" = "$before" ]
+wt '{"task_id":"td-x","base_sha":"'"$B0"'","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$(ROW launched)"']}'
+grep -q '"review_dispatch_launch_id": *"L2"' "$tf"
+SH
+
+check "reset-task refuses review-dispatched and review_dispatch_launch_id" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+H=$(printf 'a%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"completed","workers":[]}'
+reset() { $CLI reset-task --repo-slug slug-x --task-id PROJ-1 --new-task-id PROJ-2 --session S \
+  --fence "$F" --json "$1"; }
+if reset '{"task_id":"PROJ-2","status":"review-dispatched","review_head_sha":"'"$H"'"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'needs the newest workers row to be a launched review attempt' "$ERRFILE"
+if reset '{"task_id":"PROJ-2","status":"completed","review_dispatch_launch_id":"L1"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'review_dispatch_launch_id is written only by write-task' "$ERRFILE"
+test ! -e "$root/herdr-orch/slug-x/tasks/PROJ-2.json"
 SH
 
 check "bound review row: write-task refuses an unpinned or mismatched pin; emit-review refuses an unpinned row" <<'SH'
@@ -11220,7 +11330,7 @@ grep -q '"peer_name":"impl-td-s"' "$TASKFILE"
 # Longer list accepted; omitted key inherits; shrinking from two to one refused.
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
-   --json '{"task_id":"td-s","status":"review-dispatched","workers":[{"phase":"implement","launch_id":"I1","peer_name":"impl-td-s"},{"phase":"review","launch_id":"R1"}]}'
+   --json '{"task_id":"td-s","status":"review-dispatched","review_head_sha":"h1","workers":[{"phase":"implement","launch_id":"I1","peer_name":"impl-td-s"},{"phase":"review","launch_id":"R1","status":"launched","source_head_sha":"h1"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
    --json '{"task_id":"td-s","status":"reviewed"}'
@@ -11722,7 +11832,7 @@ poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
 impl = {"phase": "implement", "workspace_id": "w3", "runtime": "claude",
         "launch_id": "I1", "pane_id": "pane1", "source_head_sha": base}
 L1 = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
-      "launch_id": "L1", "pane_id": "pane2", "source_head_sha": head}
+      "launch_id": "L1", "pane_id": "pane2", "source_head_sha": head, "status": "launched"}
 live = {"task_id": "PROJ-1", "status": "review-dispatched", "base_sha": base,
         "review_head_sha": head, "worktree": wt, "workers": [impl, L1]}
 write(live)
@@ -11742,7 +11852,11 @@ write(dict(live, status="changes-requested"))  # key omitted: carried forward
 assert stored()["retired_review_launch_ids"] == ["L1"], stored()
 assert confirm() == 1
 # under a status where a correlating verdict would act, a retired one does not
-write(dict(live))  # review-dispatched, pin unchanged, key carried forward
+# L1 already backed a claim and is retired, so write-task refuses a new claim on it;
+# put the record on disk directly to keep the retired-verdict assertions below.
+claimed = dict(stored(), status="review-dispatched")
+with open(os.path.join(rd, "tasks", "PROJ-1.json"), "w") as fh:
+    json.dump(claimed, fh)
 reject(L1)
 unretired = {k: v for k, v in stored().items() if k != "retired_review_launch_ids"}
 assert c.checkin_facts(rd, unretired, poll, c.state_root().parent)["action"] == "changes-requested"
@@ -11761,8 +11875,8 @@ root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 H=$(printf 'a%.0s' $(seq 1 40))
-R1='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L1","pane_id":"p1","source_head_sha":"'"$H"'"}'
-R2='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"p2","source_head_sha":"'"$H"'"}'
+R1='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L1","pane_id":"p1","source_head_sha":"'"$H"'","status":"launched"}'
+R2='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"p2","source_head_sha":"'"$H"'","status":"launched"}'
 rec="$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 retired() { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("retired_review_launch_ids")))' "$rec"; }
 w() { $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json "$1"; }
@@ -12401,7 +12515,7 @@ FINDINGS="$root/herdr-orch/findings.md"
 printf 'No blocking findings. Inspected: fixture.\n' > "$FINDINGS"
 DIGEST=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$FINDINGS")
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-    --json '{"task_id":"PROJ-1","status":"review-dispatched","base_sha":"'"$HEAD"'","review_head_sha":"'"$HEAD"'","worktree":"'"$WT"'","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"'"$HEAD"'"}]}'
+    --json '{"task_id":"PROJ-1","status":"review-dispatched","base_sha":"'"$HEAD"'","review_head_sha":"'"$HEAD"'","worktree":"'"$WT"'","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"'"$HEAD"'","status":"launched"}]}'
 cat > "$RD/tasks/PROJ-1.review.json" <<JSON
 {"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"$HEAD","task_id":"PROJ-1","outcome":"approved","reviewed_head_sha":"$HEAD","blocking_count":0,"findings_ref":"$FINDINGS","findings_sha256":"$DIGEST"}
 JSON
@@ -12708,7 +12822,7 @@ OLD=$(python3 -c 'import time; print(time.time_ns() - 5000 * 10**9)')
 for pair in "PROJ-1 $NOW" "PROJ-2 $OLD"; do
   set -- $pair
   $CLI write-task --repo-slug slug-x --task-id "$1" --session S --fence "$F" \
-    --json '{"task_id":"'"$1"'","status":"review-dispatched","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"rev-'"$1"'","pane_id":"w3:p2","source_head_sha":"'"$BASE"'","started_ns":'"$2"'}]}'
+    --json '{"task_id":"'"$1"'","status":"review-dispatched","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"rev-'"$1"'","pane_id":"w3:p2","source_head_sha":"'"$BASE"'","status":"launched","started_ns":'"$2"'}]}'
 done
 printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"working"}]}}' > "$root/a.json"
 printf '{"result":{"workspaces":[{"workspace_id":"w3"}]}}' > "$root/w.json"
@@ -13371,7 +13485,7 @@ header_fixture() {
     f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session S --host h --pid 1)
     SHA40=$(printf 'a%.0s' $(seq 1 40))
     CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug "$LF_SLUG" --session S --fence "$f" --task-id td-h \
-      --json '{"task_id":"td-h","base_sha":"'"$SHA40"'","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'"}]}'
+      --json '{"task_id":"td-h","base_sha":"'"$SHA40"'","status":"review-dispatched","review_head_sha":"'"$SHA40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","review_base_sha":"'"$SHA40"'","runtime":"claude","workspace_id":"w9","pane_id":"pane9","source_head_sha":"'"$SHA40"'","status":"launched"}]}'
     FR="$root/herdr-orch/$LF_SLUG/artifacts/td-h/review-L2/findings.md"
     mkdir -p "$(dirname "$FR")"
     REVIEW_JSON="$root/herdr-orch/$LF_SLUG/tasks/td-h.review.json"

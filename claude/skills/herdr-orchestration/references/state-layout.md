@@ -593,6 +593,13 @@ A write that changes a non-null `review_head_sha` retires the latest
 review launch on its own. The director adds the stopped launch at a
 sized-deadline stop. Bound `write-task` and `reset-task` refuse the key.
 
+`review_dispatch_launch_id` records the review launch that backed the last
+`review-dispatched` claim. `write-task` is the only writer: it inherits the
+key when omitted and refuses a supplied change. A claim (status enters
+`review-dispatched`, or the pin moves while in it) needs the newest `workers`
+row to be a `launched` review at the pinned head whose launch is neither the
+recorded one nor retired. `reset-task` refuses the key and the status.
+
 `review_carry` (launcher scope) is written only by `carry-review`: it holds
 `reviewed_head_sha`, `head`, `from_pin`, `review_launch_id`, `upstream`,
 `upstream_sha`, `new_base`, `contract_sha256`, `contract_exit`, `audit`,
