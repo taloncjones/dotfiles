@@ -287,8 +287,7 @@ def draft_files(args: list[str]) -> list[str]:
     if i < len(args) and args[i] == "api":
         api = normalize_api_args(args[i + 1:]) or args[i + 1:]
         paths = [value[1:] for typed, _key, value in api_fields(api) if typed and value.startswith("@")]
-        path = input_path(api)
-        return paths + ([path] if path is not None else [])
+        return paths + input_paths(api)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     if sub in BODY_FILE_SUBCOMMANDS:
         path = flag_value(args[j + 1:], ("-F", "--body-file"))
@@ -374,13 +373,20 @@ def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
     return fields
 
 
-def input_path(args: list[str]) -> str | None:
+def input_paths(args: list[str]) -> list[str]:
+    """Every --input value in order; gh reads the last one (pflag last-wins)."""
+    out = []
     for i, tok in enumerate(args):
         if tok == "--input" and i + 1 < len(args):
-            return args[i + 1]
-        if tok.startswith("--input="):
-            return tok.split("=", 1)[1]
-    return None
+            out.append(args[i + 1])
+        elif tok.startswith("--input="):
+            out.append(tok.split("=", 1)[1])
+    return out
+
+
+def input_path(args: list[str]) -> str | None:
+    paths = input_paths(args)
+    return paths[-1] if paths else None
 
 
 def pr_target(args: list[str]) -> tuple[str | None, str | None]:
