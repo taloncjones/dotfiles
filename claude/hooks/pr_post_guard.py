@@ -934,7 +934,7 @@ def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
         elif tok.startswith("--"):
             name = tok.split("=", 1)[0]
             if name == "--help":
-                helped = True
+                helped = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
             elif name == "--comment":
                 commented = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
             elif name in ("--approve", "--request-changes"):
@@ -946,7 +946,10 @@ def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
                     k += pos == len(tok) - 1
                     break
                 if ch == "h":
-                    helped = True
+                    value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
+                    helped = value is None or value in GO_TRUE
+                    if value is not None:
+                        break
                 elif ch == "c":
                     value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
                     commented = value is None or value in GO_TRUE

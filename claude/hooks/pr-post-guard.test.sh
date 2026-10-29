@@ -1827,6 +1827,9 @@ cases = [
     (["pr", "review", "--help", "5"], None),
     (["pr", "review", "5", "-ah"], None),
     (["pr", "review", "5", "--body", "--help", "--approve"], "approve"),
+    (["pr", "review", "5", "--approve", "--help=false"], "approve"),
+    (["pr", "review", "5", "--approve", "-h=false"], "approve"),
+    (["pr", "review", "5", "--approve", "--help=true"], None),
 ]
 bad = []
 for a, want in cases:
