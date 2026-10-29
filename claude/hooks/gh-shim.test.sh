@@ -1047,5 +1047,62 @@ else
     fail "RV37 the shim crashes or refuses a {branch} write on a non-UTF-8 branch (rc=$rc err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+(cd "$T/work" && gh api -X DELETE 'repos/acme/app/git/refs/heads/feature%2Fgraphql' >"$T/out" 2>"$T/err"); rc1=$?
+(cd "$T/work" && gh api -X DELETE 'repos/acme/app/issues/5/labels/area%2Fgraphql' >"$T/out" 2>"$T/err"); rc2=$?
+printf '{"message":"m","content":"eA=="}' >"$T/work/update.json"
+(cd "$T/work" && gh api -X PUT repos/acme/app/contents/graphql --input update.json >"$T/out" 2>"$T/err"); rc3=$?
+if [ "$rc1$rc2$rc3" = 000 ] && [ "$(log_lines)" = 3 ]; then
+    pass "RV38 the shim runs REST ref, label and content calls whose name ends in graphql"
+else
+    fail "RV38 the shim refuses a REST call whose name ends in graphql (rc=$rc1$rc2$rc3 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api graphql -f 'query=mutation { addPullRequestReview(input: {pullRequestId: "P_1", event: COMMENT, body: "The APPROVE state needs a test."}) { clientMutationId } }' >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV39 the shim does not read a COMMENT review mutation as an approval because of its body"
+else
+    fail "RV39 the shim refuses a COMMENT review mutation naming APPROVE only in its body (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+printf '{"query":"query { search(query: \\"APPROVE repo:me/repo\\", type: ISSUE, first: 10) { issueCount } }"}' >"$T/work/search.json"
+printf 'query { search(query: "APPROVE repo:me/repo", type: ISSUE, first: 10) { issueCount } }\n' >"$T/work/search.graphql"
+(cd "$T/work" && gh api graphql --input search.json >"$T/out" 2>"$T/err"); cat "$T/err" >"$T/err1"
+(cd "$T/work" && gh api graphql -F query=@search.graphql >"$T/out" 2>"$T/err"); cat "$T/err" >>"$T/err1"
+(cd "$T/work" && gh api graphql -f 'query=mutation { addComment(input: {subjectId: "I_1", body: "Use event: APPROVE"}) { clientMutationId } }' >"$T/out" 2>"$T/err"); cat "$T/err" >>"$T/err1"
+if ! grep -q "must be the reviews API call" "$T/err1"; then
+    pass "RV40 the shim does not read a search query or a comment mutation naming APPROVE as a review"
+else
+    fail "RV40 the shim refuses a read-only query or comment mutation naming APPROVE (err=$(cat "$T/err1"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api -X GET repos/acme/app/pulls/5/reviews -f event=APPROVE >"$T/out" 2>"$T/err"); rc1=$?
+(cd "$T/work" && gh api -X POST -X GET repos/acme/app/issues >"$T/out" 2>"$T/err"); rc2=$?
+if [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
+    pass "RV41 the shim runs a GET on a reviews path and a repeated -X that ends in GET"
+else
+    fail "RV41 the shim refuses a GET reviews read or a repeated -X (rc=$rc1$rc2 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api -X GET -X POST repos/acme/app/pulls/5/reviews -f event=APPROVE >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" != 0 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV42 the shim still refuses an approval whose last -X is POST after an earlier GET"
+else
+    fail "RV42 the shim ran an approval hidden behind repeated -X (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh pr review 5 --approve --help >"$T/out" 2>"$T/err"); rc1=$?
+(cd "$T/work" && gh pr review --help 5 >"$T/out" 2>"$T/err"); rc2=$?
+if [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
+    pass "RV43 the shim runs gh pr review with --help anywhere"
+else
+    fail "RV43 the shim refuses gh pr review --help (rc=$rc1$rc2 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

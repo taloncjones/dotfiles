@@ -1573,7 +1573,7 @@ cases = [
     (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", *rev], None),
     (["api", "repos/o/r/pulls/5/reviews/"], None),
     (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], "unknown"),
-    (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], "unknown"),
+    (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], None),
     (["api", "-X", "PATCH", "repos/{owner}/{repo}/issues/5", "-f", "state=closed"], None),
@@ -1617,11 +1617,11 @@ cases = [
     (["pr", "review", "--help"], None),
     (["pr", "review", "5", "--help"], None),
     (["pr", "review", "-h"], None),
-    (["pr", "review", "5", "--approve", "--help"], "approve"),
+    (["pr", "review", "5", "--approve", "--help"], None),
     (["api", "-X", "GET", "-X", "GET", "repos/o/r/issues/5"], None),
     (["api", "-X", "POST", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "-XPOST", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
-    (["api", "-X", "POST", "-X", "PUT", "repos/o/r/issues/5/comments", "-f", "body=x"], "unknown"),
+    (["api", "-X", "POST", "-X", "PUT", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["pr", "review", "5", "--approve=false"], "unknown"),
     (["pr", "review", "5", "--request-changes=false"], "unknown"),
     (["pr", "review", "5", "--approve=false", "--comment"], None),
@@ -1792,6 +1792,55 @@ for a, cwd, want in [
         bad.append((a, got, want))
 print("ok" if not bad else bad)
 '
+
+expect_py "RE24 review_event reads graphql only as the whole endpoint and a review mutation by its event argument" ok '
+import json, os, tempfile
+d = tempfile.mkdtemp()
+def put(name, text):
+    with open(os.path.join(d, name), "w") as f:
+        f.write(text)
+put("update.json", json.dumps({"message": "m", "content": "eA=="}))
+put("search.json", json.dumps({"query": "query { search(query: \"APPROVE repo:me/repo\", type: ISSUE, first: 10) { issueCount } }"}))
+put("search.graphql", "query { search(query: \"APPROVE repo:me/repo\", type: ISSUE, first: 10) { issueCount } }")
+put("comment.json", json.dumps({"query": "mutation { addComment(input: {subjectId: \"I_1\", body: \"Use event: APPROVE\"}) { clientMutationId } }"}))
+rev = lambda event, body="x": "query=mutation { addPullRequestReview(input: {pullRequestId: \"P_1\", event: %s, body: \"%s\"}) { clientMutationId } }" % (event, body)
+cases = [
+    (["api", "-X", "DELETE", "repos/acme/app/git/refs/heads/feature%2Fgraphql"], None),
+    (["api", "-X", "DELETE", "repos/acme/app/issues/5/labels/area%2Fgraphql"], None),
+    (["api", "-X", "PUT", "repos/acme/app/contents/graphql", "--input", "update.json"], None),
+    (["api", "graphql", "-f", rev("COMMENT", "The APPROVE state needs a test.")], None),
+    (["api", "graphql", "-f", rev("APPROVE", "ok")], "unknown"),
+    (["api", "graphql", "-f", rev("REQUEST_CHANGES", "no")], "unknown"),
+    (["api", "graphql", "-f", rev("$e", "APPROVE needs a test"), "-f", "e=COMMENT"], None),
+    (["api", "graphql", "-f", rev("$e", "x"), "-f", "e=APPROVE"], "unknown"),
+    (["api", "graphql", "-f", rev("COMMENT", "x") + " # event: APPROVE"], None),
+    (["api", "graphql", "-f", "query=mutation($i: AddPullRequestReviewInput!) { addPullRequestReview(input: $i) { clientMutationId } }", "-f", "i=APPROVE"], "unknown"),
+    (["api", "graphql", "--input", "search.json"], None),
+    (["api", "graphql", "-F", "query=@search.graphql"], None),
+    (["api", "graphql", "-f", "query=query { search(query: \"APPROVE\") { issueCount } }"], None),
+    (["api", "graphql", "--input", "comment.json"], None),
+    (["api", "graphql", "-f", "query=mutation { addComment(input: {body: \"Use event: APPROVE\"}) { clientMutationId } }"], None),
+    (["api", "-X", "GET", "repos/acme/app/pulls/5/reviews", "-f", "event=APPROVE"], None),
+    (["api", "-X", "POST", "-X", "GET", "repos/o/r/issues"], None),
+    (["api", "-X", "GET", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-f", "commit_id=" + "a" * 40], "unknown"),
+    (["pr", "review", "5", "--approve", "--help"], None),
+    (["pr", "review", "--help", "5"], None),
+    (["pr", "review", "5", "-ah"], None),
+    (["pr", "review", "5", "--body", "--help", "--approve"], "approve"),
+]
+bad = []
+for a, want in cases:
+    try:
+        got = g.review_event(a, d)
+    except Exception as exc:
+        got = repr(exc)
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_class "RE25 pr review with --help after other flags is a read" read pr review 5 --approve --help
+expect_class "RE25 pr review --help before the number is a read" read pr review --help 5
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

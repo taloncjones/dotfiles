@@ -155,7 +155,11 @@ REVIEW_POST_PATH = re.compile(r"repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews")
 SHA40_RE = re.compile(r"[0-9a-f]{40}")
 GRAPHQL_EVENT_RE = re.compile(r"\b(?:APPROVE|REQUEST_CHANGES)\b")
 GRAPHQL_REVIEW_MUTATION_RE = re.compile(r"\b(?:add|submit)PullRequestReview\w*")
-GRAPHQL_EVENT_LITERAL_RE = re.compile(r"\bevent\s*:\s*(?:APPROVE|REQUEST_CHANGES)\b")
+# A GraphQL string or comment; stripped so body text cannot read as syntax.
+GRAPHQL_NOISE_RE = re.compile(r'"""(?:\\"""|.)*?"""|"(?:\\.|[^"\\])*"|#[^\n]*', re.DOTALL)
+GRAPHQL_EVENT_ARG_RE = re.compile(r"(?<![\w$])event\s*:\s*(\$?\w+)")
+GRAPHQL_INPUT_VAR_RE = re.compile(r"\binput\s*:\s*\$")
+APPROVAL_ENUMS = frozenset({"APPROVE", "REQUEST_CHANGES"})
 API_EVENTS = {"APPROVE": "approve", "REQUEST_CHANGES": "request-changes", "COMMENT": None}
 # Option verb a draft's review event needs; an `unknown` event has none.
 EVENT_VERBS = {None: "Post", "approve": "Approve", "request-changes": "Request changes"}
@@ -692,9 +696,10 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
 
 
 # GitHub routes graphql case-insensitively; Enterprise Server serves it at
-# api/graphql and api/v3/graphql, so match the final segment, lowercased.
+# api/graphql and api/v3/graphql. A ref, label or content path that merely
+# ends in graphql is a REST resource.
 def is_graphql_path(path: str) -> bool:
-    return path.rstrip("/").rsplit("/", 1)[-1].lower() == "graphql"
+    return path.strip("/").lower() in ("graphql", "api/graphql", "api/v3/graphql")
 
 
 # gh's fillPlaceholders token grammar (Go RE2: `\b` is ASCII-only, so re.ASCII).
@@ -903,7 +908,7 @@ def classify_gh(args: list[str]) -> str:
     if sub in CLOSE_SUBCOMMANDS:
         return "post" if any(CLOSE_COMMENT_RE.match(t) for t in rest) else "write"
     if sub == ("pr", "review"):
-        return "reply"
+        return "read" if _pr_review_scan(rest)[2] else "reply"
     if sub in (("pr", "comment"), ("issue", "comment")):
         return "post"
     if sub == ("pr", "edit"):
@@ -914,12 +919,12 @@ def classify_gh(args: list[str]) -> str:
 GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 
 
-def _pr_review_event(rest: list[str]) -> str | None:
-    """Event of `gh pr review` flags: `--approve`, `--request-changes`, or
-    their short forms inside a cluster before any value flag. A call with
-    no event flag at all is `unknown`: gh's interactive menu could pick one."""
+def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
+    """(events, commented, helped) of `gh pr review` flags: `--approve`,
+    `--request-changes` or their short forms inside a cluster before any value
+    flag; `--help`/`-h` anywhere outside a value shows help."""
     found: set[str] = set()
-    commented = False
+    commented = helped = False
     k = 0
     while k < len(rest):
         tok = rest[k]
@@ -928,7 +933,9 @@ def _pr_review_event(rest: list[str]) -> str | None:
             k += 1
         elif tok.startswith("--"):
             name = tok.split("=", 1)[0]
-            if name == "--comment":
+            if name == "--help":
+                helped = True
+            elif name == "--comment":
                 commented = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
             elif name in ("--approve", "--request-changes"):
                 if "=" not in tok or tok.split("=", 1)[1] in GO_TRUE:
@@ -938,7 +945,9 @@ def _pr_review_event(rest: list[str]) -> str | None:
                 if ch in "bFR":
                     k += pos == len(tok) - 1
                     break
-                if ch == "c":
+                if ch == "h":
+                    helped = True
+                elif ch == "c":
                     value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
                     commented = value is None or value in GO_TRUE
                     if value is not None:
@@ -947,32 +956,62 @@ def _pr_review_event(rest: list[str]) -> str | None:
                     found.add("approve")
                 elif ch == "r":
                     found.add("request-changes")
+    return found, commented, helped
+
+
+def _pr_review_event(rest: list[str]) -> str | None:
+    """Event of `gh pr review` flags. Help posts nothing. A call with no
+    event flag at all is `unknown`: gh's interactive menu could pick one."""
+    found, commented, helped = _pr_review_scan(rest)
+    if helped:
+        return None
     if found:
         return found.pop() if len(found) == 1 else "unknown"
     return None if commented else "unknown"
 
 
 def _graphql_event(api: list[str], cwd: str) -> str | None:
-    """A graphql call that submits a review with an approval enum is
-    unpinnable: `unknown`. An enum only inside a body or search string is
-    not; a mutation whose text this cannot read still fails closed."""
+    """`unknown` for a graphql review mutation whose event is an approval enum
+    or cannot be read (an unreadable file, an `input` variable, a file value).
+    A read-only query, a non-review mutation, or a review mutation whose event
+    argument is explicitly another value is not an event, whatever its body or
+    search text says."""
     if not (graphql_query_from_file(api) or any("mutation" in a for a in api)):
         return None
     texts = list(api)
+    variables: dict[str, set[str]] = {}
+    opaque = False
+    for typed, key, value in api_fields(api):
+        variables.setdefault(key, set()).add("@file" if typed and value.startswith("@") else value)
     for path in draft_files(["api", *api]):
         state, text = read_text(path, cwd)
         if state != "text":
             return "unknown"
         texts.append(text)
         try:
-            texts.extend(_json_strings(json.loads(text)))
+            data = json.loads(text)
         except ValueError:
-            pass
+            continue
+        texts.extend(_json_strings(data))
+        opaque = opaque or (isinstance(data, dict) and not isinstance(data.get("query"), str))
+        if isinstance(data, dict) and isinstance(data.get("variables"), dict):
+            for key, value in data["variables"].items():
+                variables.setdefault(key, set()).add(value if isinstance(value, str) else "@file")
     if not any(GRAPHQL_EVENT_RE.search(t) for t in texts):
         return None
-    named = any(GRAPHQL_REVIEW_MUTATION_RE.search(t) or GRAPHQL_EVENT_LITERAL_RE.search(t) for t in texts)
-    visible = any("mutation" in t for t in texts)
-    return "unknown" if named or not visible else None
+    if opaque:
+        return "unknown"
+    queries = [GRAPHQL_NOISE_RE.sub(" ", t) for t in texts if "mutation" in t]
+    event_args = [a for q in queries for a in GRAPHQL_EVENT_ARG_RE.findall(q)]
+    if not (event_args or any(GRAPHQL_REVIEW_MUTATION_RE.search(q) for q in queries)):
+        return None
+    if not event_args or any(GRAPHQL_INPUT_VAR_RE.search(q) for q in queries):
+        return "unknown"
+    for arg in event_args:
+        values = variables.get(arg[1:], {"@file"}) if arg.startswith("$") else {arg}
+        if values & APPROVAL_ENUMS or "@file" in values:
+            return "unknown"
+    return None
 
 
 def _json_strings(node) -> list[str]:
@@ -986,10 +1025,14 @@ def _json_strings(node) -> list[str]:
     return []
 
 
-def repeated_api_flags(api: list[str]) -> bool:
-    """True when a gh api argv repeats --input or gives the method flag
-    different values, so the guard and gh could read different occurrences."""
-    inputs = sum(1 for t in api if t == "--input" or t.startswith("--input="))
+def repeated_input(api: list[str]) -> bool:
+    """True when a gh api argv repeats --input, so the guard and gh could read
+    different files."""
+    return sum(1 for t in api if t == "--input" or t.startswith("--input=")) > 1
+
+
+def api_methods(api: list[str]) -> set[str]:
+    """Every method a gh api argv names; gh uses the last one."""
     methods = set()
     for k, tok in enumerate(api):
         if tok in ("-X", "--method") and k + 1 < len(api):
@@ -998,7 +1041,7 @@ def repeated_api_flags(api: list[str]) -> bool:
             methods.add(tok.split("=", 1)[1].upper())
         elif tok.startswith("-X") and len(tok) > 2:
             methods.add(tok[2:].upper())
-    return inputs > 1 or len(methods) > 1
+    return methods
 
 
 def _api_review_event(api: list[str], cwd: str, owner: str, repo: str, cache: dict, hostile: bool) -> str | None:
@@ -1016,10 +1059,12 @@ def _api_review_event(api: list[str], cwd: str, owner: str, repo: str, cache: di
     api = filled_api
     if is_graphql_path(path):
         return _graphql_event(api, cwd)
+    if method == "GET":
+        return None
     if not REVIEW_EVENT_PATH.search(path):
-        return "unknown" if LOOSE_REVIEW_PATH.search(path) and method != "GET" else None
+        return "unknown" if LOOSE_REVIEW_PATH.search(path) else None
     if not hostile and path != "/".join(OWNER_REPO_VALUES.get(seg, seg) for seg in (raw_path or "").split("/")):
-        return "unknown" if method != "GET" else None
+        return "unknown"
     values = [
         "@file" if typed and value.startswith("@") else value
         for typed, key, value in api_fields(api) if key == "event"
@@ -1049,13 +1094,15 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
         api = normalize_api_args(args[i + 1:]) or args[i + 1:]
-        if repeated_api_flags(api):
+        if repeated_input(api):
             return "unknown"
         cache: dict = {}
         base = _api_review_event(api, cwd, "owner", "repo", cache, False)
         raw_method, raw_path, _host, has_field = parse_api(api)
+        # gh takes the last -X; a differing earlier one only matters when the call is an event.
+        mixed = len(api_methods(api)) > 1
         if (raw_method or ("POST" if has_field else "GET")) == "GET" or base == "unknown":
-            return base
+            return "unknown" if mixed and base is not None else base
         text = " ".join([raw_path or "", *api])
         kinds = {m.group(1) or m.group(2) for m in PLACEHOLDER_RE.finditer(text)} & {"owner", "repo"}
         owners = HOSTILE_NAMES if "owner" in kinds else ("owner",)
@@ -1064,10 +1111,8 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
             for repo in repos:
                 if _api_review_event(api, cwd, owner, repo, cache, True) != base:
                     return "unknown"
-        return base
+        return "unknown" if mixed and base is not None else base
     if tuple(args[k] for k in (i, j) if k < len(args)) == ("pr", "review"):
-        if args[-1:] in (["-h"], ["--help"]) and not args[-2].startswith("-"):
-            return None
         return _pr_review_event(args[j + 1:])
     return None
 
