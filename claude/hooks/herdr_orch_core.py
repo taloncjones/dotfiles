@@ -3565,6 +3565,47 @@ def apply_review_carry(rec, prior) -> None:
              "review_carry is written only by carry-review")
 
 
+REVIEW_DISPATCH_KEY = "review_dispatch_launch_id"
+
+
+def apply_review_dispatch(rec, prior, workers) -> None:
+    """Refuse a review-dispatched claim without a fresh launched review row.
+
+    A claim is a write that enters review-dispatched or moves the pin while in
+    it. The newest row must be a launched review at the pinned head whose
+    launch no earlier claim used and that is not retired. The key is
+    single-writer: inherited when omitted, refused when supplied changed."""
+    prior_rec = prior if isinstance(prior, dict) else {}
+    if REVIEW_DISPATCH_KEY not in rec:
+        if REVIEW_DISPATCH_KEY in prior_rec:
+            rec[REVIEW_DISPATCH_KEY] = prior_rec[REVIEW_DISPATCH_KEY]
+    else:
+        _require(REVIEW_DISPATCH_KEY in prior_rec
+                 and rec[REVIEW_DISPATCH_KEY] == prior_rec[REVIEW_DISPATCH_KEY],
+                 "review_dispatch_launch_id is written only by write-task")
+    if rec.get("status") != "review-dispatched":
+        return
+    if (prior_rec.get("status") == "review-dispatched"
+            and prior_rec.get("review_head_sha") == rec.get("review_head_sha")):
+        return
+    row = workers[-1] if workers else None
+    launch_id = row.get("launch_id") if isinstance(row, dict) else None
+    _require(isinstance(row, dict) and row.get("phase") == "review"
+             and row.get("status") == "launched"
+             and isinstance(launch_id, str) and bool(launch_id),
+             "review-dispatched needs the newest workers row to be a launched "
+             "review attempt")
+    pin = rec.get("review_head_sha")
+    _require(isinstance(pin, str) and pin == row.get("source_head_sha"),
+             "review_head_sha must equal the launched review's source_head_sha")
+    retired = rec.get(RETIRED_REVIEWS_KEY)
+    _require(launch_id != prior_rec.get(REVIEW_DISPATCH_KEY)
+             and not (isinstance(retired, list) and launch_id in retired),
+             "the newest review launch already backed a review-dispatched "
+             "write or is retired")
+    rec[REVIEW_DISPATCH_KEY] = launch_id
+
+
 def workspace_closed(task) -> bool:
     """True while close-idle's marker names the record's own workspace."""
     marker = task.get(WORKSPACE_CLOSED_KEY)
@@ -6741,6 +6782,7 @@ def _main(argv=None) -> int:
             else:
                 apply_retired_reviews(rec, prior, rec["workers"])
             apply_review_carry(rec, prior)
+            apply_review_dispatch(rec, prior, rec["workers"])
             apply_workspace_keys(rec, prior)
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
@@ -6768,6 +6810,7 @@ def _main(argv=None) -> int:
                  "a reset opens with no retired review launches")
         _require("reset_from" not in rec, "reset_from is set by the verb")
         _require(REVIEW_CARRY_KEY not in rec, "review_carry is written only by carry-review")
+        apply_review_dispatch(rec, PRIOR_ABSENT, [])
         for key in (WORKSPACE_CLOSED_KEY, WORKSPACE_ROOT_PANE_KEY):
             _require(key not in rec, f"{key} is written only by close-idle and reopen")
         with _fenced_scoped(ns) as (rd, base):

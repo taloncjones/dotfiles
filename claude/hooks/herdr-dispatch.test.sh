@@ -5443,13 +5443,28 @@ def run_gate(fx, phase, focus, **kw):
         herdr_cli=str(fx.bin), env=env, **kw)
 
 
+def review_launch(fx, launch_id, calls=None, entry=None):
+    """A launch double that appends the launched review row the real launch writes."""
+    def double(**kw):
+        if calls is not None:
+            calls.append(entry if entry is not None else ("launch", kw))
+        task = json.loads(fx.task_file.read_text())
+        task["workers"].append({"phase": "review", "launch_id": launch_id, "runtime": "claude",
+                                "workspace_id": kw["workspace_id"], "pane_id": kw["pane_id"],
+                                "source_head_sha": core.repository_context(Path(kw["cwd"]))["head"],
+                                "status": "launched"})
+        fx.task_file.write_text(json.dumps(task))
+        return {"status": "launched", "launch_id": launch_id}
+    return double
+
+
 def test_dispatch_gate_review_launches_read_only_and_records_the_pin():
     fx = Fixture()
     calls = []
     originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
     herdr_dispatch.sweep = lambda **kw: calls.append(("sweep", kw["workspace_id"])) or {"status": "swept", "rows": []}
     herdr_dispatch._gate_split = lambda cli, pane, wt, env: calls.append(("split", pane)) or "w1:p9"
-    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "rev-L1"}
+    herdr_dispatch.launch = review_launch(fx, "rev-L1", calls)
     try:
         head, focus = review_ready(fx)
         out = run_gate(fx, "review", focus)
@@ -5616,7 +5631,7 @@ def test_dispatch_gate_review_launch_failure_writes_nothing_and_a_rerun_dispatch
         assert out["pane_id"] == "w1:p9", out
         assert fx.task_file.read_text() == before
         assert not (fx.rd / "workspaces" / "w1.json").exists()
-        herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "rev-L2"}
+        herdr_dispatch.launch = review_launch(fx, "rev-L2")
         again = run_gate(fx, "review", focus)
         assert again["status"] == "dispatched" and again["launch_id"] == "rev-L2", again
     finally:
@@ -5630,7 +5645,7 @@ def test_dispatch_gate_review_names_the_jira_writeback_for_a_jira_task():
     originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
     herdr_dispatch.sweep = lambda **kw: {"status": "swept", "rows": []}
     herdr_dispatch._gate_split = lambda *a: "w1:p9"
-    herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": "rev-L3"}
+    herdr_dispatch.launch = review_launch(fx, "rev-L3")
     try:
         head, focus = review_ready(fx)
         task = json.loads(fx.task_file.read_text())
@@ -5964,7 +5979,9 @@ def deadline_stop(fx):
 
 def gate_fakes(fx, launch_id="rev-L9"):
     herdr_dispatch._gate_split = lambda *a: "w1:p9"
-    herdr_dispatch.launch = lambda **kw: {"status": "launched", "launch_id": launch_id}
+    review = review_launch(fx, launch_id)
+    herdr_dispatch.launch = lambda **kw: review(**kw) if kw["phase"] == "review" else {
+        "status": "launched", "launch_id": launch_id}
 
 
 def expect_refusal(fx, phase, focus, text, **kw):
@@ -6975,7 +6992,7 @@ def test_review_gate_reopens_a_closed_task_workspace_before_splitting():
     originals = {n: getattr(herdr_dispatch, n) for n in GATE_FNS}
     herdr_dispatch.sweep = lambda **kw: calls.append(("sweep", kw["workspace_id"])) or {"status": "swept", "rows": []}
     herdr_dispatch._gate_split = lambda cli, pane, wt, env: calls.append(("split", pane)) or "w7:p2"
-    herdr_dispatch.launch = lambda **kw: calls.append(("launch", kw)) or {"status": "launched", "launch_id": "rev-L1"}
+    herdr_dispatch.launch = review_launch(fx, "rev-L1", calls)
     try:
         head, focus = review_ready(fx)
         write_workspaces(fx, [])
