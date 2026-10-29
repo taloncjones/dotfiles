@@ -1775,7 +1775,14 @@ for a, cwd, want in [
     (["api", "-X", "POST", "%2Fgraphql", "-f", "query=mutation{x}"], d, "unknown"),
     (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], d, "unknown"),
     (["api", "-X", "PUT", "user/starred/o/r", "-f", "x=y"], gd, None),
-    (["api", "-X", "PATCH", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=abc"], gd, "unknown"),
+    (["api", "-X", "PATCH", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=abc"], gd, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/issues%2F123"], d, None),
+    (["api", "-X", "PATCH", "repos/o/r/git/refs/heads/pulls%2F5", "-f", "sha=a"], d, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/fix%2Fissues%2F42"], d, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/feat%2Freactions"], d, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/feat%2Freplies"], d, None),
+    (["api", "-X", "PUT", "repos/o/r/contents/docs%2Fissues%2F12", "-f", "message=m", "-f", "content=Zg=="], d, None),
+    (["api", "-X", "POST", "repos/o/r%2Fpulls/5/reviews", *rev], d, "unknown"),
 ]:
     try:
         got = g.review_event(a, cwd)

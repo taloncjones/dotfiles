@@ -708,20 +708,23 @@ HOSTILE_NAMES = ("pulls", "reviews", "graphql", "events", "comments", "5", "..")
 def current_branch(cwd: str) -> str | None:
     """The branch gh substitutes for `{branch}`: `git symbolic-ref --quiet HEAD`
     minus a leading `refs/heads/` (a HEAD outside it keeps its full ref). None
-    when git fails or the name is not UTF-8."""
+    when git fails; a non-UTF-8 byte comes back percent-encoded, as gh sends it."""
     try:
         done = subprocess.run(["git", "symbolic-ref", "--quiet", "HEAD"], cwd=cwd, capture_output=True, timeout=10)
-        name = done.stdout.decode("utf-8").rstrip("\n")
-    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        name = done.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
+    except (OSError, subprocess.SubprocessError):
         return None
     name = name.removeprefix("refs/heads/")
-    return name if done.returncode == 0 and name else None
+    if done.returncode != 0 or not name:
+        return None
+    # gh sends a non-UTF-8 byte percent-encoded
+    return re.sub("[\udc80-\udcff]", lambda m: "%%%02X" % (ord(m.group()) - 0xDC00), name)
 
 
 def fill_placeholders(text: str, cwd: str, owner: str = "owner", repo: str = "repo", cache: dict | None = None) -> str | None:
     """`text` as gh api expands it: {owner}/{repo} become the given names and
     {branch} the current branch, which may hold slashes. None when a branch
-    token cannot be resolved (detached HEAD, git error, non-UTF-8 name)."""
+    token cannot be resolved (detached HEAD, git error)."""
     if not PLACEHOLDER_RE.search(text):
         return text
     cache = {} if cache is None else cache
@@ -789,8 +792,8 @@ def normalize_endpoint(raw: str) -> str | None:
 def review_endpoint(raw: str, collapse_dots: bool = False) -> str | None:
     """Percent-decoded canonical endpoint for the review check, or None when
     it cannot be read (bad escape, backslash or dot segment, leftover brace,
-    or a decoded slash in a path that could be a review, graphql or comment
-    call). `raw` is already placeholder-expanded. `collapse_dots` resolves
+    or a decoded slash in a graphql path or a pulls or issues path that could
+    be a review, comment or body call). `raw` is already placeholder-expanded. `collapse_dots` resolves
     dot segments lexically instead of refusing them."""
     path = re.split(r"[?#]", API_URL_PREFIX.sub("", raw, count=1), maxsplit=1)[0]
     if "\\" in path or "{" in path or re.search(r"%(?![0-9A-Fa-f]{2})", path):
@@ -798,7 +801,7 @@ def review_endpoint(raw: str, collapse_dots: bool = False) -> str | None:
     segments, slash = [], False
     for seg in path.split("/"):
         try:
-            seg = unquote(seg, errors="strict")
+            seg = unquote(seg, errors="surrogateescape")
         except UnicodeDecodeError:
             return None
         if "\\" in seg:
@@ -812,11 +815,28 @@ def review_endpoint(raw: str, collapse_dots: bool = False) -> str | None:
             return None
         segments.append(seg)
     path = "/".join(seg for seg in segments if seg)
-    if slash and any(
-        pat.search(path) for pat in (LOOSE_REVIEW_PATH, REVIEW_EVENT_PATH, REPLY_PATH, COMMENT_PATH, ISSUE_COMMENT_PATH, BODY_PATH)
-    ) or (slash and is_graphql_path(path)):
+    if slash and (is_graphql_path(path) or (
+        _route_tail_is_pulls_or_issues(path) and any(
+            pat.search(path) for pat in (LOOSE_REVIEW_PATH, REVIEW_EVENT_PATH, REPLY_PATH, COMMENT_PATH, ISSUE_COMMENT_PATH, BODY_PATH)
+        )
+    )):
         return None
     return path
+
+
+def _route_tail_is_pulls_or_issues(path: str) -> bool:
+    """True when the decoded path may route to a pulls or issues endpoint: the
+    part after `repos/o/r/` (or `repositories/id/`) starts there, or the path is
+    not repo-shaped. A ref or contents name that merely ends like a review path
+    is false."""
+    parts = path.split("/")
+    if parts[0] == "repos" and len(parts) >= 3:
+        tail = parts[3:]
+    elif parts[0] == "repositories" and len(parts) >= 2:
+        tail = parts[2:]
+    else:
+        return True
+    return bool(tail) and tail[0] in ("pulls", "issues")
 
 
 def classify_api(args: list[str]) -> str:

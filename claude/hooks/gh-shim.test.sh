@@ -1005,6 +1005,31 @@ else
     fail "RV36 the shim refuses an encoded slash in an ordinary ref delete (rc=$rc err=$(cat "$T/err"))"
 fi
 
+for ep in 'git/refs/heads/issues%2F123' 'git/refs/heads/pulls%2F5' 'git/refs/heads/fix%2Fissues%2F42' \
+    'git/refs/heads/feat%2Freactions' 'git/refs/heads/feat%2Freplies'; do
+    fresh_gate
+    gh api -X DELETE "repos/o/r/$ep" >"$T/out" 2>"$T/err"; rc=$?
+    if ! grep -q "must be the reviews API call" "$T/err"; then
+        pass "RV36 the shim does not refuse an encoded slash in a ref named like a review path ($ep)"
+    else
+        fail "RV36 the shim refuses an encoded slash in a ref named like a review path ($ep) (rc=$rc err=$(cat "$T/err"))"
+    fi
+done
+fresh_gate
+gh api -X PUT 'repos/o/r/contents/docs%2Fissues%2F12' -f message=m -f content=Zg== >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV36 the shim does not refuse an encoded slash in a contents path named like an issue"
+else
+    fail "RV36 the shim refuses an encoded slash in a contents path named like an issue (rc=$rc err=$(cat "$T/err"))"
+fi
+fresh_gate
+gh api -X POST 'repos/o/r/issues/5%2Fcomments' -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV36 the shim still refuses an encoded slash inside an issue comment path"
+else
+    fail "RV36 the shim lets an encoded slash inside an issue comment path through (rc=$rc err=$(cat "$T/err"))"
+fi
+
 git init -q "$T/br-bytes" && printf 'ref: refs/heads/caf\351-\377\n' >"$T/br-bytes/.git/HEAD"
 fresh_gate
 (cd "$T/br-bytes" && gh api -X PUT 'user/starred/o/r' >"$T/out" 2>"$T/err"); rc=$?
@@ -1012,6 +1037,14 @@ if ! grep -q "internal error" "$T/err" && ! grep -q "must be the reviews API cal
     pass "RV37 the shim runs a call with no branch token on a non-UTF-8 branch"
 else
     fail "RV37 the shim crashes or refuses a call with no branch token on a non-UTF-8 branch (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-bytes" && gh api -X PATCH 'repos/o/r/git/refs/heads/{branch}' -f sha=a >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "internal error" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV37 the shim runs a {branch} write on a non-UTF-8 branch"
+else
+    fail "RV37 the shim crashes or refuses a {branch} write on a non-UTF-8 branch (rc=$rc err=$(cat "$T/err"))"
 fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
