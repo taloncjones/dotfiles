@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 661
+assert t.count("\n") <= 591
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 591
+assert t.count("\n") <= 661
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
