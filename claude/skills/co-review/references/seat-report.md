@@ -30,7 +30,7 @@ object with exactly these keys:
 - Every architecture axis and checklist item carries a nonempty string. Use
   the exact keys from the policy.
 - Run at least one command that exercises the changed behavior (a targeted
-  test, the owning suite, or an executable probe). Record each command you
+  test case or an executable probe). Record each command you
   ran in `tests` with its exit code and a one-line result. A failing command
   is still evidence; list it. Never list a command you did not run.
 - Small tier: when the prompt has a `## Small tier` section, it replaces the
@@ -42,6 +42,14 @@ object with exactly these keys:
 - Run commands in the foreground. Do not start background tasks or monitors.
   The final message must be the complete report; if anything arrives after
   it, repeat the whole report including the block.
+- Outside the small tier, do not rerun a test suite that a passing check in
+  the `## CI evidence` section ran at the reviewed head. Confirm from the
+  frozen tree's CI configuration that the check runs that suite,
+  cite the check in `coverage.checklist.functional_behavior`, and spend your
+  commands on targeted probes of the changed behavior, such as one case copied
+  from the owning suite. With no such check, run the owning suite only when you
+  expect it to finish within five minutes; otherwise run the cases that touch
+  the change and name the cases you skipped in `functional_behavior`.
 - If no command could run, leave `tests` empty and say why in
   `coverage.checklist.functional_behavior`. The gate then records that
   coverage as incomplete.
