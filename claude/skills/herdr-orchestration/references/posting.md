@@ -15,7 +15,10 @@ gh <args>`. A Jira comment has no draft.
    (draft 9cb85c49)`, a skip option such as `Leave PR #1 open (skip draft
    9cb85c49)`. The recommended one comes first, with ` (Recommended)`.
    The verb rule: a post label starts with `Post` followed by a space, or with `(` then
-   `Post`. Any other leading word before `post draft <hash>` (`Hold off on`, `Cancel`,
+   `Post`; a pinned approving review starts with `Approve` and a request-changes review
+   with `Request changes` (next section). The verb must name the event the draft
+   carries: a `Post` label never approves a review draft, and an `Approve` label never
+   approves a comment draft. Any other leading word before `post draft <hash>` (`Hold off on`, `Cancel`,
    `Decline to`, `Maybe`) is a refusal. `Post:`, `Post,` and `Post` plus a dash fail the
    space rule. A skip is a leading `Skip` or `skip draft <hash>`. A `skip` elsewhere
    in the label does not count. A post label that carries a negation (`not`, `no`, `never`, `nothing`, `without`,
@@ -49,3 +52,76 @@ When a post answer prints no `post gate:` line, the answer hook
 is not active in this session. Do not ask again. Try the post once. If the
 shim refuses it, tell the owner to run `update --ai` and restart Claude, and
 leave the draft in the report.
+
+## Review events on another author's PR
+
+When a co-review finishes on a PR this account did not author, in a work or
+personal repository, the owner can leave a GitHub review whose event matches
+the verdict instead of a plain comment. In a personal repository the shim posts
+a correctly pinned review without an owner answer, as it does for other posts
+there. `gh pr review --approve` approves
+whatever head is live when it runs, so the draft guard refuses it; the review
+goes through the reviews API with the gated head pinned.
+
+The guard also refuses these forms, because gh could post an unpinned event:
+
+- `gh pr review` with no event flag. A false `--comment` value (`--comment=false`, `-c=0`) counts as no flag. Repeated `--comment` flags are last-wins, as in gh.
+- A `gh api` write whose endpoint or `-F`/`--field` values cannot be read as a reviews call. The guard expands gh's placeholders over the whole endpoint (scheme and host included) and the value of every `-F`/`--field` word (not its key, and not `-f`). `{branch}`/`:branch` is the output of `git symbolic-ref --quiet HEAD` in the call's cwd minus a leading `refs/heads/`, as gh does it; a HEAD outside `refs/heads` keeps its full ref, and a detached HEAD or git error leaves the token unresolved (a non-UTF-8 byte is percent-encoded as gh sends it), which refuses a write that uses it and does not affect calls without the token. The `:` forms end at an ASCII word boundary, as in gh's Go regex. `{owner}`/`{repo}` are not resolved: gh takes them from `GH_REPO` or the git remote, which the caller controls, so for a write the guard tries each of `pulls`, `reviews`, `graphql`, `events`, `comments`, `5` and `..` for every owner and repo token and refuses the call if any try reads differently from the plain read (a review event, a graphql mutation or an unreadable path). It then classifies the expanded text, so `repos/{branch}` on a branch named `o/r/pulls/5/reviews` is a reviews write, and a graphql approval enum hidden in a `-F` value is seen. Also unreadable: a bad `%` escape, a backslash or dot segment, a leftover `{`, or an encoded slash (`%2F`) in a graphql path or in a path whose part after `repos/<owner>/<repo>/` starts with `pulls` or `issues` and ends like a reviews, comment or body call (`issues/5%2Fcomments`). Ordinary calls run: `user/starred/{owner}/{repo}`, `orgs/{owner}/repos`, `repos/{owner}/{repo}/issues/5/comments`, `branches/{branch}/protection`, `git/refs/heads/{branch}`, `git/refs/heads/feat%2Fx`, `git/refs/heads/issues%2F123`, `contents/docs%2Fissues%2F12`, `issues/5/labels/needs%20review`; an encoded reviews path (`pulls/5/review%73`) is refused. A reviews call through whole-segment `{owner}`/`{repo}` tokens still needs the `commit_id` pin; `{owner}x` or a `{branch}` that changes the path is refused.
+- `gh pr review` with `--help` or `-h` anywhere (outside a flag value) is a read. `--approve=false` and `--request-changes=false` count as absent, like `--comment=false`. A graphql call is an event only when it is a review mutation (`addPullRequestReview`, `submitPullRequestReview` and variants) whose `event` argument, read outside strings and comments and through its variable, is an approval enum or cannot be read (an `input` variable, an `@file` value, a `--input` JSON with no `query`). Approval words in a body, a search string, a read-only query or another mutation such as `addComment` are not an event, the same for `--input`, `-F query=@file` and `-f query=`. The endpoint is graphql only when the whole path is `graphql`, `api/graphql` or `api/v3/graphql` (any case), so `git/refs/heads/feature%2Fgraphql` and `contents/graphql` run. `-X GET` on a reviews path is a read. A repeated `-X` is last-wins as in gh and refused only when the call is a review event.
+
+Before the prompt, read the live head and this account's reviews:
+
+```bash
+LIVE=$(gh pr view "$PR" --repo "$PR_REPO" --json headRefOid --jq .headRefOid)
+ME=$(gh api user --jq .login)
+gh api --paginate "repos/$PR_REPO/pulls/$PR/reviews" --jq '.[] | select(.user.login == "'"$ME"'" and .commit_id == "'"$LIVE"'") | .state'
+```
+
+Offer an event option only when `$LIVE` equals the gated head and the query
+lists no `APPROVED` row (APPROVE verdict) or `CHANGES_REQUESTED` row (CHANGES
+verdict). Otherwise ask as for any comment: the comment draft and a skip option.
+
+Register two drafts with the same body file, the comment and the review:
+
+```bash
+python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --repo "$PR_REPO" --body-file "$RUN_DIR/marker.md"
+python3 ~/.claude/hooks/pr_post_guard.py draft -- gh api -X POST "repos/$PR_REPO/pulls/$PR/reviews" -f commit_id=<gated head> -f event=APPROVE -F body=@"$RUN_DIR/marker.md"
+```
+
+Use `event=REQUEST_CHANGES` for a CHANGES verdict. Registration refuses any
+other approving or request-changes shape: `gh pr review --approve`, graphql,
+the pending-review events path, or a `commit_id` that is not 40 hex characters.
+
+Ask one single-select question with the body in it. `<head7>` is the first
+seven characters of the gated head (an eight-character id reads as a second
+draft hash). Options for an APPROVE verdict, in order:
+
+1. `Approve #<n> at <head7> with this text (draft <review hash>)`, with ` (Recommended)`
+2. `Post as a comment on #<n> (draft <comment hash>)`
+3. `Hold the review on #<n>`
+
+Options for a CHANGES verdict, in order:
+
+1. `Post as a comment on #<n> (draft <comment hash>)`, with ` (Recommended)`
+2. `Request changes on #<n> at <head7> with this text (draft <review hash>)`
+3. `Hold the review on #<n>`
+
+The request-changes option's description says it blocks the PR's merge until
+the review is dismissed; the label cannot, because the hedge rule refuses
+`until`. The hold option names no draft: both drafts stay pending and are
+pruned after 24 hours.
+
+Choosing an option approves its draft and dismisses the other one; the guard
+allows one question to name two drafts only when their recorded texts are equal.
+
+Run the approved draft's exact argv. The gh shim reads the live head again at
+that moment and refuses the call when it differs from `commit_id`; the draft
+stays approved. Re-gate the new head and register new drafts; do not retry the
+old one.
+
+If the review call fails after the shim let it through, read the reviews query
+above with `$ME` and the gated head. Register and ask again only when it lists
+no row for the event. If registering the second draft fails, run that
+registration again; it is idempotent by digest.
+
+A posted review is not a marker comment: skip the supersede step.

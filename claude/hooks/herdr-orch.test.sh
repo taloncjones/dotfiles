@@ -13201,6 +13201,26 @@ assert "AskUserQuestion" in ops
 assert "(draft <hash>)" in layout and "(skip draft <hash>)" in layout
 PY
 
+check "posting docs pin the review event options and the moved-head refusal" <<'PY'
+import re
+posting = " ".join(open("claude/skills/herdr-orchestration/references/posting.md").read().split())
+cc = " ".join(open("claude/skills/co-review/SKILL.md").read().split())
+cx = " ".join(open("codex/skills/co-review/SKILL.md").read().split())
+for label in ("Approve #<n> at <head7> with this text (draft <review hash>)",
+              "Post as a comment on #<n> (draft <comment hash>)",
+              "Request changes on #<n> at <head7> with this text (draft <review hash>)",
+              "Hold the review on #<n>"):
+    assert label in posting, label
+for token in ("Review events on another author", "commit_id=<gated head>", "pulls/$PR/reviews",
+              "headRefOid", "refuses the call when it differs from `commit_id`",
+              "blocks the PR's merge until the review is dismissed", "do not retry the old one"):
+    assert token in posting, token
+for name, text in (("co-review", cc), ("codex co-review", cx)):
+    assert "Review events on another author" in text and "commit_id" in text, name
+    assert "refuses the call when the head moved" in text, name
+assert "leave both drafts for the director" in cx
+PY
+
 check "brief template keeps the turn alive on long runs" <<'PY'
 import sys
 t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()

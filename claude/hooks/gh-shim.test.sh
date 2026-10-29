@@ -28,6 +28,12 @@ cat >"$T/fake/gh" <<'FAKE'
 # apart, so FAKE_LOG still counts only the commands the shim execs. A read
 # made with a TTY-forcing env gets colored junk, as real gh would print.
 case "$*" in
+    "api repos/"*"/pulls/5"|"api repos/"*"/pulls/5 --hostname "*)
+        printf '%s\n' "$*" >>"$FAKE_GETLOG"
+        [ "${FAKE_HEAD_RC:-0}" = 0 ] || exit "$FAKE_HEAD_RC"
+        printf '{"head":{"sha":"%s"}}\n' "$FAKE_PR_HEAD"
+        exit 0
+        ;;
     "pr view "*"--json author"*|"pr view --json author"*)
         printf '%s\n' "$*" >>"$FAKE_GETLOG"
         [ "${FAKE_PR_RC:-0}" = 0 ] || exit "$FAKE_PR_RC"
@@ -66,7 +72,8 @@ export DOTFILES_REAL_GH="$T/fake/gh" CLAUDE_CODE_SESSION_ID=s1 HERDR_ENV=1
 export FAKE_LOG="$T/log"
 # The shim reads a post target's author; FAKE_PR_AUTHOR=me marks it our own.
 export FAKE_PR_AUTHOR=rev
-unset CLAUDE_PID FAKE_PR_RC FAKE_PR_HOST
+unset CLAUDE_PID FAKE_PR_RC FAKE_PR_HOST FAKE_HEAD_RC
+export FAKE_PR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MARK='<!-- co-review: sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb base_ref=main verdict=CHANGES round=1 -->'
 export FAKE_GETLOG="$T/getlog" FAKE_COMMENT="{\"user\":{\"login\":\"me\"},\"body\":\"$MARK\\nVerdict: CHANGES\"}"
 unset GH_FORCE_TTY CLICOLOR_FORCE
@@ -88,17 +95,17 @@ fresh_gate() {
     : >"$FAKE_LOG"
 }
 
-# approve HASH: the real hook's PostToolUse handler answers "Post draft HASH"
-# for s1, with the draft's registered text in the question
+# approve HASH [LABEL]: the real hook's PostToolUse handler answers LABEL
+# (default "Post draft HASH") for s1, with the draft's registered text in the question
 approve() {
-    AP_HASH="$1" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
+    AP_HASH="$1" AP_LABEL="${2-}" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
 import json, os
 d, h = os.environ["DOTFILES_POST_GATE_DIR"], os.environ["AP_HASH"]
 try:
     text = json.load(open(os.path.join(d, f"s1.draft-{h}.pending"))).get("text") or ""
 except (OSError, ValueError, AttributeError):
     text = ""
-q, label = "Post this draft?\n" + text, f"Post draft {h}"
+q, label = "Post this draft?\n" + text, os.environ.get("AP_LABEL") or f"Post draft {h}"
 qs = [{"question": q, "multiSelect": False,
        "options": [{"label": label, "description": "posts it"},
                    {"label": f"Skip draft {h}", "description": "skips it"}]}]
@@ -656,6 +663,446 @@ for sh in bash "zsh -f"; do
     bypass "$sh" "gh api graphql -F query=@m.graphql" 'api graphql -F query=@m.graphql'
     bypass "$sh" "gh api graphql --input m.json" 'api graphql --input m.json'
 done
+
+# --- RV: approve and request-changes reviews are pinned to the live head ------
+
+printf 'review text' >"$T/work/rv.md"
+HEAD_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+HEAD_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+RV_LABEL_APPROVE='Approve #5 at aaaaaaa with this text (draft %s)'
+RV_LABEL_CHANGES='Request changes on #5 at aaaaaaa with this text (draft %s)'
+
+# rv_run EVENT [COMMIT]: the pinned reviews call as the shim sees it
+rv_run() {
+    gh api -X POST repos/o/r/pulls/5/reviews -f "commit_id=${2:-$HEAD_A}" -f "event=$1" -F body=@rv.md >"$T/out" 2>"$T/err"
+}
+
+fresh_gate
+hc=$(draft pr comment 5 --body-file rv.md)
+approve "$hc"
+gh pr review 5 --approve --body-file rv.md >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$hc.approved" ]; then
+    pass "RV1 a comment-approved draft does not cover gh pr review --approve with the same text"
+else
+    fail "RV1 a comment-approved draft does not cover gh pr review --approve (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+hc=$(draft pr comment 5 --body-file rv.md)
+approve "$hc"
+rv_run APPROVE; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$hc.approved" ]; then
+    pass "RV2 a comment-approved draft does not cover a reviews API call with event=APPROVE"
+else
+    fail "RV2 a comment-approved draft does not cover a reviews API call (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+hr=$(draft api -X POST repos/o/r/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -F body=@rv.md)
+approve "$hr" "$(printf "$RV_LABEL_APPROVE" "$hr")"
+rv_run APPROVE; rc=$?
+if [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$hr.spent" ]; then
+    pass "RV3 an approve-approved draft posts when commit_id is the live head"
+else
+    fail "RV3 an approve-approved draft posts at the live head (rc=$rc log=$(log_lines) hr=$hr err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+hr=$(draft api -X POST repos/o/r/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -F body=@rv.md)
+approve "$hr" "$(printf "$RV_LABEL_APPROVE" "$hr")"
+(FAKE_PR_HEAD=$HEAD_B; export FAKE_PR_HEAD; rv_run APPROVE); rc1=$?
+moved_err=$(cat "$T/err")
+rv_run APPROVE; rc2=$?
+if [ "$rc1" = 1 ] && [ "$rc2" = 0 ] && [ "$(log_lines)" = 1 ] && printf '%s' "$moved_err" | grep -q "head moved" \
+    && printf '%s' "$moved_err" | grep -q "$HEAD_B"; then
+    pass "RV4 a moved head refuses the approve review and leaves the draft approved"
+else
+    fail "RV4 a moved head refuses the approve review (rc=$rc1/$rc2 log=$(log_lines) err=$moved_err)"
+fi
+
+fresh_gate
+hr=$(draft api -X POST repos/o/r/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -F body=@rv.md)
+approve "$hr" "$(printf "$RV_LABEL_APPROVE" "$hr")"
+(FAKE_HEAD_RC=1; export FAKE_HEAD_RC; rv_run APPROVE); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "could not read the live head" "$T/err" \
+    && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$hr.approved" ]; then
+    pass "RV5 a failed head read refuses the event review"
+else
+    fail "RV5 a failed head read refuses the event review (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls/5/reviews?event=APPROVE" -f "commit_id=$HEAD_A" -F body=@rv.md >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV8 a reviews call with a query string is refused"
+else
+    fail "RV8 a reviews call with a query string is refused (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+printf '{"event":"COMMENT","body":"x"}' >"$T/c.json"; printf '{"event":"APPROVE","body":"x"}' >"$T/a.json"
+gh api -X POST repos/o/r/pulls/5/reviews --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV11 the shim refuses a reviews call with two --input files"
+else
+    fail "RV11 the shim refuses a reviews call with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls/%35/reviews" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV12 the shim refuses a reviews call with an encoded PR number"
+else
+    fail "RV12 the shim refuses a reviews call with an encoded PR number (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$HOME/Git/personal/repo" && FAKE_PR_HEAD=$HEAD_B gh api -X POST repos/me/repo/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >/dev/null 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "head moved" "$T/err"; then
+    pass "RV6 a personal repository refuses an event review on a moved head"
+else
+    fail "RV6 a personal repository refuses an event review on a moved head (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$HOME/Git/personal/repo" && gh pr review 5 --request-changes -b x >/dev/null 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "commit_id" "$T/err"; then
+    pass "RV7 gh pr review --request-changes is refused in a personal repository"
+else
+    fail "RV7 gh pr review --request-changes is refused in a personal repository (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+hrc=$(draft api -X POST repos/o/r/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=REQUEST_CHANGES -F body=@rv.md)
+approve "$hrc" "$(printf "$RV_LABEL_CHANGES" "$hrc")"
+rv_run APPROVE; rc1=$?
+rv_run REQUEST_CHANGES; rc2=$?
+if [ "$rc1" = 1 ] && [ "$rc2" = 0 ] && [ "$(log_lines)" = 1 ] && grep -q "REQUEST_CHANGES" "$FAKE_LOG"; then
+    pass "RV8b a request-changes-approved draft covers only its REQUEST_CHANGES call"
+else
+    fail "RV8b a request-changes-approved draft covers only its call (rc=$rc1/$rc2 log=$(cat "$FAKE_LOG"))"
+fi
+
+fresh_gate
+hr=$(draft api -X POST repos/o/r/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -F body=@rv.md)
+approve "$hr" "$(printf "$RV_LABEL_APPROVE" "$hr")"
+(FAKE_PR_HEAD=$HEAD_B; export FAKE_PR_HEAD; rv_run APPROVE "$HEAD_B"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$hr.approved" ]; then
+    pass "RV9 an approve-approved draft does not cover the same call with another commit_id"
+else
+    fail "RV9 an approve-approved draft does not cover another commit_id (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST repos/o/r/pulls/5/reviews/9/events -f event=APPROVE -f body=x >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "commit_id" "$T/err"; then
+    pass "RV10 the shim refuses a reviews events call carrying APPROVE"
+else
+    fail "RV10 the shim refuses a reviews events call carrying APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh pr review 5 >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q -- "--comment" "$T/err"; then
+    pass "RV16 the shim refuses a bare gh pr review with no event flag"
+else
+    fail "RV16 the shim refuses a bare gh pr review with no event flag (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$HOME/Git/personal/repo" && gh pr review 5 >/dev/null 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q -- "--comment" "$T/err"; then
+    pass "RV17 a personal repository refuses a bare gh pr review with no event flag"
+else
+    fail "RV17 a personal repository refuses a bare gh pr review (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api graphql --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV13 the shim refuses graphql with two --input files"
+else
+    fail "RV13 the shim refuses graphql with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api https://api.github.com/graphql -f "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV14 the shim refuses a full-URL graphql mutation naming APPROVE"
+else
+    fail "RV14 the shim refuses a full-URL graphql mutation naming APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls/5/reviews/" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV15 the shim refuses a reviews call with a trailing slash"
+else
+    fail "RV15 the shim refuses a reviews call with a trailing slash (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls//5/reviews" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV20 the shim refuses a reviews call with a doubled slash"
+else
+    fail "RV20 the shim refuses a reviews call with a doubled slash (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST repos/o/r/issues/5/comments --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV21 the shim refuses an issue comment with two --input files"
+else
+    fail "RV21 the shim refuses an issue comment with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api GraphQL -f "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV18 the shim refuses a mixed-case GraphQL mutation naming APPROVE"
+else
+    fail "RV18 the shim refuses a mixed-case GraphQL mutation naming APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api api/v3/graphql -f "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV19 the shim refuses an api/v3/graphql mutation naming APPROVE"
+else
+    fail "RV19 the shim refuses an api/v3/graphql mutation naming APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh pr review 5 --comment=false >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV22 the shim refuses gh pr review --comment=false as a review with no event flag"
+else
+    fail "RV22 the shim refuses gh pr review --comment=false (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh pr review 5 --comment=true -b x >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV23 the shim treats gh pr review --comment=true as a comment, not a bare review"
+else
+    fail "RV23 the shim passes gh pr review --comment=true (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/o/r/pulls/5/{branch}" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV24 the shim refuses a write through a {branch} endpoint placeholder"
+else
+    fail "RV24 the shim refuses a write through a {branch} endpoint placeholder (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api "repos/{owner}/{repo}/issues/5/comments" -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV25 the shim does not refuse an issue comment written through owner and repo placeholders"
+else
+    fail "RV25 the shim refuses an issue comment through placeholders (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST "repos/{branch}" -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV26 the shim refuses repos/{branch} carrying event=APPROVE"
+else
+    fail "RV26 the shim refuses repos/{branch} carrying event=APPROVE (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+# {branch} resolves through git in the call's cwd, so each row runs in a repository on a named branch.
+branch_repo() {
+    git init -q "$T/br-$1" && git -C "$T/br-$1" symbolic-ref HEAD "refs/heads/$2"
+}
+branch_repo plain feature
+branch_repo host api.github.com/repos/o/r/pulls/5/reviews
+branch_repo unicode 'o/r/pulls/5/reviews#'
+branch_repo enum APPROVE
+
+fresh_gate
+(cd "$T/br-plain" && gh api -X PATCH "repos/{owner}/{repo}/git/refs/heads/{branch}" -f sha=abc >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV27 the shim does not refuse an ordinary {branch} ref write"
+else
+    fail "RV27 the shim refuses an ordinary {branch} ref write (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-host" && gh api -X POST 'https://{branch}' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV28 the shim refuses a review whose URL host is a {branch} placeholder"
+else
+    fail "RV28 the shim refuses a review whose URL host is a {branch} placeholder (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-unicode" && gh api -X POST 'repos/:branch'$'\303\251' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV29 the shim refuses a review through :branch followed by a non-ASCII letter"
+else
+    fail "RV29 the shim refuses a review through :branch followed by a non-ASCII letter (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-enum" && gh api graphql -f 'query=mutation($e: PullRequestReviewEvent!){ addPullRequestReview(input:{pullRequestId:"x", event:$e}){id} }' -F 'e={branch}' >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV30 the shim refuses a graphql approval hidden in a -F {branch} value"
+else
+    fail "RV30 the shim refuses a graphql approval hidden in a -F {branch} value (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-plain" && gh api -X PUT 'user/starred/{owner}/{repo}' >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV31 the shim does not refuse exact {owner}/{repo} outside a repos prefix"
+else
+    fail "RV31 the shim refuses exact {owner}/{repo} outside a repos prefix (rc=$rc err=$(cat "$T/err"))"
+fi
+
+# A real owner or repo name can equal a path word, so the shim refuses a write the expansion could turn into a review.
+fresh_gate
+gh api -X POST 'repos/o/r/pulls/5/{repo}' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV32 the shim refuses a review reached through a {repo} that could name reviews"
+else
+    fail "RV32 the shim refuses a review reached through a {repo} that could name reviews (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api '{repo}' -f 'query=mutation{addPullRequestReview(input:{pullRequestId:"x", event: APPROVE}){id}}' >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV33 the shim refuses a graphql approval reached through a {repo} that could name graphql"
+else
+    fail "RV33 the shim refuses a graphql approval reached through a {repo} that could name graphql (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST 'repos/{owner}/{repo}/issues/5/comments' -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV34 the shim does not refuse an issue comment under hostile owner and repo names"
+else
+    fail "RV34 the shim refuses an issue comment under hostile owner and repo names (rc=$rc err=$(cat "$T/err"))"
+fi
+
+git init -q "$T/br-tag" && git -C "$T/br-tag" symbolic-ref HEAD refs/heads/5/reviews \
+    && git -C "$T/br-tag" update-ref refs/tags/5/reviews "$(git -C "$T/br-tag" mktree </dev/null)"
+fresh_gate
+(cd "$T/br-tag" && gh api -X POST 'repos/o/r/pulls/{branch}' -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV35 the shim refuses {branch} on a branch that has a same-named tag"
+else
+    fail "RV35 the shim refuses {branch} on a branch that has a same-named tag (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X DELETE 'repos/o/r/git/refs/heads/feat%2Fx' >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV36 the shim does not refuse an encoded slash in an ordinary ref delete"
+else
+    fail "RV36 the shim refuses an encoded slash in an ordinary ref delete (rc=$rc err=$(cat "$T/err"))"
+fi
+
+for ep in 'git/refs/heads/issues%2F123' 'git/refs/heads/pulls%2F5' 'git/refs/heads/fix%2Fissues%2F42' \
+    'git/refs/heads/feat%2Freactions' 'git/refs/heads/feat%2Freplies'; do
+    fresh_gate
+    gh api -X DELETE "repos/o/r/$ep" >"$T/out" 2>"$T/err"; rc=$?
+    if ! grep -q "must be the reviews API call" "$T/err"; then
+        pass "RV36 the shim does not refuse an encoded slash in a ref named like a review path ($ep)"
+    else
+        fail "RV36 the shim refuses an encoded slash in a ref named like a review path ($ep) (rc=$rc err=$(cat "$T/err"))"
+    fi
+done
+fresh_gate
+gh api -X PUT 'repos/o/r/contents/docs%2Fissues%2F12' -f message=m -f content=Zg== >"$T/out" 2>"$T/err"; rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV36 the shim does not refuse an encoded slash in a contents path named like an issue"
+else
+    fail "RV36 the shim refuses an encoded slash in a contents path named like an issue (rc=$rc err=$(cat "$T/err"))"
+fi
+fresh_gate
+gh api -X POST 'repos/o/r/issues/5%2Fcomments' -f body=x >"$T/out" 2>"$T/err"; rc=$?
+if grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV36 the shim still refuses an encoded slash inside an issue comment path"
+else
+    fail "RV36 the shim lets an encoded slash inside an issue comment path through (rc=$rc err=$(cat "$T/err"))"
+fi
+
+git init -q "$T/br-bytes" && printf 'ref: refs/heads/caf\351-\377\n' >"$T/br-bytes/.git/HEAD"
+fresh_gate
+(cd "$T/br-bytes" && gh api -X PUT 'user/starred/o/r' >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "internal error" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV37 the shim runs a call with no branch token on a non-UTF-8 branch"
+else
+    fail "RV37 the shim crashes or refuses a call with no branch token on a non-UTF-8 branch (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/br-bytes" && gh api -X PATCH 'repos/o/r/git/refs/heads/{branch}' -f sha=a >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "internal error" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV37 the shim runs a {branch} write on a non-UTF-8 branch"
+else
+    fail "RV37 the shim crashes or refuses a {branch} write on a non-UTF-8 branch (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api -X DELETE 'repos/acme/app/git/refs/heads/feature%2Fgraphql' >"$T/out" 2>"$T/err"); rc1=$?
+(cd "$T/work" && gh api -X DELETE 'repos/acme/app/issues/5/labels/area%2Fgraphql' >"$T/out" 2>"$T/err"); rc2=$?
+printf '{"message":"m","content":"eA=="}' >"$T/work/update.json"
+(cd "$T/work" && gh api -X PUT repos/acme/app/contents/graphql --input update.json >"$T/out" 2>"$T/err"); rc3=$?
+if [ "$rc1$rc2$rc3" = 000 ] && [ "$(log_lines)" = 3 ]; then
+    pass "RV38 the shim runs REST ref, label and content calls whose name ends in graphql"
+else
+    fail "RV38 the shim refuses a REST call whose name ends in graphql (rc=$rc1$rc2$rc3 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api graphql -f 'query=mutation { addPullRequestReview(input: {pullRequestId: "P_1", event: COMMENT, body: "The APPROVE state needs a test."}) { clientMutationId } }' >"$T/out" 2>"$T/err"); rc=$?
+if ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV39 the shim does not read a COMMENT review mutation as an approval because of its body"
+else
+    fail "RV39 the shim refuses a COMMENT review mutation naming APPROVE only in its body (rc=$rc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+printf '{"query":"query { search(query: \\"APPROVE repo:me/repo\\", type: ISSUE, first: 10) { issueCount } }"}' >"$T/work/search.json"
+printf 'query { search(query: "APPROVE repo:me/repo", type: ISSUE, first: 10) { issueCount } }\n' >"$T/work/search.graphql"
+(cd "$T/work" && gh api graphql --input search.json >"$T/out" 2>"$T/err"); cat "$T/err" >"$T/err1"
+(cd "$T/work" && gh api graphql -F query=@search.graphql >"$T/out" 2>"$T/err"); cat "$T/err" >>"$T/err1"
+(cd "$T/work" && gh api graphql -f 'query=mutation { addComment(input: {subjectId: "I_1", body: "Use event: APPROVE"}) { clientMutationId } }' >"$T/out" 2>"$T/err"); cat "$T/err" >>"$T/err1"
+if ! grep -q "must be the reviews API call" "$T/err1"; then
+    pass "RV40 the shim does not read a search query or a comment mutation naming APPROVE as a review"
+else
+    fail "RV40 the shim refuses a read-only query or comment mutation naming APPROVE (err=$(cat "$T/err1"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api -X GET repos/acme/app/pulls/5/reviews -f event=APPROVE >"$T/out" 2>"$T/err"); rc1=$?
+(cd "$T/work" && gh api -X POST -X GET repos/acme/app/issues >"$T/out" 2>"$T/err"); rc2=$?
+if [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
+    pass "RV41 the shim runs a GET on a reviews path and a repeated -X that ends in GET"
+else
+    fail "RV41 the shim refuses a GET reviews read or a repeated -X (rc=$rc1$rc2 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh api -X GET -X POST repos/acme/app/pulls/5/reviews -f event=APPROVE >"$T/out" 2>"$T/err"); rc=$?
+if [ "$rc" != 0 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV42 the shim still refuses an approval whose last -X is POST after an earlier GET"
+else
+    fail "RV42 the shim ran an approval hidden behind repeated -X (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+(cd "$T/work" && gh pr review 5 --approve --help >"$T/out" 2>"$T/err"); rc1=$?
+(cd "$T/work" && gh pr review --help 5 >"$T/out" 2>"$T/err"); rc2=$?
+if [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
+    pass "RV43 the shim runs gh pr review with --help anywhere"
+else
+    fail "RV43 the shim refuses gh pr review --help (rc=$rc1$rc2 log=$(log_lines) err=$(cat "$T/err"))"
+fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

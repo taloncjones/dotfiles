@@ -1334,5 +1334,516 @@ expect_class "KC6 a title edit is a body write" body pr edit 5 --title t
 expect_class "KC7 an issue comment is a post" post issue comment 5 -b x
 expect_class "KC8 a comment delete stays a delete" delete api -X DELETE repos/o/r/issues/comments/9
 
+# --- RE: review events bound to the option verb ------------------------------
+
+HOOK_ABS="$(pwd)/$HOOK"
+H40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf 'review text' >"$FIX/body.md"
+
+# payload_alt SID ANSWER LABEL1 LABEL2 TEXT -> PostToolUse AskUserQuestion JSON:
+# one single-select question with TEXT, the two labels and a Hold option
+payload_alt() {
+    PL_SID="$1" PL_ANSWER="$2" PL_L1="$3" PL_L2="$4" PL_TEXT="$5" python3 - <<'PY'
+import json, os
+q = "Post which?\n" + os.environ["PL_TEXT"]
+opts = [{"label": os.environ["PL_L1"], "description": "one"},
+        {"label": os.environ["PL_L2"], "description": "two"},
+        {"label": "Hold the review on #5", "description": "wait"}]
+qs = [{"question": q, "multiSelect": False, "options": opts}]
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": os.environ["PL_SID"], "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {q: os.environ["PL_ANSWER"]}}}))
+PY
+}
+
+# reg ARG...: register `gh ARG...` as a draft for s1 from $FIX; prints its hash, rc 1 when refused
+reg() {
+    out=$(cd "$FIX" && python3 "$HOOK_ABS" draft -- gh "$@" 2>"$FIX/reg.err"); rc=$?
+    printf '%s\n' "$out" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p'
+    return "$rc"
+}
+
+# refused LABEL NEEDLE ARG...: registration exits 1 naming NEEDLE and writes no draft
+refused() {
+    label="$1"; needle="$2"; shift 2
+    reg "$@" >/dev/null; rc=$?
+    if [ "$rc" = 1 ] && grep -q -- "$needle" "$FIX/reg.err" && [ -z "$(ls "$GATE" 2>/dev/null)" ]; then
+        printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (rc=%s err=%s)\n' "$label" "$rc" "$(cat "$FIX/reg.err")" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
+REVIEW_APPROVE="api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=APPROVE -F body=@body.md"
+REVIEW_CHANGES="api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=REQUEST_CHANGES -F body=@body.md"
+COMMENT_CALL="pr comment 5 -R o/r --body-file body.md"
+LBL_APPROVE='Approve #5 at aaaaaaa with this text (draft %s)'
+LBL_CHANGES='Request changes on #5 at aaaaaaa with this text (draft %s)'
+LBL_COMMENT='Post as a comment on #5 (draft %s)'
+
+case_gate re1
+HR=$(reg $REVIEW_APPROVE)
+expect_err "RE1 an approve review draft with a Post label is refused before the prompt" 'must start with `Approve`' "$(payload_q s1 "$(printf "$LBL_COMMENT" "$HR")" '' 'Post this? review text')"
+
+case_gate re2
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE2 an Approve label approves an approve review draft" "post gate: approved draft $HR" "$(payload_a s1 "$(printf "$LBL_APPROVE" "$HR")" 'review text')"
+expect_file "RE2 the draft is approved" "$GATE/s1.draft-$HR.approved" present
+
+case_gate re3
+HC=$(reg $COMMENT_CALL)
+expect_out "RE3 an Approve label on a comment draft is refused" 'its option must start with `Post`, not `Approve`' "$(payload_a s1 "$(printf "$LBL_APPROVE" "$HC")" 'review text')"
+expect_file "RE3 the comment draft stays pending" "$GATE/s1.draft-$HC.pending" present
+
+case_gate re4
+HRC=$(reg $REVIEW_CHANGES)
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE4 a Request changes label on an approve review is refused" 'must start with `Approve`, not `Request changes`' "$(payload_a s1 "$(printf "$LBL_CHANGES" "$HR")" 'review text')"
+expect_out "RE4 a Request changes label approves a request-changes draft" "post gate: approved draft $HRC" "$(payload_a s1 "$(printf "$LBL_CHANGES" "$HRC")" 'review text')"
+expect_file "RE4 only the request-changes draft is approved" "$GATE/s1.draft-$HR.approved" absent
+
+case_gate re5
+HC=$(reg $COMMENT_CALL)
+HR=$(reg $REVIEW_APPROVE)
+L_REVIEW=$(printf "$LBL_APPROVE" "$HR"); L_COMMENT=$(printf "$LBL_COMMENT" "$HC")
+expect_out "RE5 choosing the review approves it and dismisses the comment" "post gate: draft $HC dismissed (another option was chosen)" "$(payload_alt s1 "$L_REVIEW" "$L_REVIEW" "$L_COMMENT" 'review text')"
+expect_file "RE5 the review draft is approved" "$GATE/s1.draft-$HR.approved" present
+expect_file "RE5 the comment draft is not approved" "$GATE/s1.draft-$HC.approved" absent
+expect_file "RE5 the comment draft is dismissed" "$GATE/s1.draft-$HC.dismissed" present
+
+case_gate re6
+HC=$(reg $COMMENT_CALL)
+HR=$(reg $REVIEW_APPROVE)
+L_REVIEW=$(printf "$LBL_APPROVE" "$HR"); L_COMMENT=$(printf "$LBL_COMMENT" "$HC")
+expect_out "RE6 Hold decides nothing" "not decided (no Post or Skip option was chosen)" "$(payload_alt s1 'Hold the review on #5' "$L_REVIEW" "$L_COMMENT" 'review text')"
+expect_file "RE6 the review draft stays pending" "$GATE/s1.draft-$HR.pending" present
+expect_file "RE6 the comment draft stays pending" "$GATE/s1.draft-$HC.pending" present
+
+case_gate re7
+refused "RE7 draft registration refuses gh pr review --approve" "must be" pr review 5 --approve -b x
+
+case_gate re8
+refused "RE8 draft registration refuses a reviews API event with a short commit_id" "must be" api -X POST repos/o/r/pulls/5/reviews -f commit_id=abc1234 -f event=APPROVE -f body=x
+case_gate re8b
+refused "RE8 and one with no commit_id" "must be" api -X POST repos/o/r/pulls/5/reviews -f event=REQUEST_CHANGES -f body=x
+
+case_gate re9
+refused "RE9 draft registration refuses a graphql mutation naming APPROVE" "must be" api graphql -f 'query=mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }'
+
+case_gate re13
+refused "RE13 draft registration refuses a reviews events call carrying APPROVE" "must be" api -X POST repos/o/r/pulls/5/reviews/9/events -f event=APPROVE -f body=x
+
+case_gate re10
+HR=$(reg $REVIEW_APPROVE)
+expect_err "RE10 a hedge word in an Approve label is ambiguous" "is ambiguous" "$(payload_q s1 "Approve #5 or hold (draft $HR)" '' 'Post this? review text')"
+
+case_gate re11
+HC=$(reg $COMMENT_CALL)
+HR=$(reg $REVIEW_APPROVE)
+L_REVIEW=$(printf "$LBL_APPROVE" "$HR"); L_COMMENT=$(printf "$LBL_COMMENT" "$HC")
+payload_alt s1 "$L_REVIEW" "$L_REVIEW" "$L_COMMENT" 'review text' | python3 "$HOOK" >/dev/null 2>&1
+expect_out "RE11 a later question naming the dismissed sibling cannot approve it" "post gate: draft $HC not decided (the question names more than one draft)" "$(payload_alt s1 "$L_COMMENT" "$L_REVIEW" "$L_COMMENT" 'review text')"
+expect_file "RE11 the sibling stays unapproved" "$GATE/s1.draft-$HC.approved" absent
+
+case_gate re14
+refused "RE14 draft registration refuses a reviews call with an event in the query string" "must be" api -X POST "repos/o/r/pulls/5/reviews?event=APPROVE&commit_id=$H40" -F body=@body.md
+case_gate re14b
+refused "RE14 and a reviews events call with an event in the query string" "must be" api -X POST "repos/o/r/pulls/5/reviews/9/events?event=APPROVE" -F body=@body.md
+case_gate re14c
+refused "RE14 and a reviews call with a fragment" "must be" api -X POST "repos/o/r/pulls/5/reviews#x" -f commit_id=$H40 -f event=APPROVE -F body=@body.md
+
+printf '{"event":"COMMENT","body":"x"}' >"$FIX/comment.json"
+printf '{"event":"APPROVE","body":"x"}' >"$FIX/approve.json"
+case_gate re16a
+refused "RE16 draft registration refuses two --input files" "must be" api -X POST repos/o/r/pulls/5/reviews --input "$FIX/comment.json" --input "$FIX/approve.json"
+case_gate re16b
+refused "RE16 and an --input file with a disagreeing -f event" "must be" api -X POST repos/o/r/pulls/5/reviews --input "$FIX/comment.json" -f event=APPROVE
+case_gate re16c
+refused "RE16 and a repeated -X" "must be" api -X GET -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=APPROVE -F body=@body.md
+case_gate re16d
+refused "RE16 and a repeated -f event" "must be" api -X POST repos/o/r/pulls/5/reviews -f commit_id=$H40 -f event=COMMENT -f event=APPROVE -F body=@body.md
+case_gate re17a
+refused "RE17 draft registration refuses a +5 PR segment" "must be" api -X POST repos/o/r/pulls/+5/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+case_gate re17b
+refused "RE17 and a %35 PR segment" "must be" api -X POST repos/o/r/pulls/%35/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+case_gate re17c
+refused "RE17 and a zero-padded PR segment" "must be" api -X POST repos/o/r/pulls/05/reviews -f commit_id=$H40 -f event=COMMENT -F body=@body.md
+
+case_gate re15
+HR=$(reg $REVIEW_APPROVE)
+expect_out "RE15 an Approve label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Approve #6 at aaaaaaa with this text (draft $HR)" 'review text')"
+expect_file "RE15 the draft stays pending" "$GATE/s1.draft-$HR.pending" present
+expect_out "RE15 an Approve label naming another head is refused" "must name the pinned head \`aaaaaaa\`" "$(payload_a s1 "Approve #5 at bbbbbbb with this text (draft $HR)" 'review text')"
+expect_file "RE15 the draft still stays pending" "$GATE/s1.draft-$HR.pending" present
+HRC=$(reg $REVIEW_CHANGES)
+expect_out "RE15 a Request changes label naming another PR is refused" "must name the PR as \`#5\`" "$(payload_a s1 "Request changes on #15 at aaaaaaa with this text (draft $HRC)" 'review text')"
+
+expect_py "RE12 review_event classifies each argv branch" ok '
+cases = [
+    (["pr", "review", "5", "--approve", "-b", "x"], "approve"),
+    (["pr", "review", "5", "--approve=true"], "approve"),
+    (["pr", "review", "5", "-ab", "x"], "approve"),
+    (["pr", "review", "5", "-rb", "x"], "request-changes"),
+    (["pr", "review", "5", "--request-changes"], "request-changes"),
+    (["pr", "review", "5", "-a", "-r"], "unknown"),
+    (["pr", "review", "5", "-c", "-b", "--approve"], None),
+    (["pr", "review", "5", "-b", "-a"], "unknown"),
+    (["pr", "review", "5"], "unknown"),
+    (["pr", "review", "5", "-b", "x"], "unknown"),
+    (["pr", "review", "5", "--comment", "-b", "x"], None),
+    (["pr", "review", "5", "-cb", "x"], None),
+    (["pr", "review", "5", "--comment=true"], None),
+    (["pr", "review", "5", "--comment=T"], None),
+    (["pr", "review", "5", "--comment=false"], "unknown"),
+    (["pr", "review", "5", "--comment=0"], "unknown"),
+    (["pr", "review", "5", "--comment=F"], "unknown"),
+    (["pr", "review", "5", "-c=false"], "unknown"),
+    (["pr", "review", "5", "-c=true"], None),
+    (["pr", "review", "5", "--comment", "--comment=false"], "unknown"),
+    (["pr", "review", "5", "--comment=false", "--comment"], None),
+    (["pr", "review", "5", "-c", "-c=false"], "unknown"),
+    (["pr", "review", "5", "-c=false", "-c"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/{branch}", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/:owner/:repo/pulls/5/reviews", "-f", "event=APPROVE"], "approve"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/x:branch", "-f", "event=APPROVE"], "unknown"),
+    (["pr", "review", "5", "-R", "-a", "-c"], None),
+    (["pr", "comment", "5", "-b", "x"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"], "approve"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=REQUEST_CHANGES"], "request-changes"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=COMMENT"], None),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "body=x"], None),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=DISMISS"], "unknown"),
+    (["api", "repos/o/r/pulls/5/reviews", "-F", "event=@e.txt"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/9/events", "-f", "event=APPROVE"], "approve"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-f", "event=COMMENT"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation { x(event: APPROVE) }"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation { x(event: REQUEST_CHANGES) }"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation { x }"], None),
+    ([], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews?event=APPROVE&commit_id=" + "a" * 40], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/9/events?event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews#frag", "-f", "event=COMMENT"], "unknown"),
+]
+import json, os, tempfile
+d = tempfile.mkdtemp()
+for name, body, want in (("a.json", {"event": "APPROVE"}, "approve"), ("c.json", {"body": "x"}, None)):
+    with open(os.path.join(d, name), "w") as f:
+        json.dump(body, f)
+    cases.append((["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", name], want))
+cases.append((["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", "missing.json"], "unknown"))
+with open(os.path.join(d, "g.json"), "w") as f:
+    f.write(json.dumps({"variables": {"e": "APPROVE"}}).replace("A", "\\u0041"))
+cases.append((["api", "graphql", "--input", "g.json"], "unknown"))
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+expect_py "RE18 review_event reads one normalized endpoint and refuses repeated flags first" ok '
+import json, os, tempfile
+d = tempfile.mkdtemp()
+for name, body in (("gc.json", {"query": "mutation { addPullRequestReview(input: {event: COMMENT}) { clientMutationId } }"}),
+                   ("ga.json", {"query": "mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }"})):
+    with open(os.path.join(d, name), "w") as f:
+        json.dump(body, f)
+mut = "query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}"
+rev = ["-f", "commit_id=" + "a" * 40, "-f", "event=COMMENT"]
+cases = [
+    (["api", "graphql", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "graphql", "--input", "gc.json"], None),
+    (["api", "https://api.github.com/graphql", "-f", mut], "unknown"),
+    (["api", "HTTPS://API.GitHub.com/graphql", "-f", mut], "unknown"),
+    (["api", "--hostname", "ghe.example.com", "https://ghe.example.com/graphql", "-f", mut], "unknown"),
+    (["api", "graphql/", "-f", mut], "unknown"),
+    (["api", "https://ghe.example.com/api/graphql", "-f", mut], "unknown"),
+    (["api", "/graphql", "-f", mut], "unknown"),
+    (["api", "graphql?x=1", "-f", mut], "unknown"),
+    (["api", "./graphql", "-f", mut], "unknown"),
+    (["api", "%67raphql", "-f", mut], "unknown"),
+    (["api", "GraphQL", "-f", mut], "unknown"),
+    (["api", "gRaPhQl", "-f", mut], "unknown"),
+    (["api", "https://api.github.com/GraphQL", "-f", mut], "unknown"),
+    (["api", "api/v3/graphql", "-f", mut], "unknown"),
+    (["api", "https://api.github.com/graphql", "-f", "query=query { viewer { login } }", "-X", "GET"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews/?x=1", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls//5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5//reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "https://api.github.com/repos/o/r/pulls/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/./5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", *rev], None),
+    (["api", "repos/o/r/pulls/5/reviews/"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "PATCH", "repos/{owner}/{repo}/issues/5", "-f", "state=closed"], None),
+    (["api", "repos/:owner/:repo/issues/5/labels", "-f", "labels[]=x"], None),
+    (["api", "-X", "POST", "repos/o/{branch}/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/x:branch/r/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/{owner}x/{repo}/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/:owner:branch/r/pulls/5/reviews", "-f", "event=APPROVE"], "unknown"),
+    (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/5/reviews", "-f", "event=APPROVE", "-f", "commit_id=" + "a" * 40], "approve"),
+    (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], "unknown"),
+]
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE19 review_event lets ordinary calls through and still refuses event shapes" ok '
+import json, os, subprocess, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "m.md"), "w") as f:
+    f.write("APPROVE this when ready")
+rev = ["-f", "commit_id=" + "a" * 40, "-f", "event=APPROVE"]
+mut = "query=mutation{addComment(input:{body:\"x\"}){clientMutationId}}"
+cases = [
+    (["api", "-X", "DELETE", "repos/me/repo/issues/5/labels/needs%20review"], None),
+    (["api", "-X", "PUT", "repos/me/repo/contents/a%20b.txt", "-f", "message=m"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/review%73", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/%2e%2e/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5/labels/%zz", "-f", "x=y"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/{x}/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{x}/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/{x}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/{branch}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{branch}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/{branch}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/:branch", *rev], "unknown"),
+    (["api", "-X", "POST", "/repos/{branch}", *rev], "unknown"),
+    (["api", "-X", "POST", "repositories/{branch}", *rev], "unknown"),
+    (["api", "-X", "POST", "https://api.github.com/repos/{branch}", *rev], "unknown"),
+    (["pr", "review", "--help"], None),
+    (["pr", "review", "5", "--help"], None),
+    (["pr", "review", "-h"], None),
+    (["pr", "review", "5", "--approve", "--help"], None),
+    (["api", "-X", "GET", "-X", "GET", "repos/o/r/issues/5"], None),
+    (["api", "-X", "POST", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-XPOST", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "-X", "PUT", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
+    (["pr", "review", "5", "--approve=false"], "unknown"),
+    (["pr", "review", "5", "--request-changes=false"], "unknown"),
+    (["pr", "review", "5", "--approve=false", "--comment"], None),
+    (["pr", "review", "5", "--request-changes=false", "--comment"], None),
+    (["pr", "review", "5", "--approve=false", "--request-changes"], "request-changes"),
+    (["api", "graphql", "-f", mut, "-f", "body=APPROVE"], None),
+    (["api", "graphql", "-f", mut, "-F", "b=@m.md"], None),
+    (["api", "graphql", "-f", "query=query { search(query: \"APPROVE\") { issueCount } }"], None),
+    (["api", "graphql", "-f", "query=mutation($e:PullRequestReviewEvent!){addPullRequestReview(input:{event:$e}){clientMutationId}}", "-f", "e=APPROVE"], "unknown"),
+    (["api", "graphql", "-f", "query=mutation($e:PullRequestReviewEvent!){submitPullRequestReview(input:{event:$e}){clientMutationId}}", "-f", "e=REQUEST_CHANGES"], "unknown"),
+    (["api", "-X", "PUT", "repos/o/r/contents/schema.graphql", "-f", "message=add mutation", "-f", "content=APPROVE"], None),
+]
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+# {branch} refs resolve through git, so these two ordinary rows run in a repository on a plain branch.
+gd = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", "-b", "feature", gd], check=True)
+for a in (["api", "-X", "DELETE", "repos/{owner}/{repo}/branches/{branch}/protection"],
+          ["api", "-X", "PATCH", "repos/{owner}/{repo}/git/refs/heads/{branch}", "-f", "sha=abc"]):
+    if g.review_event(a, gd) is not None:
+        bad.append((a, g.review_event(a, gd), None))
+if g.classify_gh(["api", "-X", "PUT", "repos/o/r/contents/schema.graphql", "-f", "message=add mutation"]) != "write":
+    bad.append("schema.graphql classify")
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE20 review_event expands gh placeholders before classifying" ok '
+import os, subprocess, tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+rc = ["-f", "commit_id=" + sha, "-f", "event=REQUEST_CHANGES", "-f", "body=no"]
+gq = "mutation($e: PullRequestReviewEvent!){ addPullRequestReview(input:{pullRequestId:\"x\", event:$e}){id} }"
+gq_inline = "mutation { addPullRequestReview(input:{pullRequestId:\"x\", event: {branch}}){id} }"
+cases = {
+    "api.github.com/repos/o/r/pulls/5/reviews": [
+        (["api", "-X", "POST", "https://{branch}", *rev], "unknown"),
+        (["api", "-X", "POST", "https://x@{branch}", *rc], "unknown"),
+        (["api", "-X", "POST", "https://:branch", *rev], "unknown"),
+    ],
+    "o/r/pulls/5/reviews#": [
+        (["api", "-X", "POST", "repos/:branch\u00e9", *rev], "unknown"),
+        (["api", "-X", "POST", "repos/:branch\u00fc", *rev], "unknown"),
+    ],
+    "APPROVE": [
+        (["api", "graphql", "-f", "query=" + gq, "-F", "e={branch}"], "unknown"),
+        (["api", "graphql", "-F", "query=" + gq_inline], "unknown"),
+        (["api", "graphql", "-f", "query=" + gq, "--field", "e={branch}"], "unknown"),
+        (["api", "graphql", "-f", "query=" + gq, "--field=e={branch}"], "unknown"),
+        (["api", "graphql", "-f", "query=" + gq, "-f", "e={branch}"], None),
+        (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-F", "event={branch}", "-f", "commit_id=" + sha], "approve"),
+    ],
+    "feature": [
+        (["api", "-X", "PUT", "user/starred/{owner}/{repo}"], None),
+        (["api", "-X", "PUT", "user/subscriptions/{owner}/{repo}"], None),
+        (["api", "-X", "POST", "orgs/{owner}/repos", "-f", "name=x"], None),
+        (["api", "-X", "POST", "orgs/:owner/repos", "-f", "name=x"], None),
+        (["api", "-X", "PUT", "orgs/{owner}/teams/t/repos/{owner}/{repo}", "-f", "permission=push"], None),
+        (["api", "-X", "PUT", "orgs/{owner}/actions/permissions/repositories/1"], None),
+        (["api", "-X", "DELETE", "users/{owner}/x"], None),
+        (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/5/reviews", *rev], "approve"),
+        (["api", "-X", "POST", "repos/{owner}x/{repo}/pulls/5/reviews", *rev], "unknown"),
+        (["api", "-X", "POST", "repos/o/r/pulls/{branch}", *rev], None),
+        (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-F", "body={branch}"], None),
+    ],
+}
+bad = []
+for branch, rows in cases.items():
+    d = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", d], check=True)
+    subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/heads/" + branch], check=True)
+    bad += [(branch, a, g.review_event(a, d), w) for a, w in rows if g.review_event(a, d) != w]
+detached = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", detached], check=True)
+with open(os.path.join(detached, ".git", "HEAD"), "w") as f:
+    f.write(sha + "\n")
+for a in (["api", "-X", "POST", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=abc"],
+          ["api", "-X", "POST", "repos/o/r/issues", "-F", "title={branch}"]):
+    if g.review_event(a, detached) != "unknown":
+        bad.append(("detached", a, g.review_event(a, detached)))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE21 review_event resolves {branch} as gh does (symbolic-ref --quiet, strip refs/heads/)" ok '
+import subprocess, tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+d = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/heads/5/reviews"], check=True)
+tree = subprocess.run(["git", "-C", d, "mktree"], input="", capture_output=True, text=True, check=True).stdout.strip()
+subprocess.run(["git", "-C", d, "update-ref", "refs/tags/5/reviews", tree], check=True)
+bad = []
+if g.current_branch(d) != "5/reviews":
+    bad.append(("branch with same-named tag", g.current_branch(d)))
+row = ["api", "-X", "POST", "repos/o/r/pulls/{branch}", *rev]
+if g.review_event(row, d) != "unknown":
+    bad.append((row, g.review_event(row, d)))
+subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/remotes/o/main"], check=True)
+if g.current_branch(d) != "refs/remotes/o/main":
+    bad.append(("HEAD outside refs/heads", g.current_branch(d)))
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE22 review_event refuses owner/repo values that turn the endpoint into a review call" ok '
+import tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+gq = "query=mutation{addPullRequestReview(input:{pullRequestId:\"x\", event: APPROVE}){id}}"
+cases = [
+    (["api", "-X", "POST", "repos/o/r/pulls/5/{repo}", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/:repo", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{owner}/5/reviews", *rev], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/{owner}/{repo}/reviews", *rev], "unknown"),
+    (["api", "{repo}", "-f", gq], "unknown"),
+    (["api", "{owner}", "-f", gq], "unknown"),
+    (["api", "-X", "PUT", "user/starred/{owner}/{repo}"], None),
+    (["api", "-X", "PUT", "user/subscriptions/{owner}/{repo}"], None),
+    (["api", "-X", "POST", "orgs/{owner}/repos", "-f", "name=x"], None),
+    (["api", "-X", "POST", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], None),
+    (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/5/reviews", *rev], "approve"),
+    (["api", "-X", "GET", "repos/o/r/pulls/5/{repo}"], None),
+]
+d = tempfile.mkdtemp()
+bad = [(a, g.review_event(a, d), w) for a, w in cases if g.review_event(a, d) != w]
+print("ok" if not bad else bad)
+'
+
+
+expect_py "RE23 review_event expands -F values only, keeps %2F in ordinary writes, survives a non-UTF-8 branch" ok '
+import os, subprocess, tempfile
+sha = "a" * 40
+rev = ["-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=ok"]
+d = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "symbolic-ref", "HEAD", "refs/heads/ent"], check=True)
+gd = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", gd], check=True)
+with open(os.path.join(gd, ".git", "HEAD"), "wb") as f:
+    f.write(b"ref: refs/heads/caf\xe9-\xff\n")
+bad = []
+for a, cwd, want in [
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-F", "ev{branch}=APPROVE", "-f", "commit_id=" + sha], d, None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-F", "event={branch}", "-f", "commit_id=" + sha], d, "unknown"),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/feat%2Fx"], d, None),
+    (["api", "-X", "PUT", "repos/o/r/branches/talon%2Ffoo/protection", "-f", "x=y"], d, None),
+    (["api", "-X", "POST", "repos/o/r/branches/talon%2Ffoo/rename", "-f", "new_name=y"], d, None),
+    (["api", "-X", "PUT", "repos/o/r/contents/a%2Fb.txt", "-f", "message=m"], d, None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5%2Freviews", *rev], d, "unknown"),
+    (["api", "-X", "POST", "repos/o/r/pulls%2F5/reviews", *rev], d, "unknown"),
+    (["api", "-X", "POST", "%2Fgraphql", "-f", "query=mutation{x}"], d, "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5%2Fcomments", "-f", "body=x"], d, "unknown"),
+    (["api", "-X", "PUT", "user/starred/o/r", "-f", "x=y"], gd, None),
+    (["api", "-X", "PATCH", "repos/o/r/git/refs/heads/{branch}", "-f", "sha=abc"], gd, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/issues%2F123"], d, None),
+    (["api", "-X", "PATCH", "repos/o/r/git/refs/heads/pulls%2F5", "-f", "sha=a"], d, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/fix%2Fissues%2F42"], d, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/feat%2Freactions"], d, None),
+    (["api", "-X", "DELETE", "repos/o/r/git/refs/heads/feat%2Freplies"], d, None),
+    (["api", "-X", "PUT", "repos/o/r/contents/docs%2Fissues%2F12", "-f", "message=m", "-f", "content=Zg=="], d, None),
+    (["api", "-X", "POST", "repos/o/r%2Fpulls/5/reviews", *rev], d, "unknown"),
+]:
+    try:
+        got = g.review_event(a, cwd)
+    except Exception as exc:
+        got = repr(exc)
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE24 review_event reads graphql only as the whole endpoint and a review mutation by its event argument" ok '
+import json, os, tempfile
+d = tempfile.mkdtemp()
+def put(name, text):
+    with open(os.path.join(d, name), "w") as f:
+        f.write(text)
+put("update.json", json.dumps({"message": "m", "content": "eA=="}))
+put("search.json", json.dumps({"query": "query { search(query: \"APPROVE repo:me/repo\", type: ISSUE, first: 10) { issueCount } }"}))
+put("search.graphql", "query { search(query: \"APPROVE repo:me/repo\", type: ISSUE, first: 10) { issueCount } }")
+put("comment.json", json.dumps({"query": "mutation { addComment(input: {subjectId: \"I_1\", body: \"Use event: APPROVE\"}) { clientMutationId } }"}))
+rev = lambda event, body="x": "query=mutation { addPullRequestReview(input: {pullRequestId: \"P_1\", event: %s, body: \"%s\"}) { clientMutationId } }" % (event, body)
+cases = [
+    (["api", "-X", "DELETE", "repos/acme/app/git/refs/heads/feature%2Fgraphql"], None),
+    (["api", "-X", "DELETE", "repos/acme/app/issues/5/labels/area%2Fgraphql"], None),
+    (["api", "-X", "PUT", "repos/acme/app/contents/graphql", "--input", "update.json"], None),
+    (["api", "graphql", "-f", rev("COMMENT", "The APPROVE state needs a test.")], None),
+    (["api", "graphql", "-f", rev("APPROVE", "ok")], "unknown"),
+    (["api", "graphql", "-f", rev("REQUEST_CHANGES", "no")], "unknown"),
+    (["api", "graphql", "-f", rev("$e", "APPROVE needs a test"), "-f", "e=COMMENT"], None),
+    (["api", "graphql", "-f", rev("$e", "x"), "-f", "e=APPROVE"], "unknown"),
+    (["api", "graphql", "-f", rev("COMMENT", "x") + " # event: APPROVE"], None),
+    (["api", "graphql", "-f", "query=mutation($i: AddPullRequestReviewInput!) { addPullRequestReview(input: $i) { clientMutationId } }", "-f", "i=APPROVE"], "unknown"),
+    (["api", "graphql", "--input", "search.json"], None),
+    (["api", "graphql", "-F", "query=@search.graphql"], None),
+    (["api", "graphql", "-f", "query=query { search(query: \"APPROVE\") { issueCount } }"], None),
+    (["api", "graphql", "--input", "comment.json"], None),
+    (["api", "graphql", "-f", "query=mutation { addComment(input: {body: \"Use event: APPROVE\"}) { clientMutationId } }"], None),
+    (["api", "-X", "GET", "repos/acme/app/pulls/5/reviews", "-f", "event=APPROVE"], None),
+    (["api", "-X", "POST", "-X", "GET", "repos/o/r/issues"], None),
+    (["api", "-X", "GET", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-f", "commit_id=" + "a" * 40], "unknown"),
+    (["pr", "review", "5", "--approve", "--help"], None),
+    (["pr", "review", "--help", "5"], None),
+    (["pr", "review", "5", "-ah"], None),
+    (["pr", "review", "5", "--body", "--help", "--approve"], "approve"),
+    (["pr", "review", "5", "--approve", "--help=false"], "approve"),
+    (["pr", "review", "5", "--approve", "-h=false"], "approve"),
+    (["pr", "review", "5", "--approve", "--help=true"], None),
+]
+bad = []
+for a, want in cases:
+    try:
+        got = g.review_event(a, d)
+    except Exception as exc:
+        got = repr(exc)
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_class "RE25 pr review with --help after other flags is a read" read pr review 5 --approve --help
+expect_class "RE25 pr review --help before the number is a read" read pr review --help 5
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
