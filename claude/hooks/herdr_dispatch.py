@@ -24,6 +24,7 @@ from herdr_dispatch_cli import (
     fresh_codex_hook_review_required as _fresh_codex_hook_review_required,
 )
 from herdr_dispatch_cli import NOT_AT_SHELL, metadata_argv, result_object
+from herdr_dispatch_cli import herdr_call_timeout
 from herdr_dispatch_cli import prompt_state as _prompt_state
 from herdr_dispatch_cli import run_herdr as _run_herdr
 from herdr_dispatch_cli import same_directory as _same_directory
@@ -1396,7 +1397,7 @@ def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
     try:
         process = subprocess.run(
             [herdr_cli, *argv], env=env, check=False, capture_output=True,
-            timeout=prompt_timeout_ms / 1000 + 5,
+            timeout=herdr_call_timeout(prompt_timeout_ms / 1000 + 5, env),
         )
     except (FileNotFoundError, PermissionError) as exc:
         raise _RejectedDelivery("reprompt delivery could not start") from exc
