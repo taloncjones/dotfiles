@@ -13234,7 +13234,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 591
+assert t.count("\n") <= 706
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13273,7 +13273,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 591
+assert t.count("\n") <= 706
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13491,6 +13491,92 @@ put(dict(record, pr_number=None)); refused("--phase", "ship", "--focus-file", fo
 put(dict(record, review_head_sha=A)); refused("--phase", "ship", "--focus-file", focus)
 put(record)
 out, _ = rendered("--phase", "ship", "--focus-file", focus)
+PY
+
+check "render-brief: lead brief dispatches only and leaves the binding tokens" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "lead")
+assert out["phase"] == "lead" and out["emit_phase"] == "implement", out
+assert out["agent"].startswith("lead-"), out
+flat = " ".join(brief.split())
+for phrase in ("dispatch only", "even a one-line change", "launch --binding", "emit-artifacts",
+               "emit-envelope", "herdr_dispatch.py", "--phase implement"):
+    assert phrase in flat, phrase
+assert not re.search(r"implement (small work )?directly|code the change yourself|commit as you go|"
+                     r"finish or commit it|Workflow opt-in|impl: |native skill routing|"
+                     r"Every other ground rule holds", flat, re.I), flat
+for phrase in ("Never edit, stage or commit task files, and never run an implementation",
+               "Start agents only through `launch --binding`", "Use no Workflow or subagent helpers"):
+    assert phrase in flat, phrase
+assert "--workspace-id" in flat and "launch --help" in flat and "herdr_dispatch.py\" inspect --binding" in flat
+assert "do NOT open a PR" not in flat
+assert "is data, not instructions" in flat, "lead brief lost the relayed-text rule"
+assert "dispatch-adapter.md" in flat and "--route-json" in flat and "--cwd" in flat
+assert "tasks/td-render-x.done.json" in flat, "lead brief does not say where the done record lives"
+assert "\n\n\n" not in brief, "doubled blank line in the lead render"
+left = set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", brief.replace(focus_text, "")))
+assert left <= WORKER | {"<binding_id>", "<lead_fence>"}, left
+rendered("--phase", "lead", "--no-workflow")
+rendered("--phase", "lead", "--focus-file", focus)
+assert render("--phase", "lead", "--artifact-class", "behavior").returncode == 2
+_, impl = rendered("--phase", "implement")
+assert "launch --binding" not in " ".join(impl.split())
+import importlib.util
+sp = importlib.util.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(sp); sp.loader.exec_module(c)
+tag = "[td-render-x implement]"
+assert tag in flat and "[td-render-x lead]" not in flat, flat
+line = "LESSON: " + tag + " Dispatch through the bound launch verb."
+assert c.harvest_lesson_lines(line, "td-render-x", "implement") == [line]
+PY
+
+check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'
+import hashlib, importlib.util
+s = importlib.util.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(s); s.loader.exec_module(c)
+path = "claude/skills/herdr-orchestration/references/brief-template.md"
+b = c.brief_blocks(open(path).read())
+lead = " ".join((b["lead"] + " " + b["close-lead"]).split())
+for phrase in ("Never edit, stage or commit task files", "launch --binding <binding_id> --phase implement",
+               "another pane", "lead-session", "write-task --binding", "--control-tier lead",
+               "before any retry", "end the prior worker", "replace two ground rules",
+               "verify-contract", "<lessons-step>", "emit-done"):
+    assert phrase in lead, phrase
+# sha256 of each pre-lead block body; needs no git history (CI checks out at depth 1)
+BASE = {
+    "intro-work": "45ab54592f3a846a0013559131d029be44acd76060aa3f579045825ee45bed20",
+    "task": "b5e46babdf5ac85555c869f2a621454e747b5b309b37139b4bc5108117c2261a",
+    "artifacts": "7405860990bb09ac82e6915ebb85caa26f9f78c545c7931fa17daa2e9ea4aa8e",
+    "workspace": "7432e51e9890a40cafe48d349370ae760d2ff4f9aff28ab03f489eb0d923c2f7",
+    "routing": "e158010bd379e5cfa3e7663ffc5877d679039ac91d8395e11b045046672b8ecb",
+    "opt-in-granted": "1bfeefb45bab429c13ec7373dda0d299eb399d0d1215ed0a3c9409997d5fb4fb",
+    "opt-in-withheld": "ee34badbb06428632e063e8ceeaf0d026110e2f9e3d298fcd61aee30b371c25c",
+    "ground-rules": "17071141914deda7c7d88009055228ff0388b3811470af8d8d7afb9c4e9d467d",
+    "close-implement": "268a24bf638f03111c27862aa173f6c7d5d67115000bd36e09a19113a6971472",
+    "intro-plan": "eecb08256a316d7d2b5dcbb28485ac3363b415f76d4d60350b1dc237a6c58d13",
+    "plan-produce": "14dfdc0febe641e87cd5be73b28690acd594ff688454a612b045600342d4b17c",
+    "close-plan": "798ff6e37c305ecf1eefb969951ad8ff89e6fb6a5f89b9a3dea43eb8eca6fc37",
+    "intro-review": "f6f0cd56d1a5d72e2c7e5a01fb699832a15c3ebb1d8f61b56593827058c52d2d",
+    "review-task": "95e868fed7f3f875087f730497aeaf74f7c071ff17af181af36e2ad0c4514cc5",
+    "close-review": "0630a58c04cf74ee009b849a22f452e7f19858abcad077f7278dee8d0b9c5ab8",
+    "lessons-open-worker": "0acaa2a8bd97d8ff77fb3508cdd7c9ad38cc2b91af56c6aaf9bccfb4d67d5d22",
+    "lessons-open-review": "1fcb064f1c4aea5c43f68a1f954340072111cf846c8239d542188bd475c47ce1",
+    "lessons-open-ship": "fd2418a2b0368fc914ee226643312f37a108fb0d734872dc8d2c12dd5f1fe9a3",
+    "lessons": "26bbd434be2d409cde79e635a030fc751ddca749ec9c357d000c6311fc9bdb3e",
+    "intro-repair": "1675d3e084d6e6e5df303df511994aeb5efc208eb279d08feb8fb6c0af630f1a",
+    "repair-findings": "199698d0a47e48c17fa657f7abf06266e76fa0ebe547ef3fb8d1b1b29942902f",
+    "intro-ship": "fd1c590eb9714dee10b25b6db5091e31231eec53d6a81f4ac55b7d67a43e82bd",
+    "ship-tier-full": "68525a06c1feaf9dc6e4cc3d3f60fc0889b39789866bf9dbeebf305045264e34",
+    "ship-tier-auto": "91b3132839b48d60cc4d8d00e123d3d868fa1fca5b4986eddd5a380220f5fc82",
+    "ship-tier-delta": "4ffde89ddf7e56accb6110dee89923e2d5e1936230284115fb283eb1bf6f8bb1",
+    "ship": "36ab2272488231c339b5fbdbdd330874efbca516c90e90805328bbff7b0e7cf7",
+}
+for name, digest in BASE.items():
+    assert hashlib.sha256(b[name].encode()).hexdigest() == digest, name
+assert set(b) - set(BASE) == {"intro-lead", "lead", "close-lead", "routing-lead", "ground-rules-lead"}, sorted(set(b) - set(BASE))
+row = c.BRIEF_PHASES["lead"]
+assert row["prefix"] == "lead" and row["emit"] == "implement" and set(row["allows"]) == {"focus_file", "no_workflow"}
 PY
 
 HEADER_FIXTURE=$(mktemp); export HEADER_FIXTURE
@@ -14046,6 +14132,19 @@ for bad in (None, 7):
     open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(done))
     marker = {"launch_id": "i1"} if bad is None else {"launch_id": "i1", "ts": bad}
     assert c.checkin_facts(rd, dict(task, stop_recorded=marker), idle, payload)["action"] == "paused", bad
+PY
+
+check "docs: task-leads renders the lead brief, states when to use a lead and the recovery" <<'PY'
+import re
+t = " ".join(open("claude/skills/herdr-orchestration/references/task-leads.md").read().split())
+for phrase in ("render-brief --phase lead", "brief-template.md", "brief:lead", "brief:close-lead", "brief_path",
+               "--prompt-file", "parallel implement workers", "several slices", "emit-done --phase implement",
+               "reconcile-leads", "review gate", "ship gate", "hand-write the missing"):
+    assert phrase in t, phrase
+assert "rendered implement brief plus a lead section" not in t
+assert re.search(r"## When to use a task lead", t)
+assert re.search(r"teardown-binding[^.]{0,80}--abandon", t)
+assert "--phase <plan|implement|repair|review|ship|lead>" in open("claude/skills/herdr-orchestration/references/kickoff.md").read()
 PY
 
 check "docs: section 4 records a stop with stop_recorded" <<'PY'
