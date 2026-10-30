@@ -2014,5 +2014,28 @@ for label, extra, files in [
 print("ok" if not bad else bad)
 '
 
+expect_py "RE34 a bool short with =value does not hide an approval or a graphql review" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "q.graphql"), "w") as f:
+    f.write("mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }")
+rev = "repos/o/r/pulls/5/reviews"
+bad = []
+def want(label, got, expected):
+    if got != expected:
+        bad.append((label, got, expected))
+for label, args, expected in [
+    ("approve -i=false", ["api", rev, "-if", "event=APPROVE", "-i=false"], "approve"),
+    ("changes -i=true", ["api", rev, "-if", "event=REQUEST_CHANGES", "-i=true"], "request-changes"),
+    ("-iF", ["api", rev, "-iF", "event=APPROVE", "-i=false"], "approve"),
+    ("-ifevent=", ["api", rev, "-ifevent=APPROVE", "-i=false"], "approve"),
+    ("-i=false first", ["api", "-i=false", rev, "-f", "event=APPROVE"], "approve"),
+    ("-i=false before field", ["api", "-i=false", "-f", "event=APPROVE", rev], "approve"),
+    ("graphql", ["api", "graphql", "-iFquery=@q.graphql", "-i=false"], "unknown"),
+]:
+    want(label, g.review_event(args, d), expected)
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

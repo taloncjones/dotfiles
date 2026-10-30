@@ -142,11 +142,6 @@ PR_VALUE_FLAGS = {
     },
 }
 FIELD_FLAGS = ("-f", "-F", "--raw-field", "--field", "--input")
-# gh api flags whose value is the next argument (gh 2.94.0 --help).
-VALUE_FLAGS = FIELD_FLAGS + (
-    "-H", "--header", "-q", "--jq", "-t", "--template",
-    "--hostname", "--cache", "-p", "--preview",
-)
 
 REVIEW_EVENT_PATH = re.compile(r"pulls/[1-9]\d*/reviews(?:/[1-9]\d*/events)?$")
 # Any reviews or events path, including PR segments gh would normalize (`+5`, `%35`, `05`).
@@ -361,6 +356,9 @@ API_SHORT_LONG = {
     "t": "--template", "p": "--preview", "X": "--method",
 }
 API_LONG_VALUE = frozenset(API_SHORT_LONG.values()) | {"--cache", "--hostname", "--input"}
+# Value flags in normalized form, derived from the two tables above; the
+# method flag is matched ahead of this set where it matters.
+VALUE_FLAGS = frozenset("-" + short for short in API_SHORT_LONG if short != "X") | (API_LONG_VALUE - {"--method"})
 
 
 def api_pairs(args: list[str]) -> list[tuple[str, str | None]]:
@@ -666,15 +664,11 @@ def graphql_query_from_file(args: list[str]) -> bool:
     return False
 
 
-# gh api's short flags (gh 2.96 `gh api --help`): -i/-h take no value.
-API_BOOL_SHORTS = set("ih")
-API_VALUE_SHORTS = set("XfFHqtp")
-
-
 def normalize_api_args(args: list[str]) -> list[str] | None:
     """Split gh api's argv the way pflag does: a short cluster such as `-iX`
     becomes `-i -X`, a value flag takes the rest of its word or the next
     argument (even one starting with `-`), and `-X=GET` drops the `=`.
+    A bool short (`-i`, `-h`) may take `=value`, as pflag allows.
     None for a short flag gh api does not have."""
     out, i = [], 0
     while i < len(args):
@@ -684,17 +678,19 @@ def normalize_api_args(args: list[str]) -> list[str] | None:
             return out + [tok] + args[i:]
         if not tok.startswith("-") or tok == "-" or tok.startswith("--"):
             out.append(tok)
-            if tok in VALUE_FLAGS + ("--method",) and i < len(args):
+            if (tok in VALUE_FLAGS or tok == "--method") and i < len(args):
                 out.append(args[i])
                 i += 1
             continue
         rest = tok[1:]
         while rest:
             flag, rest = rest[0], rest[1:]
-            if flag in API_BOOL_SHORTS:
+            if flag in "ih":
                 out.append("-" + flag)
+                if rest.startswith("="):
+                    rest = ""
                 continue
-            if flag not in API_VALUE_SHORTS:
+            if flag not in API_SHORT_LONG:
                 return None
             if rest:
                 value = rest[1:] if rest[0] == "=" else rest

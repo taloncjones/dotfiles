@@ -1155,8 +1155,6 @@ approve "$h"
 (cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments --input sent.json --template --input=shown.json >"$T/out" 2>"$T/err"); rc=$?
 if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = sent ]; then
     pass "RV48 the draft shows the --input file gh sends, not a --template value"
-elif [ -z "$h" ] && [ "$rc" != 0 ] && [ "$(log_lines)" = 0 ]; then
-    pass "RV48 the shim refuses a comment whose --template value hides the --input file"
 else
     fail "RV48 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
 fi
@@ -1169,10 +1167,30 @@ approve "$h"
 (cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments -f body=benign --input sent.json >"$T/out" 2>"$T/err"); rc=$?
 if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = sent ]; then
     pass "RV49 the draft shows the --input file gh sends, not a -f body field"
-elif [ -z "$h" ] && [ "$rc" != 0 ] && [ "$(log_lines)" = 0 ]; then
-    pass "RV49 the shim refuses a comment whose -f body field hides the --input file"
 else
     fail "RV49 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
+fi
+
+fresh_gate
+printf 'mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }' >"$T/work/q.graphql"
+bad=""
+for spelling in \
+    "repos/o/r/pulls/5/reviews -if event=APPROVE -i=false" \
+    "repos/o/r/pulls/5/reviews -if event=REQUEST_CHANGES -i=true" \
+    "repos/o/r/pulls/5/reviews -iF event=APPROVE -i=false" \
+    "repos/o/r/pulls/5/reviews -ifevent=APPROVE -i=false" \
+    "-i=false repos/o/r/pulls/5/reviews -f event=APPROVE" \
+    "graphql -iFquery=@q.graphql -i=false"; do
+    # shellcheck disable=SC2086
+    (cd "$T/work" && gh api $spelling >"$T/out" 2>"$T/err"); rc=$?
+    if [ "$rc" = 0 ] || [ "$(log_lines)" != 0 ]; then
+        bad="$bad [$spelling rc=$rc log=$(log_lines)]"
+    fi
+done
+if [ -z "$bad" ]; then
+    pass "RV50 the shim refuses review events spelled with a bool short -i=value"
+else
+    fail "RV50 the shim ran a review event hidden behind -i=value:$bad"
 fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
