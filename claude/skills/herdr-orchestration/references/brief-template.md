@@ -186,6 +186,7 @@ Models and efforts were resolved by the native runtime adapter at launch.
 Each worker and reviewer you launch gets its own brief with its own routes.
 Routes for the roles you may name in a focus file:
 <routing-lines>
+<workflow-opt-in-line>
 ```
 ```brief:ground-rules-lead
 ## Ground rules
@@ -222,8 +223,9 @@ change, even a one-line change, goes to an implement worker you launch with
 `launch --binding`, and review goes to a separate reviewer you launch the
 same way in another pane. A change you make yourself cannot ship:
 `emit-envelope` refuses `pr_ready` without a bound implement attempt and a
-bound review attempt from another pane. You open the draft PR and you
-dispatch the review. Read each verb's `--help` for its current flags.
+bound review attempt from another pane. These steps replace two ground rules
+a worker follows: you open the draft PR, and you dispatch the review. Read
+each verb's `--help` for its current flags.
 
 1. Handshake: run `echo "lead-session $CLAUDE_CODE_SESSION_ID"` and stop.
    Do not emit. The stop gate refuses this stop; that is expected. The

@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 696
+assert t.count("\n") <= 698
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 696
+assert t.count("\n") <= 698
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13516,7 +13516,7 @@ b = c.brief_blocks(open(path).read())
 lead = " ".join((b["lead"] + " " + b["close-lead"]).split())
 for phrase in ("Never edit, stage or commit task files", "launch --binding <binding_id> --phase implement",
                "another pane", "lead-session", "write-task --binding", "--control-tier lead",
-               "before any retry", "end the prior worker",
+               "before any retry", "end the prior worker", "replace two ground rules",
                "verify-contract", "<lessons-step>", "emit-done"):
     assert phrase in lead, phrase
 # sha256 of each pre-lead block body; needs no git history (CI checks out at depth 1)
