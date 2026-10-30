@@ -506,7 +506,12 @@ def api_body(args: list[str], cwd: str) -> tuple[str, str | None]:
     if path is None:
         for typed, key, value in api_fields(args):
             if key == "body":
-                return read_text(value[1:], cwd) if typed and value.startswith("@") else ("text", value)
+                if typed and value.startswith("@"):
+                    return read_text(value[1:], cwd)
+                # gh expands placeholders in a typed value, so the draft cannot show what is sent.
+                if typed and PLACEHOLDER_RE.search(value):
+                    return "unreadable", None
+                return "text", value
         return "none", None
     # gh sends the --input file as the body and moves -f fields into the URL query.
     state, raw = read_text(path, cwd)
@@ -1878,7 +1883,12 @@ def draft_main(argv: list[str]) -> int:
     cwd = os.getcwd()
     digest = draft_hash(args, cwd)
     if digest is None:
-        print("draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor", file=sys.stderr)
+        print(
+            "draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor; "
+            "a -F/--field body holding {owner}, {repo}, {branch} or :owner, :repo, :branch is expanded "
+            "by gh, so use -f/--raw-field, which sends it unexpanded",
+            file=sys.stderr,
+        )
         return 1
     event = review_event(args, cwd)
     if event == "unknown" or (event and pinned_review(args) is None):

@@ -2037,5 +2037,32 @@ for label, args, expected in [
 print("ok" if not bad else bad)
 '
 
+expect_py "RE35 a typed body holding a gh placeholder cannot be drafted; a raw field with the same text can" ok '
+import tempfile
+d = tempfile.mkdtemp()
+forms = ["{owner}", "{repo}", "{branch}", ":owner", ":repo", ":branch",
+         "see {owner}/{repo} on {branch}", "ok :owner and :repo at :branch"]
+rev = "repos/o/r/pulls/5/reviews"
+pin = ["-f", "commit_id=" + "a" * 40]
+bad = []
+for text in forms:
+    for label, ep in [
+        ("reviews", ["api", "-X", "POST", rev]),
+        ("reviews event", ["api", "-X", "POST", rev, *pin, "-f", "event=APPROVE"]),
+        ("comments", ["api", "-X", "POST", "repos/o/r/issues/5/comments"]),
+    ]:
+        for typed in ("-F", "--field"):
+            a = ep + [typed, "body=" + text]
+            if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+                bad.append((label, typed, text, "typed drafted"))
+        a = ep + ["--field=body=" + text]
+        if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+            bad.append((label, "--field=", text, "typed drafted"))
+        a = ep + ["-f", "body=" + text]
+        if g.post_body(a, d) != ("text", text) or g.draft_hash(a, d) is None:
+            bad.append((label, "-f", text, "raw refused"))
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

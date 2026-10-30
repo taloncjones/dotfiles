@@ -1193,5 +1193,37 @@ else
     fail "RV50 the shim ran a review event hidden behind -i=value:$bad"
 fi
 
+fresh_gate
+bad=""
+pin="-f commit_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+for text in '{owner}' '{repo}' '{branch}' ':owner' ':repo' ':branch' 'see {owner}/{repo} on {branch}' 'ok :owner and :repo at :branch'; do
+    for ep in "repos/o/r/pulls/5/reviews" "repos/o/r/pulls/5/reviews $pin -f event=APPROVE" "repos/o/r/issues/5/comments"; do
+        # shellcheck disable=SC2086
+        out=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST $ep -F "body=$text" 2>&1); rc=$?
+        # shellcheck disable=SC2086
+        (cd "$T/work" && gh api -X POST $ep -F "body=$text" >"$T/out" 2>"$T/err"); run_rc=$?
+        if [ "$rc" = 0 ] || [ "$run_rc" = 0 ] || [ "$(log_lines)" != 0 ]; then
+            bad="$bad [-F $ep $text draft_rc=$rc run_rc=$run_rc log=$(log_lines)]"
+        fi
+        case $out in *"-f/--raw-field"*) ;; *) bad="$bad [$ep $text no hint]" ;; esac
+    done
+done
+if [ -z "$bad" ]; then
+    pass "RV51 a typed -F body holding a gh placeholder cannot be drafted or posted"
+else
+    fail "RV51 a typed body with a placeholder drafted or ran:$bad"
+fi
+
+fresh_gate
+shown_draft=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST repos/o/r/issues/5/comments -f 'body=see {owner}/{repo} on :branch' 2>/dev/null)
+h=$(printf '%s\n' "$shown_draft" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p')
+approve "$h"
+(cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments -f 'body=see {owner}/{repo} on :branch' >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = 'see {owner}/{repo} on :branch' ] && [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ]; then
+    pass "RV52 a -f body with the same placeholder text drafts the literal text and posts"
+else
+    fail "RV52 the raw field draft did not show or post the literal text (h=$h rc=$rc log=$(log_lines))"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
