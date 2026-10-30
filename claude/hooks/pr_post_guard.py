@@ -504,15 +504,19 @@ def check_replies(kinds: list[str], sid: str, directory: Path) -> str | None:
 def api_body(args: list[str], cwd: str) -> tuple[str, str | None]:
     path = input_path(args)
     if path is None:
-        for typed, key, value in api_fields(args):
-            if key == "body":
-                if typed and value.startswith("@"):
-                    return read_text(value[1:], cwd)
-                # gh expands placeholders in a typed value, so the draft cannot show what is sent.
-                if typed and PLACEHOLDER_RE.search(value):
-                    return "unreadable", None
-                return "text", value
-        return "none", None
+        bodies = [(typed, value) for typed, key, value in api_fields(args) if key == "body"]
+        if not bodies:
+            return "none", None
+        # gh lets a typed field override a raw one, so a repeated body has no single shown text.
+        if len(bodies) > 1:
+            return "unreadable", None
+        typed, value = bodies[0]
+        if typed and value.startswith("@"):
+            return read_text(value[1:], cwd)
+        # gh expands placeholders in a typed value, so the draft cannot show what is sent.
+        if typed and PLACEHOLDER_RE.search(value):
+            return "unreadable", None
+        return "text", value
     # gh sends the --input file as the body and moves -f fields into the URL query.
     state, raw = read_text(path, cwd)
     if state != "text":

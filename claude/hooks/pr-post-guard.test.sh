@@ -2061,6 +2061,10 @@ for text in forms:
         a = ep + ["-f", "body=" + text]
         if g.post_body(a, d) != ("text", text) or g.draft_hash(a, d) is None:
             bad.append((label, "-f", text, "raw refused"))
+for order in (["-f", "body=safe", "-F", "body={owner}"], ["-F", "body={owner}", "-f", "body=safe"]):
+    a = ["api", "-X", "POST", "repos/o/r/issues/5/comments", *order]
+    if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+        bad.append(("repeated body", order))
 print("ok" if not bad else bad)
 '
 
