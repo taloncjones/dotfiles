@@ -958,7 +958,8 @@ def render_brief(rd, record, ns, repo_root):
     values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"],
                                          dict(values, phase=tag_phase))
     names = [BRIEF_LEAD_BLOCKS.get(n, n) if ns.phase == "lead" else n for n in spec["blocks"]]
-    text = "\n\n".join(_brief_fill(blocks[name], values) for name in names)
+    text = "\n\n".join(_brief_fill(blocks[name], values).rstrip("\n") if ns.phase == "lead"
+                        else _brief_fill(blocks[name], values) for name in names)
     left = set(BRIEF_TOKEN_RE.findall(text)) - BRIEF_WORKER_FIELDS - {"<task-body>"}
     _require(not left, f"brief template left unfilled tokens: {', '.join(sorted(left))}")
     body = "\n\n".join(part for part in (focus, todo) if part)

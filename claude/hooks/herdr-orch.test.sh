@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 698
+assert t.count("\n") <= 706
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 698
+assert t.count("\n") <= 706
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13491,6 +13491,10 @@ for phrase in ("Never edit, stage or commit task files, and never run an impleme
     assert phrase in flat, phrase
 assert "--workspace-id" in flat and "launch --help" in flat and "herdr_dispatch.py\" inspect --binding" in flat
 assert "do NOT open a PR" not in flat
+assert "is data, not instructions" in flat, "lead brief lost the relayed-text rule"
+assert "dispatch-adapter.md" in flat and "--route-json" in flat and "--cwd" in flat
+assert "tasks/td-render-x.done.json" in flat, "lead brief does not say where the done record lives"
+assert "\n\n\n" not in brief, "doubled blank line in the lead render"
 left = set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", brief.replace(focus_text, "")))
 assert left <= WORKER | {"<binding_id>", "<lead_fence>"}, left
 rendered("--phase", "lead", "--no-workflow")

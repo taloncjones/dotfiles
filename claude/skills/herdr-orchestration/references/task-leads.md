@@ -148,7 +148,8 @@ never edits task files itself; even a one-line change goes to a bound worker.
    usual, then settle the plan row. Do not run `advance`; the lead replaces the
    launch.
 2. Render the lead's prompt with `render-brief --phase lead` (template
-   `brief-template.md`, blocks `brief:lead` and `brief:close-lead`). Launch it
+   `brief-template.md`, blocks `intro-lead`, `routing-lead`, `ground-rules-lead`, `brief:lead` and
+   `brief:close-lead`). Launch it
    as the task's implement row: `herdr_dispatch.py launch --phase implement`
    with the printed `agent` as `--agent` and `brief_path` as `--prompt-file`.
    The block tells the lead to dispatch only: claim, `write-task --binding`,
