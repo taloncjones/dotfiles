@@ -1935,5 +1935,44 @@ last = g.input_path(argv[4:]) == "two.json" and g.input_path(["--input=a", "--in
 print("ok" if (last_changed and first_changed and last) else (last_changed, first_changed, last))
 '
 
+expect_py "RE30 the draft shows the file or field gh sends, not a template value" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+def put(name, text):
+    with open(os.path.join(d, name), "w") as f:
+        f.write(text)
+put("sent.json", "{\"body\": \"sent\"}")
+put("shown.json", "{\"body\": \"shown\"}")
+base = ["api", "-X", "POST", "repos/o/r/issues/5/comments"]
+cases = [
+    (base + ["--input", "sent.json", "--template", "--input=shown.json"], ("text", "sent"), ["sent.json"]),
+    (base + ["--input", "sent.json", "-t", "--input=shown.json"], ("text", "sent"), ["sent.json"]),
+    (base + ["--input", "sent.json", "-tx"], ("text", "sent"), ["sent.json"]),
+    (base + ["--input", "sent.json", "-q=h", "--input=shown.json"], ("text", "shown"), ["sent.json", "shown.json"]),
+    (base + ["-t", "--raw-field=body=benign", "-f", "body=real"], ("text", "real"), []),
+    (base + ["--jq", "-f", "body=benign", "-f", "body=real"], ("text", "real"), []),
+]
+bad = []
+for a, body, files in cases:
+    got = (g.post_body(a, d), g.draft_files(a))
+    if got != (body, files):
+        bad.append((a, got, (body, files)))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE31 pr review stops reading flags at --" ok '
+cases = [
+    (["pr", "review", "--approve", "--", "-h"], "approve"),
+    (["pr", "review", "--approve", "--", "--help"], "approve"),
+    (["pr", "review", "--approve", "-h", "--"], None),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -355,33 +355,68 @@ def read_text(path: str, cwd: str) -> tuple[str, str | None]:
         return "unreadable", None
 
 
-def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
-    """(typed, key, value) of each field in a normalized `gh api` argv;
-    typed fields (-F/--field) read `@path` values from a file."""
-    fields, i = [], 0
+# gh api value flags by short name (gh 2.94.0 `gh api --help`); -i and -h take no value.
+API_SHORT_LONG = {
+    "f": "--raw-field", "F": "--field", "H": "--header", "q": "--jq",
+    "t": "--template", "p": "--preview", "X": "--method",
+}
+API_LONG_VALUE = frozenset(API_SHORT_LONG.values()) | {"--cache", "--hostname", "--input"}
+
+
+def api_pairs(args: list[str]) -> list[tuple[str, str | None]]:
+    """(flag, value) of each flag in a raw or normalized `gh api` argv, read
+    the way pflag does: `-h` is `("-h", None)`, short flags map to their long
+    name, a value flag takes `=value`, the rest of a short word or the next
+    argument (even one that starts with `-`), and `--` ends the flags."""
+    pairs, i = [], 0
     while i < len(args):
         tok = args[i]
-        if tok in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(args):
-            typed, raw, i = tok in ("-F", "--field"), args[i + 1], i + 2
-        elif tok.startswith(("--raw-field=", "--field=")):
-            typed, raw, i = tok.startswith("--field="), tok.split("=", 1)[1], i + 1
-        else:
-            i += 1
+        i += 1
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name in API_LONG_VALUE and not eq:
+                if i >= len(args):
+                    break
+                value, i = args[i], i + 1
+            pairs.append((name, value if eq or name in API_LONG_VALUE else None))
             continue
-        key, _, value = raw.partition("=")
-        fields.append((typed, key, value))
+        if not tok.startswith("-") or tok == "-":
+            continue
+        for pos, ch in enumerate(tok[1:], 1):
+            if ch == "h":
+                pairs.append(("-h", None))
+                break
+            if ch in API_SHORT_LONG:
+                rest = tok[pos + 1:]
+                if rest:
+                    value = rest[1:] if rest[0] == "=" else rest
+                elif i < len(args):
+                    value, i = args[i], i + 1
+                else:
+                    break
+                pairs.append((API_SHORT_LONG[ch], value))
+                break
+            if ch != "i":
+                break
+    return pairs
+
+
+def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
+    """(typed, key, value) of each field in a `gh api` argv; typed fields
+    (-F/--field) read `@path` values from a file."""
+    fields = []
+    for flag, raw in api_pairs(args):
+        if flag in ("--raw-field", "--field"):
+            key, _, value = raw.partition("=")
+            fields.append((flag == "--field", key, value))
     return fields
 
 
 def input_paths(args: list[str]) -> list[str]:
     """Every --input value in order; gh reads the last one (pflag last-wins)."""
-    out = []
-    for i, tok in enumerate(args):
-        if tok == "--input" and i + 1 < len(args):
-            out.append(args[i + 1])
-        elif tok.startswith("--input="):
-            out.append(tok.split("=", 1)[1])
-    return out
+    return [value for flag, value in api_pairs(args) if flag == "--input"]
 
 
 def input_path(args: list[str]) -> str | None:
@@ -929,13 +964,16 @@ def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
     """(events, commented, helped) of `gh pr review` flags. Like pflag, the last
     value of each event flag wins across long and short forms (`-a=false`,
     `--approve --approve=false`). A short `h` is help whatever follows; the
-    long `--help` is a last-wins Go bool. Help outside a value shows help."""
+    long `--help` is a last-wins Go bool. Help outside a value and before `--`
+    shows help."""
     events: dict[str, bool] = {}
     commented = short_help = long_help = False
     k = 0
     while k < len(rest):
         tok = rest[k]
         k += 1
+        if tok == "--":
+            break
         if tok in ("-b", "--body", "-F", "--body-file", "-R", "--repo"):
             k += 1
         elif tok.startswith("--"):
@@ -1038,38 +1076,18 @@ def _json_strings(node) -> list[str]:
 def repeated_input(api: list[str]) -> bool:
     """True when a gh api argv repeats --input, so the guard and gh could read
     different files."""
-    return sum(1 for t in api if t == "--input" or t.startswith("--input=")) > 1
+    return len(input_paths(api)) > 1
 
 
 def api_help(api: list[str]) -> bool:
     """True when gh prints help for this raw gh api argv instead of sending it:
     a short cluster reaches pflag's help shorthand `h` (any `=value`), or the
-    last long --help is Go-true. A value flag's value and words after `--`
-    are never help."""
-    long_help, i = False, 0
-    while i < len(api):
-        tok = api[i]
-        i += 1
-        if tok == "--":
-            break
-        if tok.startswith("--"):
-            name, eq, value = tok.partition("=")
-            if name == "--help":
-                long_help = not eq or value in GO_TRUE
-            elif not eq and name in VALUE_FLAGS + ("--method",):
-                i += 1
-            continue
-        if not tok.startswith("-") or tok == "-":
-            continue
-        for pos, ch in enumerate(tok[1:], 1):
-            if ch == "h":
-                return True
-            if ch in API_VALUE_SHORTS:
-                i += pos == len(tok) - 1
-                break
-            if ch not in API_BOOL_SHORTS:
-                break
-    return long_help
+    last long --help is Go-true."""
+    pairs = api_pairs(api)
+    if any(flag == "-h" for flag, _value in pairs):
+        return True
+    helps = [value for flag, value in pairs if flag == "--help"]
+    return bool(helps) and (helps[-1] is None or helps[-1] in GO_TRUE)
 
 
 def api_methods(api: list[str]) -> set[str]:

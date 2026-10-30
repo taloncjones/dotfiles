@@ -1147,5 +1147,19 @@ else
     fail "RV47 the shim ran a two --input comment with a swapped last file (h=$h rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
 fi
 
+fresh_gate
+printf '{"body":"sent"}' >"$T/work/sent.json"; printf '{"body":"shown"}' >"$T/work/shown.json"
+shown_draft=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST repos/o/r/issues/5/comments --input sent.json --template --input=shown.json 2>/dev/null)
+h=$(printf '%s\n' "$shown_draft" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p')
+approve "$h"
+(cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments --input sent.json --template --input=shown.json >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = sent ]; then
+    pass "RV48 the draft shows the --input file gh sends, not a --template value"
+elif [ -z "$h" ] && [ "$rc" != 0 ] && [ "$(log_lines)" = 0 ]; then
+    pass "RV48 the shim refuses a comment whose --template value hides the --input file"
+else
+    fail "RV48 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
