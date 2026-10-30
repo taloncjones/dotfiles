@@ -851,7 +851,7 @@ fi
 
 fresh_gate
 gh api -X POST repos/o/r/issues/5/comments --input "$T/c.json" --input "$T/a.json" >"$T/out" 2>"$T/err"; rc=$?
-if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "needs the owner's go" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
     pass "RV21 the shim refuses an issue comment with two --input files"
 else
     fail "RV21 the shim refuses an issue comment with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
@@ -1102,6 +1102,127 @@ if [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
     pass "RV43 the shim runs gh pr review with --help anywhere"
 else
     fail "RV43 the shim refuses gh pr review --help (rc=$rc1$rc2 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X PUT repos/o/r/contents/file.txt --input "$T/one.json" --input "$T/two.json" >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ]; then
+    pass "RV44 the shim runs a non-review write with two --input files"
+else
+    fail "RV44 the shim refused a non-review write with two --input files (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+h=$(draft pr review 5 --comment -b x -a=false)
+approve "$h"
+(cd "$T/work" && gh pr review 5 --comment -b x -a=false >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$h.spent" ]; then
+    pass "RV45 the shim runs a drafted comment review with a false short -a and spends the draft"
+else
+    fail "RV45 the shim refused a comment review with -a=false (h=$h rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api repos/o/r/pulls/5/reviews -f event=APPROVE --help >"$T/out" 2>"$T/err"; rc1=$?
+n1=$(log_lines)
+gh api repos/o/r/pulls/5/reviews -f event=APPROVE --help --help=false >"$T/out" 2>"$T/err"; rc2=$?
+err2=$(cat "$T/err")
+(cd "$T/work" && gh api --help repos/o/r/pulls/5/reviews -f event=APPROVE >"$T/out" 2>"$T/err"); rc3=$?
+if [ "$rc1" = 0 ] && [ "$n1" = 1 ] && [ "$rc2" != 0 ] && printf '%s' "$err2" | grep -q "must be the reviews API call" \
+    && [ "$rc3" != 0 ] && [ "$(log_lines)" = 1 ] && grep -q "needs the owner's go" "$T/err" && ! grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV46 the shim runs a trailing gh api help, pins a help-then-false call, gates a leading help in a work repo"
+else
+    fail "RV46 the shim mishandled gh api help forms (rc=$rc1/$rc2/$rc3 log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+printf '{"body":"first"}' >"$T/work/one.json"; printf '{"body":"approved"}' >"$T/work/two.json"
+h=$(draft api -X POST repos/o/r/issues/5/comments --input one.json --input two.json)
+approve "$h"
+printf '{"body":"swapped"}' >"$T/work/two.json"
+gh api -X POST repos/o/r/issues/5/comments --input one.json --input two.json >"$T/out" 2>"$T/err"; rc=$?
+if [ -n "$h" ] && [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "needs the owner's go" "$T/err"; then
+    pass "RV47 the shim refuses a two --input comment whose last file changed after approval"
+else
+    fail "RV47 the shim ran a two --input comment with a swapped last file (h=$h rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+printf '{"body":"sent"}' >"$T/work/sent.json"; printf '{"body":"shown"}' >"$T/work/shown.json"
+shown_draft=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST repos/o/r/issues/5/comments --input sent.json --template --input=shown.json 2>/dev/null)
+h=$(printf '%s\n' "$shown_draft" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p')
+approve "$h"
+(cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments --input sent.json --template --input=shown.json >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = sent ]; then
+    pass "RV48 the draft shows the --input file gh sends, not a --template value"
+else
+    fail "RV48 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
+fi
+
+fresh_gate
+printf '{"body":"sent"}' >"$T/work/sent.json"
+shown_draft=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST repos/o/r/issues/5/comments -f body=benign --input sent.json 2>/dev/null)
+h=$(printf '%s\n' "$shown_draft" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p')
+approve "$h"
+(cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments -f body=benign --input sent.json >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = sent ]; then
+    pass "RV49 the draft shows the --input file gh sends, not a -f body field"
+else
+    fail "RV49 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
+fi
+
+fresh_gate
+printf 'mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }' >"$T/work/q.graphql"
+bad=""
+for spelling in \
+    "repos/o/r/pulls/5/reviews -if event=APPROVE -i=false" \
+    "repos/o/r/pulls/5/reviews -if event=REQUEST_CHANGES -i=true" \
+    "repos/o/r/pulls/5/reviews -iF event=APPROVE -i=false" \
+    "repos/o/r/pulls/5/reviews -ifevent=APPROVE -i=false" \
+    "-i=false repos/o/r/pulls/5/reviews -f event=APPROVE" \
+    "graphql -iFquery=@q.graphql -i=false"; do
+    # shellcheck disable=SC2086
+    (cd "$T/work" && gh api $spelling >"$T/out" 2>"$T/err"); rc=$?
+    if [ "$rc" = 0 ] || [ "$(log_lines)" != 0 ]; then
+        bad="$bad [$spelling rc=$rc log=$(log_lines)]"
+    fi
+done
+if [ -z "$bad" ]; then
+    pass "RV50 the shim refuses review events spelled with a bool short -i=value"
+else
+    fail "RV50 the shim ran a review event hidden behind -i=value:$bad"
+fi
+
+fresh_gate
+bad=""
+pin="-f commit_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+for text in '{owner}' '{repo}' '{branch}' ':owner' ':repo' ':branch' 'see {owner}/{repo} on {branch}' 'ok :owner and :repo at :branch'; do
+    for ep in "repos/o/r/pulls/5/reviews" "repos/o/r/pulls/5/reviews $pin -f event=APPROVE" "repos/o/r/issues/5/comments"; do
+        # shellcheck disable=SC2086
+        out=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST $ep -F "body=$text" 2>&1); rc=$?
+        # shellcheck disable=SC2086
+        (cd "$T/work" && gh api -X POST $ep -F "body=$text" >"$T/out" 2>"$T/err"); run_rc=$?
+        if [ "$rc" = 0 ] || [ "$run_rc" = 0 ] || [ "$(log_lines)" != 0 ]; then
+            bad="$bad [-F $ep $text draft_rc=$rc run_rc=$run_rc log=$(log_lines)]"
+        fi
+        case $out in *"-f/--raw-field"*) ;; *) bad="$bad [$ep $text no hint]" ;; esac
+    done
+done
+if [ -z "$bad" ]; then
+    pass "RV51 a typed -F body holding a gh placeholder cannot be drafted or posted"
+else
+    fail "RV51 a typed body with a placeholder drafted or ran:$bad"
+fi
+
+fresh_gate
+shown_draft=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST repos/o/r/issues/5/comments -f 'body=see {owner}/{repo} on :branch' 2>/dev/null)
+h=$(printf '%s\n' "$shown_draft" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p')
+approve "$h"
+(cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments -f 'body=see {owner}/{repo} on :branch' >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = 'see {owner}/{repo} on :branch' ] && [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ]; then
+    pass "RV52 a -f body with the same placeholder text drafts the literal text and posts"
+else
+    fail "RV52 the raw field draft did not show or post the literal text (h=$h rc=$rc log=$(log_lines))"
 fi
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"

@@ -1572,7 +1572,7 @@ cases = [
     (["api", "-X", "POST", "repos/o/r/pulls/./5/reviews", *rev], "unknown"),
     (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", *rev], None),
     (["api", "repos/o/r/pulls/5/reviews/"], None),
-    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], "unknown"),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "gc.json", "--input", "ga.json"], None),
     (["api", "-X", "GET", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "-X", "POST", "repos/o/r/issues/5/comments", "-f", "body=x"], None),
     (["api", "repos/{owner}/{repo}/issues/5/comments", "-f", "body=x"], None),
@@ -1828,7 +1828,7 @@ cases = [
     (["pr", "review", "5", "-ah"], None),
     (["pr", "review", "5", "--body", "--help", "--approve"], "approve"),
     (["pr", "review", "5", "--approve", "--help=false"], "approve"),
-    (["pr", "review", "5", "--approve", "-h=false"], "approve"),
+    (["pr", "review", "5", "--approve", "-h=false"], None),
     (["pr", "review", "5", "--approve", "--help=true"], None),
 ]
 bad = []
@@ -1844,6 +1844,229 @@ print("ok" if not bad else bad)
 
 expect_class "RE25 pr review with --help after other flags is a read" read pr review 5 --approve --help
 expect_class "RE25 pr review --help before the number is a read" read pr review --help 5
+
+expect_py "RE26 pr review reads event flags last-wins with Go bool values" ok '
+cases = [
+    (["pr", "review", "5", "--comment", "-b", "x", "-a=false"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-r=false"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-a=0"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-a=F"], None),
+    (["pr", "review", "5", "-ca=false", "-b", "x"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "--approve", "--approve=false"], None),
+    (["pr", "review", "5", "--comment", "-b", "x", "-a", "-a=false"], None),
+    (["pr", "review", "5", "--approve", "-a=false", "--approve", "-b", "x"], "approve"),
+    (["pr", "review", "5", "-a=false", "-a", "-b", "x"], "approve"),
+    (["pr", "review", "5", "--approve=false", "--approve", "-b", "x"], "approve"),
+    (["pr", "review", "5", "-ra=false", "-b", "x"], "request-changes"),
+    (["pr", "review", "5", "-a", "-a=false", "-r", "-b", "x"], "request-changes"),
+    (["pr", "review", "5", "-a", "-r=false", "-b", "x"], "approve"),
+    (["pr", "review", "5", "-a", "-r", "-b", "x"], "unknown"),
+    (["pr", "review", "5", "--approve", "-h=false"], None),
+    (["pr", "review", "5", "-c", "-b", "x", "-ah=false"], None),
+    (["pr", "review", "5", "-a", "-h", "--help=false"], None),
+    (["pr", "review", "5", "-a", "--help", "--help=false"], "approve"),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE27 repeated --input is refused only on a reviews or graphql endpoint" ok '
+cases = [
+    (["api", "-X", "PUT", "repos/o/r/contents/file.txt", "--input", "one.json", "--input", "two.json"], None),
+    (["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "a.json", "--input", "b.json"], None),
+    (["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "--input", "c.json", "--input", "a.json"], "unknown"),
+    (["api", "graphql", "--input", "c.json", "--input", "a.json"], "unknown"),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE28 a gh api call gh answers with help is not a review event" ok '
+rv = ["api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"]
+cases = [
+    (rv + ["--help"], None),
+    (rv + ["-h"], None),
+    (rv + ["-h=false"], None),
+    (rv + ["-ih"], None),
+    (rv + ["--help=1"], None),
+    (["api", "--help"] + rv[1:], None),
+    (rv + ["--input", "x", "--input", "y", "--help"], None),
+    (rv + ["--help", "--help=false"], "approve"),
+    (rv + ["--help=false"], "approve"),
+    (rv + ["-q", "--help"], "approve"),
+    (rv + ["-H", "--help"], "approve"),
+    (["api", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-Xh"], "approve"),
+    (rv + ["--", "--help"], "approve"),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE29 a two --input write hashes both files and input_path reads the last" ok '
+import os, subprocess, tempfile
+d = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "remote", "add", "origin", "https://github.com/o/r.git"], check=True)
+def put(name, text):
+    with open(os.path.join(d, name), "w") as f:
+        f.write(text)
+put("one.json", "{\"body\": \"first\"}")
+put("two.json", "{\"body\": \"last\"}")
+argv = ["api", "-X", "POST", "repos/o/r/issues/5/comments", "--input", "one.json", "--input", "two.json"]
+first = g.draft_hash(argv, d)
+put("two.json", "{\"body\": \"swapped\"}")
+last_changed = first != g.draft_hash(argv, d)
+put("two.json", "{\"body\": \"last\"}")
+put("one.json", "{\"body\": \"swapped\"}")
+first_changed = first != g.draft_hash(argv, d)
+last = g.input_path(argv[4:]) == "two.json" and g.input_path(["--input=a", "--input", "b"]) == "b"
+print("ok" if (last_changed and first_changed and last) else (last_changed, first_changed, last))
+'
+
+expect_py "RE30 the draft shows the file or field gh sends, not a template value" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+def put(name, text):
+    with open(os.path.join(d, name), "w") as f:
+        f.write(text)
+put("sent.json", "{\"body\": \"sent\"}")
+put("shown.json", "{\"body\": \"shown\"}")
+base = ["api", "-X", "POST", "repos/o/r/issues/5/comments"]
+cases = [
+    (base + ["--input", "sent.json", "--template", "--input=shown.json"], ("text", "sent"), ["sent.json"]),
+    (base + ["--input", "sent.json", "-t", "--input=shown.json"], ("text", "sent"), ["sent.json"]),
+    (base + ["--input", "sent.json", "-tx"], ("text", "sent"), ["sent.json"]),
+    (base + ["--input", "sent.json", "-q=h", "--input=shown.json"], ("text", "shown"), ["sent.json", "shown.json"]),
+    (base + ["-t", "--raw-field=body=benign", "-f", "body=real"], ("text", "real"), []),
+    (base + ["--jq", "-f", "body=benign", "-f", "body=real"], ("text", "real"), []),
+]
+bad = []
+for a, body, files in cases:
+    got = (g.post_body(a, d), g.draft_files(a))
+    if got != (body, files):
+        bad.append((a, got, (body, files)))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE31 pr review stops reading flags at --" ok '
+cases = [
+    (["pr", "review", "--approve", "--", "-h"], "approve"),
+    (["pr", "review", "--approve", "--", "--help"], "approve"),
+    (["pr", "review", "--approve", "-h", "--"], None),
+]
+bad = []
+for a, want in cases:
+    got = g.review_event(a, "/")
+    if got != want:
+        bad.append((a, got, want))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE32 a -f body field does not hide the --input file gh sends" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "sent.json"), "w") as f:
+    f.write("{\"body\": \"sent\"}")
+base = ["api", "-X", "POST", "repos/o/r/issues/5/comments"]
+a = base + ["-f", "body=benign", "--input", "sent.json"]
+b = base + ["--input", "sent.json", "-f", "body=benign"]
+ok = g.post_body(a, d) == ("text", "sent") and g.post_body(b, d) == ("text", "sent")
+print("ok" if ok else (g.post_body(a, d), g.post_body(b, d)))
+'
+
+expect_py "RE33 value flags and -- do not hide an approval or fake a pin" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "f"), "w") as f:
+    f.write("mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }")
+rev = "repos/o/r/pulls/5/reviews"
+sha = "a" * 40
+bad = []
+def want(label, got, expected):
+    if got != expected:
+        bad.append((label, got, expected))
+want("it-field", g.review_event(["api", "-it", "--field", "--raw-field=event=APPROVE", rev], d), "approve")
+want("jq-raw", g.review_event(["api", "--jq", "--raw-field", "-fevent=APPROVE", rev], d), "approve")
+want("graphql", g.review_event(["api", "graphql", "-q", "-f", "--field=query=@f"], d), "unknown")
+want("template-pin", g.pinned_review(["api", "--template", "--raw-field=commit_id=" + sha, "-F=body=hi", rev]), None)
+base = ["api", "-X", "POST", "repos/o/r/issues/5/comments"]
+for label, extra, files in [
+    ("-ti x", ["--input", "sent.json", "-ti", "x"], ["sent.json"]),
+    ("-it", ["--input", "sent.json", "-it"], ["sent.json"]),
+    ("-H --input", ["-H", "--input", "--input", "sent.json"], ["sent.json"]),
+    ("--jq --input", ["--jq", "--input", "--input", "sent.json"], ["sent.json"]),
+    ("-- before", ["--", "--input", "sent.json"], []),
+    ("-- after", ["--input", "sent.json", "--", "x"], ["sent.json"]),
+]:
+    want(label, g.input_paths(base + extra), files)
+print("ok" if not bad else bad)
+'
+
+expect_py "RE34 a bool short with =value does not hide an approval or a graphql review" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "q.graphql"), "w") as f:
+    f.write("mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }")
+rev = "repos/o/r/pulls/5/reviews"
+bad = []
+def want(label, got, expected):
+    if got != expected:
+        bad.append((label, got, expected))
+for label, args, expected in [
+    ("approve -i=false", ["api", rev, "-if", "event=APPROVE", "-i=false"], "approve"),
+    ("changes -i=true", ["api", rev, "-if", "event=REQUEST_CHANGES", "-i=true"], "request-changes"),
+    ("-iF", ["api", rev, "-iF", "event=APPROVE", "-i=false"], "approve"),
+    ("-ifevent=", ["api", rev, "-ifevent=APPROVE", "-i=false"], "approve"),
+    ("-i=false first", ["api", "-i=false", rev, "-f", "event=APPROVE"], "approve"),
+    ("-i=false before field", ["api", "-i=false", "-f", "event=APPROVE", rev], "approve"),
+    ("graphql", ["api", "graphql", "-iFquery=@q.graphql", "-i=false"], "unknown"),
+]:
+    want(label, g.review_event(args, d), expected)
+print("ok" if not bad else bad)
+'
+
+expect_py "RE35 a typed body holding a gh placeholder cannot be drafted; a raw field with the same text can" ok '
+import tempfile
+d = tempfile.mkdtemp()
+forms = ["{owner}", "{repo}", "{branch}", ":owner", ":repo", ":branch",
+         "see {owner}/{repo} on {branch}", "ok :owner and :repo at :branch"]
+rev = "repos/o/r/pulls/5/reviews"
+pin = ["-f", "commit_id=" + "a" * 40]
+bad = []
+for text in forms:
+    for label, ep in [
+        ("reviews", ["api", "-X", "POST", rev]),
+        ("reviews event", ["api", "-X", "POST", rev, *pin, "-f", "event=APPROVE"]),
+        ("comments", ["api", "-X", "POST", "repos/o/r/issues/5/comments"]),
+    ]:
+        for typed in ("-F", "--field"):
+            a = ep + [typed, "body=" + text]
+            if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+                bad.append((label, typed, text, "typed drafted"))
+        a = ep + ["--field=body=" + text]
+        if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+            bad.append((label, "--field=", text, "typed drafted"))
+        a = ep + ["-f", "body=" + text]
+        if g.post_body(a, d) != ("text", text) or g.draft_hash(a, d) is None:
+            bad.append((label, "-f", text, "raw refused"))
+for order in (["-f", "body=safe", "-F", "body={owner}"], ["-F", "body={owner}", "-f", "body=safe"]):
+    a = ["api", "-X", "POST", "repos/o/r/issues/5/comments", *order]
+    if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+        bad.append(("repeated body", order))
+print("ok" if not bad else bad)
+'
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
