@@ -752,7 +752,8 @@ BRIEF_PHASES = {
                   "blocks": ("intro-work", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "close-implement")},
     "lead": {"prefix": "lead", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
              "requires": (), "allows": ("focus_file", "no_workflow"),
-             "blocks": ("intro-lead", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "lead", "close-lead")},
+             "blocks": ("intro-lead", "task", "artifacts", "workspace", "routing-lead",
+                        "ground-rules-lead", "lead", "close-lead")},
     "repair": {"prefix": "repair", "emit": "implement", "lessons": "lessons-open-worker", "todo": False,
                "requires": ("focus_file", "findings"), "allows": ("no_workflow",),
                "blocks": ("intro-repair", "task", "repair-findings", "artifacts", *_BRIEF_WORK_BLOCKS,
@@ -793,10 +794,12 @@ def _brief_git(worktree, *args):
         _require(False, f"git {' '.join(args[:2])} failed in the task worktree: {exc}")
 
 
-def _brief_routing(runtime, config):
+def _brief_routing(runtime, config, skip=()):
     routes = config.get("routes", {})
     lines = []
     for label, role in BRIEF_ROUTES:
+        if label in skip:
+            continue
         try:
             route = agent_runtime.resolve_route(runtime, role,
                                                 config={"routes": routes, "provisional": True})
@@ -929,7 +932,7 @@ def render_brief(rd, record, ns, repo_root):
         "dispatch-command": f'python3 "{Path(__file__).resolve().parent / "herdr_dispatch.py"}"',
         "core-context": (f'--repo-path "{repo_root}" --runtime {ns.runtime}'
                          + (" --personal" if ns.personal else "")),
-        "routing-lines": _brief_routing(ns.runtime, config),
+        "routing-lines": _brief_routing(ns.runtime, config, ("impl",) if ns.phase == "lead" else ()),
         "workflow-opt-in-line": blocks["opt-in-withheld" if ns.no_workflow else "opt-in-granted"],
         "artifact-lines": "\n".join(f"- {a.get('kind')}: {a.get('path')} (sha256 {a.get('sha256')})"
                                     for a in artifacts) or "- none recorded",

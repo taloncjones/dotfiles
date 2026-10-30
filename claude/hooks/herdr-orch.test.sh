@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 661
+assert t.count("\n") <= 696
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 661
+assert t.count("\n") <= 696
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13483,7 +13483,13 @@ flat = " ".join(brief.split())
 for phrase in ("dispatch only", "even a one-line change", "launch --binding", "emit-artifacts",
                "emit-envelope", "herdr_dispatch.py", "--phase implement"):
     assert phrase in flat, phrase
-assert not re.search(r"implement (small work )?directly|code the change yourself", flat, re.I)
+assert not re.search(r"implement (small work )?directly|code the change yourself|commit as you go|"
+                     r"finish or commit it|Workflow opt-in|impl: |native skill routing|"
+                     r"Every other ground rule holds", flat, re.I), flat
+for phrase in ("Never edit, stage or commit task files, and never run an implementation",
+               "Start agents only through `launch --binding`", "Use no Workflow or subagent helpers"):
+    assert phrase in flat, phrase
+assert "--workspace-id" in flat and "launch --help" in flat and "herdr_dispatch.py\" inspect --binding" in flat
 assert "do NOT open a PR" not in flat
 left = set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", brief.replace(focus_text, "")))
 assert left <= WORKER | {"<binding_id>", "<lead_fence>"}, left
@@ -13510,7 +13516,7 @@ b = c.brief_blocks(open(path).read())
 lead = " ".join((b["lead"] + " " + b["close-lead"]).split())
 for phrase in ("Never edit, stage or commit task files", "launch --binding <binding_id> --phase implement",
                "another pane", "lead-session", "write-task --binding", "--control-tier lead",
-               "before any retry", "end the prior worker", "replace two ground rules",
+               "before any retry", "end the prior worker",
                "verify-contract", "<lessons-step>", "emit-done"):
     assert phrase in lead, phrase
 # sha256 of each pre-lead block body; needs no git history (CI checks out at depth 1)
@@ -13544,7 +13550,7 @@ BASE = {
 }
 for name, digest in BASE.items():
     assert hashlib.sha256(b[name].encode()).hexdigest() == digest, name
-assert set(b) - set(BASE) == {"intro-lead", "lead", "close-lead"}, sorted(set(b) - set(BASE))
+assert set(b) - set(BASE) == {"intro-lead", "lead", "close-lead", "routing-lead", "ground-rules-lead"}, sorted(set(b) - set(BASE))
 row = c.BRIEF_PHASES["lead"]
 assert row["prefix"] == "lead" and row["emit"] == "implement" and set(row["allows"]) == {"focus_file", "no_workflow"}
 PY
