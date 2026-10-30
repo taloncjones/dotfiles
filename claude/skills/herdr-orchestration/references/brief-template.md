@@ -204,14 +204,22 @@ Routes for the roles you may name in a focus file:
   stalls the task. Put status notes in the same message as your next tool
   call and keep going. The stops that are wanted: the handshake stop, the
   Close steps, and a block only the director or user can clear.
-- Keep the turn alive while a worker runs: a turn boundary is a stop. Wait in
-  the foreground, inside one Bash call, on the worker's done record
-  (`DONE_FILE` is `<account_payload>/tasks/<task_id>.done.json`) with a
-  bounded until-loop (`until [ -s DONE_FILE ] || [ $SECONDS -ge 540 ]; do
-  sleep 10; done`), and re-arm until it appears or 30 minutes pass. At the
-  deadline, close with `--outcome paused --reason timeout`.
+- Keep the turn alive while a worker runs: a turn boundary is a stop. A
+  bound worker's done record is
+  `DONE_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.done.json`
+  and a bound reviewer's verdict is
+  `REVIEW_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.review.json`
+  (the launcher-level `tasks/` path is never written for your workers). Wait
+  in the foreground, inside one Bash call, with a bounded until-loop (`until
+  [ -s FILE ] && grep -q "WORKER_LAUNCH_ID" FILE || [ $SECONDS -ge 540 ]; do
+  sleep 10; done`), where `WORKER_LAUNCH_ID` is the `launch_id` the `launch` you
+  just ran printed. Accept a record only if its `launch_id` or `agent` names
+  that worker: a record from an earlier worker or phase never ends the wait.
+  Re-arm until it appears or 30 minutes pass. At the deadline, close with
+  `--outcome paused --reason timeout`.
 - A stop-gate refusal is a reminder, not a request to emit. While a worker
-  you launched is still running, stop again; its done record resumes you.
+  you launched is still running, keep waiting in your own loop; nothing
+  wakes a stopped lead.
 - When a worker finishes without a hand-back report, check commits since the
   task base (`git log <base_sha>..HEAD`, `git diff <base_sha>..HEAD`) and
   uncommitted files (`git status`). Keep what is there and dispatch a worker
@@ -237,8 +245,8 @@ each verb's `--help` for its current flags.
 2. Claim: `<core-command> claim-owner <core-context> --repo-slug <repo_slug> --control-tier lead --binding <binding_id> --workspace-root <worktree_path>`
    with your session, host and pid. It prints `<lead_fence>`. If a step's
    result is lost, read the state it writes before any retry
-   (`<dispatch-command> inspect --binding <binding_id>`, the bound task record, `gh pr list
-   --head <branch>`), and follow the recovery in `task-leads.md`; never
+   (`<dispatch-command> inspect --binding <binding_id>` with the flags step 4
+   lists, the bound task record, `gh pr list --head <branch>`), and follow the recovery in `task-leads.md`; never
    relaunch or re-claim blind. Before re-dispatching a worker whose
    delivery or completion is uncertain, end the prior worker: re-dispatch
    into its own pane, or close its pane first, because a successor row
@@ -264,10 +272,11 @@ each verb's `--help` for its current flags.
    pane. Fix findings by launching a new implement worker, never by editing.
 6. PR: push the task branch and open a draft PR. Never merge or push the
    default branch.
-7. `emit-artifacts --binding <binding_id>` once with every file the director
-   will quote; a later call replaces the manifest.
-8. `emit-envelope --binding <binding_id>` with outcome `pr_ready`, then close
-   your worker panes.
+7. `<core-command> emit-artifacts --binding <binding_id>` once, repeating
+   `--file` for every file the director will quote; a later call replaces the
+   manifest.
+8. `<core-command> emit-envelope --binding <binding_id>` with outcome
+   `pr_ready`, then close your worker panes.
 ```
 ```brief:close-lead
 ## Close
