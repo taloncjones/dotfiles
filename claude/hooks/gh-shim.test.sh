@@ -1161,5 +1161,19 @@ else
     fail "RV48 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
 fi
 
+fresh_gate
+printf '{"body":"sent"}' >"$T/work/sent.json"
+shown_draft=$(cd "$T/work" && python3 "$HOOK" draft -- gh api -X POST repos/o/r/issues/5/comments -f body=benign --input sent.json 2>/dev/null)
+h=$(printf '%s\n' "$shown_draft" | sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p')
+approve "$h"
+(cd "$T/work" && gh api -X POST repos/o/r/issues/5/comments -f body=benign --input sent.json >"$T/out" 2>"$T/err"); rc=$?
+if [ -n "$h" ] && [ "$(printf '%s\n' "$shown_draft" | sed -n 2p)" = sent ]; then
+    pass "RV49 the draft shows the --input file gh sends, not a -f body field"
+elif [ -z "$h" ] && [ "$rc" != 0 ] && [ "$(log_lines)" = 0 ]; then
+    pass "RV49 the shim refuses a comment whose -f body field hides the --input file"
+else
+    fail "RV49 the draft shows text gh does not send (h=$h shown=$(printf '%s' "$shown_draft" | tail -n1) rc=$rc)"
+fi
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

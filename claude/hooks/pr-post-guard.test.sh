@@ -1974,5 +1974,45 @@ for a, want in cases:
 print("ok" if not bad else bad)
 '
 
+expect_py "RE32 a -f body field does not hide the --input file gh sends" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "sent.json"), "w") as f:
+    f.write("{\"body\": \"sent\"}")
+base = ["api", "-X", "POST", "repos/o/r/issues/5/comments"]
+a = base + ["-f", "body=benign", "--input", "sent.json"]
+b = base + ["--input", "sent.json", "-f", "body=benign"]
+ok = g.post_body(a, d) == ("text", "sent") and g.post_body(b, d) == ("text", "sent")
+print("ok" if ok else (g.post_body(a, d), g.post_body(b, d)))
+'
+
+expect_py "RE33 value flags and -- do not hide an approval or fake a pin" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+with open(os.path.join(d, "f"), "w") as f:
+    f.write("mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }")
+rev = "repos/o/r/pulls/5/reviews"
+sha = "a" * 40
+bad = []
+def want(label, got, expected):
+    if got != expected:
+        bad.append((label, got, expected))
+want("it-field", g.review_event(["api", "-it", "--field", "--raw-field=event=APPROVE", rev], d), "approve")
+want("jq-raw", g.review_event(["api", "--jq", "--raw-field", "-fevent=APPROVE", rev], d), "approve")
+want("graphql", g.review_event(["api", "graphql", "-q", "-f", "--field=query=@f"], d), "unknown")
+want("template-pin", g.pinned_review(["api", "--template", "--raw-field=commit_id=" + sha, "-F=body=hi", rev]), None)
+base = ["api", "-X", "POST", "repos/o/r/issues/5/comments"]
+for label, extra, files in [
+    ("-ti x", ["--input", "sent.json", "-ti", "x"], ["sent.json"]),
+    ("-it", ["--input", "sent.json", "-it"], ["sent.json"]),
+    ("-H --input", ["-H", "--input", "--input", "sent.json"], ["sent.json"]),
+    ("--jq --input", ["--jq", "--input", "--input", "sent.json"], ["sent.json"]),
+    ("-- before", ["--", "--input", "sent.json"], []),
+    ("-- after", ["--input", "sent.json", "--", "x"], ["sent.json"]),
+]:
+    want(label, g.input_paths(base + extra), files)
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

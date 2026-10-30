@@ -504,12 +504,13 @@ def check_replies(kinds: list[str], sid: str, directory: Path) -> str | None:
 
 
 def api_body(args: list[str], cwd: str) -> tuple[str, str | None]:
-    for typed, key, value in api_fields(args):
-        if key == "body":
-            return read_text(value[1:], cwd) if typed and value.startswith("@") else ("text", value)
     path = input_path(args)
     if path is None:
+        for typed, key, value in api_fields(args):
+            if key == "body":
+                return read_text(value[1:], cwd) if typed and value.startswith("@") else ("text", value)
         return "none", None
+    # gh sends the --input file as the body and moves -f fields into the URL query.
     state, raw = read_text(path, cwd)
     if state != "text":
         return state, None
