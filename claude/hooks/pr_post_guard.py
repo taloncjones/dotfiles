@@ -285,7 +285,7 @@ def draft_files(args: list[str]) -> list[str]:
         return paths + input_paths(api)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     if sub in BODY_FILE_SUBCOMMANDS:
-        path = flag_value(args[j + 1:], ("-F", "--body-file"))
+        path = flag_value(args[j + 1:], ("-F", "--body-file"), sub)
         return [path] if path is not None else []
     return []
 
@@ -319,23 +319,40 @@ def exempt_from_go(args: list[str], cwd: str) -> bool:
     return personal_repository(cwd) if owner is None else personal_owner(owner, cwd)
 
 
-def flag_value(args: list[str], names: tuple[str, ...]) -> str | None:
-    """Last value given to one of `names`: `--x v`, `--x=v`, `-x v` or `-xv`."""
+def flag_value(args: list[str], names: tuple[str, ...], sub: tuple[str, ...] = ()) -> str | None:
+    """Last value given to one of `names`, read the way pflag does: `--x v`,
+    `--x=v`, `-x v`, `-xv`, or inside a short cluster where the first value
+    flag takes the rest of the token or the next argument. `sub` supplies the
+    subcommand's other value flags so their arguments are skipped."""
+    values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"} | set(names)
     value, k = None, 0
     while k < len(args):
         tok = args[k]
-        for name in names:
-            if tok == name and k + 1 < len(args):
-                value = args[k + 1]
-                k += 1
-                break
-            if name.startswith("--") and tok.startswith(name + "="):
-                value = tok[len(name) + 1:]
-                break
-            if not name.startswith("--") and tok.startswith(name) and len(tok) > 2 and not tok.startswith("--"):
-                value = tok[2:].removeprefix("=")
-                break
         k += 1
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, eq, rest = tok.partition("=")
+            if name in values and not eq and k < len(args):
+                rest, k = args[k], k + 1
+            if name in names:
+                value = rest if eq or name in values else value
+            continue
+        if not tok.startswith("-") or tok == "-":
+            continue
+        for pos, ch in enumerate(tok[1:], 1):
+            if "-" + ch not in values:
+                continue
+            rest = tok[pos + 1:]
+            if rest:
+                rest = rest.removeprefix("=")
+            elif k < len(args):
+                rest, k = args[k], k + 1
+            else:
+                break
+            if "-" + ch in names:
+                value = rest
+            break
     return value
 
 
@@ -401,6 +418,14 @@ def api_pairs(args: list[str]) -> list[tuple[str, str | None]]:
     return pairs
 
 
+def gh_field_name(key: str) -> str:
+    """Top-level JSON name gh sends a field under: the text before the first
+    `[` or `]`, else the first bracketed name (`event[` and `event[0]` are
+    `event`, `[x]` is `x`)."""
+    parts = [part for part in re.split(r"[\[\]]", key) if part]
+    return parts[0] if parts else key
+
+
 def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
     """(typed, key, value) of each field in a `gh api` argv; typed fields
     (-F/--field) read `@path` values from a file."""
@@ -408,7 +433,7 @@ def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
     for flag, raw in api_pairs(args):
         if flag in ("--raw-field", "--field"):
             key, _, value = raw.partition("=")
-            fields.append((flag == "--field", key, value))
+            fields.append((flag == "--field", gh_field_name(key), value))
     return fields
 
 
@@ -538,16 +563,16 @@ def post_body(args: list[str], cwd: str) -> tuple[str, str | None]:
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     rest = args[j + 1:]
     if sub in CLOSE_SUBCOMMANDS:
-        text = flag_value(rest, ("-c", "--comment"))
+        text = flag_value(rest, ("-c", "--comment"), sub)
         return ("none", None) if text is None else ("text", text)
     if sub not in BODY_FILE_SUBCOMMANDS:
         return "none", None
     if any(t in ("-e", "--editor", "-w", "--web") for t in rest):
         return "unreadable", None
-    path = flag_value(rest, ("-F", "--body-file"))
+    path = flag_value(rest, ("-F", "--body-file"), sub)
     if path is not None:
         return read_text(path, cwd)
-    text = flag_value(rest, ("-b", "--body"))
+    text = flag_value(rest, ("-b", "--body"), sub)
     return ("none", None) if text is None else ("text", text)
 
 

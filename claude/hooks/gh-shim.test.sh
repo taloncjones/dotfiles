@@ -688,6 +688,16 @@ else
 fi
 
 fresh_gate
+hc=$(draft api -X POST repos/o/r/pulls/5/reviews -f body=shown -f 'event[=APPROVE')
+[ -n "$hc" ] && approve "$hc"
+gh api -X POST repos/o/r/pulls/5/reviews -f body=shown -f 'event[=APPROVE' >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
+    pass "RV2b a bracketed event[ key sending APPROVE is not spendable on a generic Post draft"
+else
+    fail "RV2b bracketed event[ key (rc=$rc log=$(log_lines) hc=$hc err=$(cat "$T/err"))"
+fi
+
+fresh_gate
 hc=$(draft pr comment 5 --body-file rv.md)
 approve "$hc"
 rv_run APPROVE; rc=$?

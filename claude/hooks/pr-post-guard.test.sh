@@ -2068,5 +2068,44 @@ for order in (["-f", "body=safe", "-F", "body={owner}"], ["-F", "body={owner}", 
 print("ok" if not bad else bad)
 '
 
+expect_py "RE36 a bracketed field key reads as the event or body gh sends" ok '
+d = "."
+rv = ["api", "repos/o/r/pulls/5/reviews", "-f", "body=shown"]
+bad = []
+for key in ("event[", "event[]", "event[0]", "event[x", "event]"):
+    for form in (["-f", key + "=APPROVE"], ["--field=" + key + "=APPROVE"], ["--raw-field", key + "=APPROVE"]):
+        if g.review_event(rv + form, d) != "approve":
+            bad.append(("event", key, form))
+    if g.review_event(rv + ["-f", key + "=REQUEST_CHANGES"], d) != "request-changes":
+        bad.append(("changes", key))
+for key in ("body[", "body[x]", "body[0]", "body[]"):
+    a = ["api", "-X", "POST", "repos/o/r/issues/5/comments", "-F", key + "={owner}"]
+    if g.post_body(a, d)[0] != "unreadable" or g.draft_hash(a, d) is not None:
+        bad.append(("body", key))
+print("ok" if not bad else bad)
+'
+
+expect_py "RE37 a value flag inside a short cluster binds the file gh reads" ok '
+d = "."
+cases = [
+    (["pr", "review", "5", "--body-file", "shown.txt", "-cFsent.txt"], ["sent.txt"]),
+    (["pr", "review", "5", "-cF", "sent.txt"], ["sent.txt"]),
+    (["pr", "review", "5", "-F", "shown.txt", "-aFsent.txt"], ["sent.txt"]),
+    (["pr", "review", "5", "-cFsent.txt", "-F", "last.txt"], ["last.txt"]),
+    (["pr", "comment", "5", "-eFsent.txt"], ["sent.txt"]),
+    (["issue", "comment", "5", "-wF=sent.txt"], ["sent.txt"]),
+    (["pr", "review", "5", "-cbFshown.txt", "-F", "x.txt"], ["x.txt"]),
+    (["pr", "review", "5", "-b", "-Fnot-a-file", "-F", "x.txt"], ["x.txt"]),
+]
+bad = [(a, g.draft_files(a), w) for a, w in cases if g.draft_files(a) != w]
+a = ["pr", "review", "5", "-cbFtext", "-F", "x.txt"]
+if g.flag_value(a[3:], ("-b", "--body"), ("pr", "review")) != "Ftext":
+    bad.append("cluster body")
+a = ["pr", "close", "5", "-cdone"]
+if g.flag_value(a[3:], ("-c", "--comment"), ("pr", "close")) != "done":
+    bad.append("close comment")
+print("ok" if not bad else bad)
+'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
