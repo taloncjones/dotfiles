@@ -342,6 +342,8 @@ def flag_value(args: list[str], names: tuple[str, ...], sub: tuple[str, ...] = (
             continue
         for pos, ch in enumerate(tok[1:], 1):
             if "-" + ch not in values:
+                if tok[pos + 1:pos + 2] == "=":
+                    break
                 continue
             rest = tok[pos + 1:]
             if rest:

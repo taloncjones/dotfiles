@@ -2096,6 +2096,7 @@ cases = [
     (["issue", "comment", "5", "-wF=sent.txt"], ["sent.txt"]),
     (["pr", "review", "5", "-cbFshown.txt", "-F", "x.txt"], ["x.txt"]),
     (["pr", "review", "5", "-b", "-Fnot-a-file", "-F", "x.txt"], ["x.txt"]),
+    (["pr", "review", "5", "-c=Fnot-a-file", "-F", "x.txt"], ["x.txt"]),
 ]
 bad = [(a, g.draft_files(a), w) for a, w in cases if g.draft_files(a) != w]
 a = ["pr", "review", "5", "-cbFtext", "-F", "x.txt"]
