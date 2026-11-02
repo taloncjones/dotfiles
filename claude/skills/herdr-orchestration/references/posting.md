@@ -90,7 +90,11 @@ python3 ~/.claude/hooks/pr_post_guard.py draft -- gh api -X POST "repos/$PR_REPO
 
 Use `event=REQUEST_CHANGES` for a CHANGES verdict. Registration refuses any
 other approving or request-changes shape: `gh pr review --approve`, graphql,
-the pending-review events path, or a `commit_id` that is not 40 hex characters.
+the pending-review events path, a `commit_id` that is not 40 hex characters, or
+any field beyond `body`, `commit_id` and `event` (`comments[][body]` would post
+inline text the draft never shows). Flags placed before the command words
+(`gh -f event=APPROVE api ...`) are read as cobra does, so they do not hide a
+review.
 
 Ask one single-select question with the body in it. `<head7>` is the first
 seven characters of the gated head (an eight-character id reads as a second

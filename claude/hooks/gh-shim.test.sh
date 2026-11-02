@@ -767,6 +767,30 @@ else
 fi
 
 fresh_gate
+gh -f event=APPROVE api -X POST repos/o/r/pulls/5/reviews >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV13 the shim refuses an approve whose event flag sits before api"
+else
+    fail "RV13 the shim refuses an approve whose event flag sits before api (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh pr -b text review -a 5 >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV14 the shim refuses gh pr review --approve with a flag before review"
+else
+    fail "RV14 the shim refuses gh pr review --approve with a flag before review (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
+gh api -X POST repos/o/r/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -f body=shown -f 'comments[][body]=UNSHOWN' >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "must be the reviews API call" "$T/err"; then
+    pass "RV15 the shim refuses an approve that carries inline comment text"
+else
+    fail "RV15 the shim refuses an approve that carries inline comment text (rc=$rc log=$(log_lines) err=$(cat "$T/err"))"
+fi
+
+fresh_gate
 (cd "$HOME/Git/personal/repo" && FAKE_PR_HEAD=$HEAD_B gh api -X POST repos/me/repo/pulls/5/reviews -f "commit_id=$HEAD_A" -f event=APPROVE -f body=x >/dev/null 2>"$T/err"); rc=$?
 if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q "head moved" "$T/err"; then
     pass "RV6 a personal repository refuses an event review on a moved head"

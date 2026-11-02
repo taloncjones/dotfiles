@@ -124,7 +124,7 @@ def own_pr(target: str, args: list[str], cwd: str) -> bool:
     and one `gh api user` per host (the PR url's host, as own_marker threads
     --hostname). Any failure is False, which gates the call."""
     i, _j = pr_post_guard.subcommand_index(args)
-    if i < len(args) and args[i] == "api" and "://" in (pr_post_guard.parse_api(args[i + 1:])[1] or ""):
+    if i < len(args) and args[i] == "api" and "://" in (pr_post_guard.parse_api(pr_post_guard.without_words(args, i))[1] or ""):
         return False  # a full-URL endpoint names its own host; never assume it is ours
     selector, slug = pr_post_guard.pr_target(args)
     pr_key = selector or "branch:" + pr_post_guard.git_output(cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()

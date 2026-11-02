@@ -108,7 +108,6 @@ SHIM_MARK = b"gh_post_shim.py"
 ORIGIN_RE = re.compile(r"[:/]([^/:]+)/[^/]+?(?:\.git)?/?$")
 # `pr close -c`, `-cbye`, `-dc`, `--comment`, `--comment=bye`.
 CLOSE_COMMENT_RE = re.compile(r"^(--comment(=|$)|-[a-z]*c)")
-GH_VALUE_OPTIONS = ("-R", "--repo", "--hostname")
 # Commands that run their argument as a program, and the runner options
 # that take a value (`timeout -s KILL`, `sudo -u me`, `xargs -n 1`).
 COMMAND_RUNNERS = {"timeout", "stdbuf", "nice", "nohup", "time", "xargs", "env", "sudo", "command", "exec", "watch"}
@@ -221,7 +220,7 @@ def target_slug(args: list[str]) -> str | None:
     slug = None
     i, _verb = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        _method, path, host, _field = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])
+        _method, path, host, _field = parse_api(normalize_api_args(without_words(args, i)) or without_words(args, i))
         hit = re.match(r"repos/([^/{]+)/([^/{]+)", path or "")
         prefix = f"{host}/" if host else ""
         slug = f"{prefix}{hit.group(1)}/{hit.group(2)}" if hit else None
@@ -280,12 +279,12 @@ def draft_files(args: list[str]) -> list[str]:
     fields and --input for gh api."""
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        api = normalize_api_args(args[i + 1:]) or args[i + 1:]
+        api = normalize_api_args(without_words(args, i)) or without_words(args, i)
         paths = [value[1:] for typed, _key, value in api_fields(api) if typed and value.startswith("@")]
         return paths + input_paths(api)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     if sub in BODY_FILE_SUBCOMMANDS:
-        path = flag_value(args[j + 1:], ("-F", "--body-file"), sub)
+        path = flag_value(without_words(args, i, j), ("-F", "--body-file"), sub)
         return [path] if path is not None else []
     return []
 
@@ -319,26 +318,29 @@ def exempt_from_go(args: list[str], cwd: str) -> bool:
     return personal_repository(cwd) if owner is None else personal_owner(owner, cwd)
 
 
-def flag_value(args: list[str], names: tuple[str, ...], sub: tuple[str, ...] = ()) -> str | None:
-    """Last value given to one of `names`, read the way pflag does: `--x v`,
-    `--x=v`, `-x v`, `-xv`, or inside a short cluster where the first value
-    flag takes the rest of the token or the next argument. `sub` supplies the
-    subcommand's other value flags so their arguments are skipped."""
-    values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"} | set(names)
-    value, k = None, 0
+def pflag_walk(args: list[str], values: set[str]):
+    """Yield (flag, value) per flag and (None, token) per positional, read the
+    way pflag does: `--x v`, `--x=v`, `-x v`, `-xv`, or a short cluster where
+    the first value flag takes the rest of the token or the next argument.
+    `values` are the value flags (`-x`, `--xx`); the rest are bool flags.
+    A bool flag yields value None; a trailing value flag yields "" (long)
+    or nothing (short). Tokens after `--` are positionals."""
+    k = 0
     while k < len(args):
         tok = args[k]
         k += 1
         if tok == "--":
-            break
+            for rest in args[k:]:
+                yield None, rest
+            return
         if tok.startswith("--"):
             name, eq, rest = tok.partition("=")
             if name in values and not eq and k < len(args):
                 rest, k = args[k], k + 1
-            if name in names:
-                value = rest if eq or name in values else value
+            yield name, (rest if eq or name in values else None)
             continue
         if not tok.startswith("-") or tok == "-":
+            yield None, tok
             continue
         for pos, ch in enumerate(tok[1:], 1):
             if "-" + ch not in values:
@@ -352,9 +354,18 @@ def flag_value(args: list[str], names: tuple[str, ...], sub: tuple[str, ...] = (
                 rest, k = args[k], k + 1
             else:
                 break
-            if "-" + ch in names:
-                value = rest
+            yield "-" + ch, rest
             break
+
+
+def flag_value(args: list[str], names: tuple[str, ...], sub: tuple[str, ...] = ()) -> str | None:
+    """Last value given to one of `names`. `sub` supplies the subcommand's
+    other value flags so their arguments are skipped."""
+    values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"} | set(names)
+    value = None
+    for flag, found in pflag_walk(args, values):
+        if flag in names and found is not None:
+            value = found
     return value
 
 
@@ -455,22 +466,14 @@ def pr_target(args: list[str]) -> tuple[str | None, str | None]:
     i, j = subcommand_index(args)
     slug = target_slug(args)
     if i < len(args) and args[i] == "api":
-        path = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])[1] or ""
+        path = parse_api(normalize_api_args(without_words(args, i)) or without_words(args, i))[1] or ""
         hit = re.search(r"(?:issues|pulls)/(\d+)", path)
         return (hit.group(1) if hit else None), slug
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"}
-    k = j + 1
-    while k < len(args):
-        tok = args[k]
-        if tok == "--":
-            return (args[k + 1] if k + 1 < len(args) else None), slug
-        if tok in values:
-            k += 2
-            continue
-        if not tok.startswith("-"):
-            return tok, slug
-        k += 1
+    for flag, found in pflag_walk(without_words(args, i, j), values):
+        if flag is None:
+            return found, slug
     return None, slug
 
 
@@ -561,9 +564,9 @@ def post_body(args: list[str], cwd: str) -> tuple[str, str | None]:
     argument), "text", or "unreadable" (stdin, an editor, a bad file)."""
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        return api_body(normalize_api_args(args[i + 1:]) or args[i + 1:], cwd)
+        return api_body(normalize_api_args(without_words(args, i)) or without_words(args, i), cwd)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
-    rest = args[j + 1:]
+    rest = without_words(args, i, j)
     if sub in CLOSE_SUBCOMMANDS:
         text = flag_value(rest, ("-c", "--comment"), sub)
         return ("none", None) if text is None else ("text", text)
@@ -947,14 +950,27 @@ def classify_api(args: list[str]) -> str:
     return "write"
 
 
+def without_words(args: list[str], *indexes: int) -> list[str]:
+    """argv minus the command words at `indexes`, keeping flags that sat
+    before them: cobra hands the command its whole argv less those words."""
+    return [tok for k, tok in enumerate(args) if k not in indexes]
+
+
 def subcommand_index(args: list[str]) -> tuple[int, int]:
-    """Indexes of the first two non-option words (len(args) when absent).
-    Options may sit before either word; -R/--repo/--hostname take a value."""
+    """Indexes of the first two non-option words (len(args) when absent),
+    found the way cobra does before pflag runs: a flag word without `=` takes
+    the next word as its value, except help (a cluster such as `-ab` takes
+    none). Verified against gh 2.94.0 for `-f x api`, `pr -b x review`."""
     found, i = [], 0
     while i < len(args) and len(found) < 2:
-        if not args[i].startswith("-"):
+        tok = args[i]
+        if tok == "--":
+            break
+        if not tok.startswith("-"):
             found.append(i)
-        elif args[i] in GH_VALUE_OPTIONS:
+        elif "=" not in tok and tok not in ("-h", "--help", "--version") and (
+            tok.startswith("--") or len(tok) == 2
+        ):
             i += 1
         i += 1
     found += [len(args)] * (2 - len(found))
@@ -970,9 +986,9 @@ def classify_gh(args: list[str]) -> str:
         return "read"
     i, j = subcommand_index(args)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
-    rest = args[j + 1:]
+    rest = without_words(args, i, j)
     if sub[:1] == ("api",):
-        return classify_api(args[i + 1:])
+        return classify_api(without_words(args, i))
     if sub[:1] == ("search",):
         return "read"
     if sub in READ_SUBCOMMANDS:
@@ -1187,9 +1203,9 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
     cwd = cwd or os.getcwd()
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        if api_help(args[i + 1:]):
+        if api_help(without_words(args, i)):
             return None
-        api = normalize_api_args(args[i + 1:]) or args[i + 1:]
+        api = normalize_api_args(without_words(args, i)) or without_words(args, i)
         cache: dict = {}
         base = _api_review_event(api, cwd, "owner", "repo", cache, False)
         raw_method, raw_path, _host, has_field = parse_api(api)
@@ -1207,7 +1223,7 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
                     return "unknown"
         return "unknown" if mixed and base is not None else base
     if tuple(args[k] for k in (i, j) if k < len(args)) == ("pr", "review"):
-        return _pr_review_event(args[j + 1:])
+        return _pr_review_event(without_words(args, i, j))
     return None
 
 
@@ -1218,12 +1234,16 @@ def pinned_review(args: list[str]) -> tuple[str, str, str, str, str | None] | No
     i, _j = subcommand_index(args)
     if i >= len(args) or args[i] != "api":
         return None
-    api = normalize_api_args(args[i + 1:])
+    api = normalize_api_args(without_words(args, i))
     if api is None or input_path(api) is not None:
         return None
     method, path, host, has_field = parse_api(api)
     hit = REVIEW_POST_PATH.fullmatch(path or "")
     if (method or ("POST" if has_field else "GET")) != "POST" or not hit:
+        return None
+    keys = {key for _typed, key, _value in api_fields(api)}
+    # Any other text-bearing field (`comments[][body]`) would post text the draft never shows.
+    if keys - {"body", "commit_id", "event"}:
         return None
     shas = {value for _typed, key, value in api_fields(api) if key == "commit_id"}
     if len(shas) != 1 or not SHA40_RE.fullmatch(next(iter(shas))):

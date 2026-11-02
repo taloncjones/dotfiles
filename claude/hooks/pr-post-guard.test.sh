@@ -1141,7 +1141,8 @@ expect_rc "P5 work armed pr edit passes the hook (the shim decides)" 0 "$(payloa
 
 case_gate v1x
 expect_class "V1x-1 -R between the subcommand words is a post" post pr -R o/r comment 5 --body x
-expect_class "V1x-2 an unknown flag before the pair is skipped" post --paginate pr comment 5 --body x
+expect_class "V1x-2 an unknown flag=value before the pair is skipped" post --paginate=true pr comment 5 --body x
+expect_class "V1x-2b an unknown bare flag before the pair takes the next word, as cobra does" write --paginate pr comment 5 --body x
 expect_class "V1x-3 attached close comment -cbye is a post" post pr close 5 -cbye
 expect_class "V1x-4 --comment=bye on issue close is a post" post issue close 5 --comment=bye
 expect_class "V1x-5 a close without a comment is a plain write" write pr close 5 --delete-branch
@@ -2105,6 +2106,34 @@ if g.flag_value(a[3:], ("-b", "--body"), ("pr", "review")) != "Ftext":
 a = ["pr", "close", "5", "-cdone"]
 if g.flag_value(a[3:], ("-c", "--comment"), ("pr", "close")) != "done":
     bad.append("close comment")
+print("ok" if not bad else bad)
+'
+
+expect_py "RE35 pr_target and the command words are found the way pflag and cobra do" ok '
+import os, tempfile
+d = tempfile.mkdtemp()
+rev = "repos/o/r/pulls/5/reviews"
+bad = []
+def want(label, got, expected):
+    if got != expected:
+        bad.append((label, got, expected))
+want("close -dc", g.pr_target(["pr", "close", "-dc", "999", "5"]), ("5", None))
+want("review -cb", g.pr_target(["pr", "review", "-cb", "999", "5"]), ("5", None))
+want("comment -b= value", g.pr_target(["pr", "comment", "-b", "x", "5"]), ("5", None))
+want("edit -- target", g.pr_target(["pr", "edit", "--title", "t", "--", "7"]), ("7", None))
+want("no target", g.pr_target(["pr", "comment", "-b", "x"]), (None, None))
+want("pre-flag api", g.review_event(["-f", "event=APPROVE", "api", rev], d), "approve")
+want("pre-flag pr", g.review_event(["pr", "-b", "text", "review", "-a", "5"], d), "approve")
+want("pre-flag root", g.review_event(["-b", "text", "pr", "review", "-r", "5"], d), "request-changes")
+want("pre-flag long", g.review_event(["--hostname", "h", "api", rev, "-f", "event=APPROVE"], d), "approve")
+want("classify pre-flag", g.classify_gh(["-b", "text", "pr", "review", "-r", "5"]), "reply")
+want("words", g.subcommand_index(["-f", "x", "api", "e"]), (2, 3))
+want("cluster", g.subcommand_index(["-if", "api"]), (1, 2))
+sha = "a" * 40
+pin = ["api", "-X", "POST", rev, "-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=shown"]
+want("plain pin", g.pinned_review(pin) is not None, True)
+want("nested comment", g.pinned_review(pin + ["-f", "comments[][body]=UNSHOWN"]), None)
+want("other field", g.pinned_review(pin + ["-f", "comments=x"]), None)
 print("ok" if not bad else bad)
 '
 
