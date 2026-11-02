@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 726
+assert t.count("\n") <= 731
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 726
+assert t.count("\n") <= 731
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13522,17 +13522,20 @@ exec(open(os.environ["BRIEF_FIXTURE"]).read())
 _, brief = rendered("--phase", "lead")
 flat = " ".join(brief.split())
 until = re.search(r"`(until \[ -s FILE \].*?done)`", flat).group(1)
-capture = re.search(r"`(PRIOR_TS=\$\(grep.*?\))`", flat).group(1)
+capture = re.search(r"`(grep -o '\"ts\": \*\"\[\^\"\]\*\"' FILE 2>/dev/null)`", flat).group(1)
 until = until.replace("540", "2").replace("sleep 10", "sleep 0.3")
+def write(f, rec):
+    open(f, "w").write(json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n")
 def waited(record, prior_record):
     d = tempfile.mkdtemp()
     f = os.path.join(d, "t.done.json")
     if prior_record is not None:
-        json.dump(prior_record, open(f, "w"), indent=2)
-    script = capture.replace("FILE", f) + "\n"
+        write(f, prior_record)
+    # process 1: the lead captures the stamp; process 2: waits with it pasted in
+    stamp = subprocess.run(["bash", "-c", capture.replace("FILE", f)], capture_output=True, text=True).stdout.strip()
     if record is not None:
-        script += f"cat > {f} <<'J'\n{json.dumps(record, indent=2)}\nJ\n"
-    script += "SECONDS=0\n" + until.replace("FILE", f).replace("WORKER_LAUNCH_ID", "L1") + "\necho $SECONDS\n"
+        write(f, record)
+    script = "SECONDS=0\n" + until.replace("FILE", f).replace("WORKER_LAUNCH_ID", "L1").replace("STAMP", stamp) + "\necho $SECONDS\n"
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
     return int(out.strip())
 old = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:00:00Z"}
@@ -13546,6 +13549,8 @@ for phrase in ("(add `--focus-file` with a focus file you write when the task ha
                "--binding <binding_id> --json '{...}'"):
     assert phrase in flat, phrase
 assert "(unique per launch)" not in flat and "prints the same agent and path" in flat
+assert "`launch` takes `--personal` only" in flat and "do not survive between Bash calls" in flat
+assert "`summary` holds `outcome`, `follow_ups`, `pr`" in flat
 PY
 
 check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'

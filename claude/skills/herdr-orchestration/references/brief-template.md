@@ -210,16 +210,19 @@ Routes for the roles you may name in a focus file:
   and a bound reviewer's verdict is
   `REVIEW_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.review.json`
   (the launcher-level `tasks/` path is never written for your workers). Before
-  each `launch` or `reprompt`, capture the file's current stamp:
-  `PRIOR_TS=$(grep -o '"ts": *"[^"]*"' FILE 2>/dev/null)` (empty when the file
-  is absent). Wait in the foreground, inside one Bash call, with a bounded
-  until-loop (`until [ -s FILE ] && grep -q "WORKER_LAUNCH_ID" FILE && [
-  "$(grep -o '"ts": *"[^"]*"' FILE)" != "$PRIOR_TS" ] || [ $SECONDS -ge 540 ];
-  do sleep 10; done`), where `WORKER_LAUNCH_ID` is the `launch_id` the `launch`
-  you just ran printed (a `reprompt` keeps it). Accept a record only if its
-  `launch_id` or `agent` names that worker and its `ts` is newer than
-  `PRIOR_TS`: a record from an earlier worker, phase or reprompted slice never
-  ends the wait (`reprompt` keeps the `launch_id` and leaves the old file).
+  each `launch` or `reprompt`, read the file's current stamp with
+  `grep -o '"ts": *"[^"]*"' FILE 2>/dev/null` (no output when the file is
+  absent) and note it as STAMP. Shell variables do not survive between Bash
+  calls, so paste STAMP literally into the loop on every call, each re-arm
+  included (an empty STAMP is `''`). Wait in the foreground, inside one Bash
+  call, with a bounded until-loop (`until [ -s FILE ] && grep -q
+  "WORKER_LAUNCH_ID" FILE && [ "$(grep -o '"ts": *"[^"]*"' FILE)" != 'STAMP' ]
+  || [ $SECONDS -ge 540 ]; do sleep 10; done`), where `WORKER_LAUNCH_ID` is
+  the `launch_id` the `launch` you just ran printed (a `reprompt` keeps it).
+  Accept a record only if its `launch_id` or `agent` names that worker and its
+  `ts` is newer than STAMP: a record from an earlier worker, phase or
+  reprompted slice never ends the wait (`reprompt` keeps the `launch_id` and
+  leaves the old file).
   Re-arm until it appears or 30 minutes pass. At the deadline, close with
   `--outcome paused --reason timeout`.
 - A stop-gate refusal is a reminder, not a request to emit. While a worker
@@ -266,9 +269,9 @@ each verb's `--help` for its current flags.
    `<dispatch-command> launch --binding <binding_id> --phase implement --repo-slug <repo_slug> --task-id <task_id> --workspace-id <workspace_id> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --cwd <worktree_path>`
    plus the printed `agent` as `--agent` and `brief_path` as `--prompt-file`
    (a second render for the same task prints the same agent and path, so
-   launch each render before you render again). Both dispatch verbs take
-   `--runtime` as `<core-context>` has it, and `--personal` only when
-   `<core-context>` carries it. Read `<dispatch-command> launch --help`
+   launch each render before you render again). `inspect` and `reprompt` take
+   `--runtime` (default claude) and `--personal`; `launch` takes `--personal`
+   only. Pass `--personal` only when `<core-context>` carries it. Read `<dispatch-command> launch --help`
    for the other required flags (`--pane-id`, `--route-json`, `--sandbox`);
    `references/dispatch-adapter.md` gives the `--route-json` value
    (`agent_runtime.py route --role implementation`) and the sandbox value.
@@ -285,8 +288,10 @@ each verb's `--help` for its current flags.
    once, repeating `--file` for every file the director will quote; a later
    call replaces the manifest.
 8. `<core-command> emit-envelope <core-context> --repo-slug <repo_slug> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --binding <binding_id> --json '{...}'`
-   with exactly `task_id`, `attempt`, `sequence` and `summary` (outcome
-   `pr_ready`); `herdr_envelope.py` `valid_envelope` gives the shape. Then
+   with exactly `task_id`, `attempt`, `sequence` and `summary`; for
+   `pr_ready`, `summary` holds `outcome`, `follow_ups`, `pr`,
+   `expected_base_sha` and `reason` (null), and `herdr_envelope.py`
+   `valid_envelope` gives the exact shape. Then
    close your worker panes.
 ```
 ```brief:close-lead
