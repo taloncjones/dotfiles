@@ -209,12 +209,17 @@ Routes for the roles you may name in a focus file:
   `DONE_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.done.json`
   and a bound reviewer's verdict is
   `REVIEW_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.review.json`
-  (the launcher-level `tasks/` path is never written for your workers). Wait
-  in the foreground, inside one Bash call, with a bounded until-loop (`until
-  [ -s FILE ] && grep -q "WORKER_LAUNCH_ID" FILE || [ $SECONDS -ge 540 ]; do
-  sleep 10; done`), where `WORKER_LAUNCH_ID` is the `launch_id` the `launch` you
-  just ran printed. Accept a record only if its `launch_id` or `agent` names
-  that worker: a record from an earlier worker or phase never ends the wait.
+  (the launcher-level `tasks/` path is never written for your workers). Before
+  each `launch` or `reprompt`, capture the file's current stamp:
+  `PRIOR_TS=$(grep -o '"ts": *"[^"]*"' FILE 2>/dev/null)` (empty when the file
+  is absent). Wait in the foreground, inside one Bash call, with a bounded
+  until-loop (`until [ -s FILE ] && grep -q "WORKER_LAUNCH_ID" FILE && [
+  "$(grep -o '"ts": *"[^"]*"' FILE)" != "$PRIOR_TS" ] || [ $SECONDS -ge 540 ];
+  do sleep 10; done`), where `WORKER_LAUNCH_ID` is the `launch_id` the `launch`
+  you just ran printed (a `reprompt` keeps it). Accept a record only if its
+  `launch_id` or `agent` names that worker and its `ts` is newer than
+  `PRIOR_TS`: a record from an earlier worker, phase or reprompted slice never
+  ends the wait (`reprompt` keeps the `launch_id` and leaves the old file).
   Re-arm until it appears or 30 minutes pass. At the deadline, close with
   `--outcome paused --reason timeout`.
 - A stop-gate refusal is a reminder, not a request to emit. While a worker
@@ -256,10 +261,14 @@ each verb's `--help` for its current flags.
    worktree above.
 4. Implement: render the worker brief with
    `<core-command> render-brief <core-context> --repo-slug <repo_slug> --task-id <task_id> --phase implement`
-   and launch it with
+   (add `--focus-file` with a focus file you write when the task has no
+   todo body, or the render exits 2) and launch it with
    `<dispatch-command> launch --binding <binding_id> --phase implement --repo-slug <repo_slug> --task-id <task_id> --workspace-id <workspace_id> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --cwd <worktree_path>`
-   plus the printed `agent` (unique per launch) as `--agent` and
-   `brief_path` as `--prompt-file`. Read `<dispatch-command> launch --help`
+   plus the printed `agent` as `--agent` and `brief_path` as `--prompt-file`
+   (a second render for the same task prints the same agent and path, so
+   launch each render before you render again). Both dispatch verbs take
+   `--runtime` as `<core-context>` has it, and `--personal` only when
+   `<core-context>` carries it. Read `<dispatch-command> launch --help`
    for the other required flags (`--pane-id`, `--route-json`, `--sandbox`);
    `references/dispatch-adapter.md` gives the `--route-json` value
    (`agent_runtime.py route --role implementation`) and the sandbox value.
@@ -272,11 +281,13 @@ each verb's `--help` for its current flags.
    pane. Fix findings by launching a new implement worker, never by editing.
 6. PR: push the task branch and open a draft PR. Never merge or push the
    default branch.
-7. `<core-command> emit-artifacts --binding <binding_id>` once, repeating
-   `--file` for every file the director will quote; a later call replaces the
-   manifest.
-8. `<core-command> emit-envelope --binding <binding_id>` with outcome
-   `pr_ready`, then close your worker panes.
+7. `<core-command> emit-artifacts <core-context> --repo-slug <repo_slug> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --task-id <task_id> --binding <binding_id> --file ARTIFACT`
+   once, repeating `--file` for every file the director will quote; a later
+   call replaces the manifest.
+8. `<core-command> emit-envelope <core-context> --repo-slug <repo_slug> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --binding <binding_id> --json '{...}'`
+   with exactly `task_id`, `attempt`, `sequence` and `summary` (outcome
+   `pr_ready`); `herdr_envelope.py` `valid_envelope` gives the shape. Then
+   close your worker panes.
 ```
 ```brief:close-lead
 ## Close

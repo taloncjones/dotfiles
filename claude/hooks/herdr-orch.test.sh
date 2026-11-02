@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 715
+assert t.count("\n") <= 726
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 715
+assert t.count("\n") <= 726
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13514,6 +13514,38 @@ tag = "[td-render-x implement]"
 assert tag in flat and "[td-render-x lead]" not in flat, flat
 line = "LESSON: " + tag + " Dispatch through the bound launch verb."
 assert c.harvest_lesson_lines(line, "td-render-x", "implement") == [line]
+PY
+
+check "render-brief: lead wait ignores a stale same-launch done record" <<'PY'
+import os, re, subprocess, tempfile, json
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+_, brief = rendered("--phase", "lead")
+flat = " ".join(brief.split())
+until = re.search(r"`(until \[ -s FILE \].*?done)`", flat).group(1)
+capture = re.search(r"`(PRIOR_TS=\$\(grep.*?\))`", flat).group(1)
+until = until.replace("540", "2").replace("sleep 10", "sleep 0.3")
+def waited(record, prior_record):
+    d = tempfile.mkdtemp()
+    f = os.path.join(d, "t.done.json")
+    if prior_record is not None:
+        json.dump(prior_record, open(f, "w"), indent=2)
+    script = capture.replace("FILE", f) + "\n"
+    if record is not None:
+        script += f"cat > {f} <<'J'\n{json.dumps(record, indent=2)}\nJ\n"
+    script += "SECONDS=0\n" + until.replace("FILE", f).replace("WORKER_LAUNCH_ID", "L1") + "\necho $SECONDS\n"
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
+    return int(out.strip())
+old = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:00:00Z"}
+new_rec = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:05:00Z"}
+assert waited(old, old) >= 2, "a stale same-launch record ended the wait"
+assert waited(new_rec, old) == 0, "a fresh record after reprompt did not end the wait"
+assert waited(new_rec, None) == 0, "a first record did not end the wait"
+assert waited({"launch_id": "L0", "agent": "z", "ts": "2026-11-02T10:06:00Z"}, old) >= 2, "foreign launch ended the wait"
+for phrase in ("(add `--focus-file` with a focus file you write when the task has no", "`--personal` only when",
+               "--fence <lead_fence> --task-id", "--binding <binding_id> --file ARTIFACT",
+               "--binding <binding_id> --json '{...}'"):
+    assert phrase in flat, phrase
+assert "(unique per launch)" not in flat and "prints the same agent and path" in flat
 PY
 
 check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'
