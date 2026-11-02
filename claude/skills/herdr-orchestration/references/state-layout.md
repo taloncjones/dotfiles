@@ -253,7 +253,7 @@ the new director's startup block.
 ### `decisions.jsonl`
 
 Append-only, one JSON object per line, `v: 1`. Writers: `note-decision`
-(fenced; `event: decision`, `source: owner | director` from `--source`, `task` a task id or null for
+(fenced; `event: decision`, `source: owner` or `source: director` from `--source`, `task` a task id or null for
 repo-wide, `text` at most 500 characters), `retire-decision` (fenced;
 `event: retire`, `retires: <id>`), and the `rollover` verb's carry (inside
 the marker's owner transaction: one `event: carry-batch` line with
