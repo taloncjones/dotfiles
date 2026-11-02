@@ -966,7 +966,9 @@ def subcommand_index(args: list[str]) -> tuple[int, int]:
         tok = args[i]
         if tok == "--":
             break
-        if not tok.startswith("-"):
+        if tok == "":
+            pass  # cobra skips an empty word
+        elif not tok.startswith("-"):
             found.append(i)
         elif "=" not in tok and tok not in ("-h", "--help", "--version") and (
             tok.startswith("--") or len(tok) == 2

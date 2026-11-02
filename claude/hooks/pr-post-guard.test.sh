@@ -1141,7 +1141,7 @@ expect_rc "P5 work armed pr edit passes the hook (the shim decides)" 0 "$(payloa
 
 case_gate v1x
 expect_class "V1x-1 -R between the subcommand words is a post" post pr -R o/r comment 5 --body x
-expect_class "V1x-2 an unknown flag=value before the pair is skipped" post --paginate=true pr comment 5 --body x
+expect_class "V1x-2 an unknown flag before the pair is skipped" post --paginate=true pr comment 5 --body x
 expect_class "V1x-2b an unknown bare flag before the pair takes the next word, as cobra does" write --paginate pr comment 5 --body x
 expect_class "V1x-3 attached close comment -cbye is a post" post pr close 5 -cbye
 expect_class "V1x-4 --comment=bye on issue close is a post" post issue close 5 --comment=bye
@@ -2129,6 +2129,7 @@ want("pre-flag long", g.review_event(["--hostname", "h", "api", rev, "-f", "even
 want("classify pre-flag", g.classify_gh(["-b", "text", "pr", "review", "-r", "5"]), "reply")
 want("words", g.subcommand_index(["-f", "x", "api", "e"]), (2, 3))
 want("cluster", g.subcommand_index(["-if", "api"]), (1, 2))
+want("empty word", g.subcommand_index(["", "api", "e"]), (1, 2))
 sha = "a" * 40
 pin = ["api", "-X", "POST", rev, "-f", "commit_id=" + sha, "-f", "event=APPROVE", "-f", "body=shown"]
 want("plain pin", g.pinned_review(pin) is not None, True)
