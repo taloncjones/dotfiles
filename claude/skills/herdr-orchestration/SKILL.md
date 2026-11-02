@@ -341,9 +341,13 @@ Owner decisions live on disk, not only in the transcript. In the same turn
 as each `AskUserQuestion` answer or owner direction given in chat, record it
 (fenced; one line, at most 500 characters):
 
-`python3 "$CORE" note-decision --repo-slug <slug> --session <id> --fence <fence> (--task <task-id> | --repo-wide) --text '<decision>'`
+`python3 "$CORE" note-decision --repo-slug <slug> --session <id> --fence <fence> --source (owner | director) (--task <task-id> | --repo-wide) --text '<decision>'`
 
-Use `--task` for a decision about one task and `--repo-wide` for a standing
+Use `--source owner` for an `AskUserQuestion` answer or an owner direction
+from chat, and `--source director` for everything else you record. Only owner
+entries are authority. An exit 2 naming `--source` means the loaded procedure
+is stale: re-read this section, repeat any owner-authority lookup, record
+again. Use `--task` for a decision about one task and `--repo-wide` for a standing
 directive. It prints `decision: <id>`. Retire a superseded or expired one
 (for example "retry in 10 minutes" once retried):
 `python3 "$CORE" retire-decision --repo-slug <slug> --session <id> --fence <fence> --id <id>`.

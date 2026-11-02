@@ -1598,7 +1598,7 @@ check "decisions: note-decision appends one line and decisions prints it" <<'SH'
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-out=$($CORE note-decision $A --task some-task --text "  fix N1 only  ")
+out=$($CORE note-decision --source owner $A --task some-task --text "  fix N1 only  ")
 printf '%s\n' "$out" | grep -Eqx 'decision: [0-9a-f]{12}'
 LOG=$(find "$FX" -name decisions.jsonl -type f)
 test -n "$LOG"
@@ -1609,24 +1609,94 @@ assert set(rec) == {"v", "ts", "id", "event", "task", "source", "batch", "text",
 assert rec["event"] == "decision" and rec["task"] == "some-task" and rec["source"] == "owner", rec
 assert rec["batch"] is None and rec["text"] == "fix N1 only", rec
 PY
-$CORE note-decision $A --repo-wide --text "ship serially" >/dev/null
+$CORE note-decision --source owner $A --repo-wide --text "ship serially" >/dev/null
 b=$($CORE decisions --repo-path "$FX_REPO")
 printf '%s\n' "$b" | head -n 1 | grep -q '^\[INFO\] herdr decisions:'
 printf '%s\n' "$b" | grep -Eq -- '^- [0-9]{4}-[0-9]{2}-[0-9]{2} some-task: fix N1 only \[[0-9a-f]{12}\]$'
 printf '%s\n' "$b" | grep -Eq -- '^- [0-9]{4}-[0-9]{2}-[0-9]{2} repo: ship serially \[[0-9a-f]{12}\]$'
 SH
 
+check "decisions: note-decision requires --source and stores owner or director" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+if $CORE note-decision $A --repo-wide --text "no source" >/dev/null 2>"$FX/err"; then exit 1; fi
+grep -q -- '--source' "$FX/err"
+if $CORE note-decision $A --source bogus --repo-wide --text bogus >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --source carry --repo-wide --text carry >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision $A --source "" --repo-wide --text empty >/dev/null 2>&1; then exit 1; fi
+test -z "$(find "$FX" -name decisions.jsonl -type f)"
+$CORE note-decision $A --source owner --repo-wide --text "owner says" >/dev/null
+$CORE note-decision $A --source director --task t1 --text "director says" >/dev/null
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+python3 - "$LOG" <<'PY'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1])]
+assert [r["source"] for r in recs] == ["owner", "director"], recs
+for r in recs:
+    assert set(r) == {"v", "ts", "id", "event", "task", "source", "batch", "text", "session", "fence"}, r
+PY
+SH
+
+check "decisions: a director note prints as a director note and --owner-only drops it" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+did=$($CORE note-decision $A --source director --repo-wide --text "auto: re-pin note" | sed 's/^decision: //')
+test -z "$($CORE decisions --repo-path "$FX_REPO" --owner-only)"
+$CORE decisions --repo-path "$FX_REPO" --owner-only --all; test $? -eq 0
+oid=$($CORE note-decision $A --source owner --repo-wide --text "owner scope" | sed 's/^decision: //')
+b=$($CORE decisions --repo-path "$FX_REPO")
+printf '%s\n' "$b" | head -n 1 | grep -q 'director notes'
+printf '%s\n' "$b" | grep -Eq -- "^- [0-9]{4}-[0-9]{2}-[0-9]{2} repo \(director note\): auto: re-pin note \[$did\]$"
+printf '%s\n' "$b" | grep -Eq -- "^- [0-9]{4}-[0-9]{2}-[0-9]{2} repo: owner scope \[$oid\]$"
+for flags in "" "--all"; do
+    o=$($CORE decisions --repo-path "$FX_REPO" --owner-only $flags)
+    printf '%s\n' "$o" | grep -q "$oid"
+    if printf '%s\n' "$o" | grep -q "$did"; then exit 1; fi
+done
+SH
+
+check "decisions: --owner-only keeps owner notes and answered asks and drops carry notes" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+$CORE note-decision $A --source owner --repo-wide --text "plain owner note" >/dev/null
+$CORE away $A --on >/dev/null
+aid=$($CORE queue-ask $A --repo-wide --question "Ship it?" | awk '{print $2}')
+$CORE answer-ask $A --id "$aid" --text "answered yes" >/dev/null
+LOG=$(find "$FX" -name decisions.jsonl -type f)
+python3 - "$LOG" <<'PY'
+import json, sys
+with open(sys.argv[1], "a") as f:
+    base = {"v": 1, "ts": "2026-10-01T00:00:00Z", "session": "x", "fence": 1}
+    f.write(json.dumps({**base, "id": "aaaaaaaaaaaa", "event": "decision", "task": None,
+                        "source": "owner", "batch": None, "text": "legacy owner note"}) + "\n")
+    f.write(json.dumps({**base, "id": "bbbbbbbbbbbb", "event": "carry-batch", "batch": "B1"}) + "\n")
+    f.write(json.dumps({**base, "id": "cccccccccccc", "event": "decision", "task": None,
+                        "source": "carry", "batch": "B1", "text": "carried thing"}) + "\n")
+PY
+for flags in "" "--no-carry"; do
+    o=$($CORE decisions --repo-path "$FX_REPO" --owner-only $flags)
+    printf '%s\n' "$o" | grep -q 'plain owner note'
+    printf '%s\n' "$o" | grep -q 'answered yes'
+    printf '%s\n' "$o" | grep -q 'legacy owner note'
+    if printf '%s\n' "$o" | grep -q 'carried thing'; then exit 1; fi
+done
+$CORE decisions --repo-path "$FX_REPO" | grep -Eq -- '^- [0-9-]{10} carried: carried thing \[cccccccccccc\]$'
+SH
+
 check "decisions: stale fence refuses note-decision and retire-decision, nothing appended" <<'SH'
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1"
-id=$($CORE note-decision $A --fence "$F" --repo-wide --text keep)
+id=$($CORE note-decision --source owner $A --fence "$F" --repo-wide --text keep)
 id=${id#decision: }
 LOG=$(find "$FX" -name decisions.jsonl -type f)
 n=$(wc -l < "$LOG")
-if $CORE note-decision $A --fence $((F + 7)) --repo-wide --text stale >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --fence $((F + 7)) --repo-wide --text stale >/dev/null 2>&1; then exit 1; fi
 if $CORE retire-decision $A --fence $((F + 7)) --id "$id" >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --session 33333333-3333-4333-8333-333333333333 --fence "$F" --repo-wide --text x >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --session 33333333-3333-4333-8333-333333333333 --fence "$F" --repo-wide --text x >/dev/null 2>&1; then exit 1; fi
 test "$(wc -l < "$LOG")" -eq "$n"
 SH
 
@@ -1634,16 +1704,16 @@ check "decisions: note-decision input validation refuses bad text, scope flags a
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-if $CORE note-decision $A --repo-wide --text "   " >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --repo-wide --text "$(python3 -c 'print("x" * 501)')" >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --repo-wide --text "$(printf 'a\nb')" >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --repo-wide --text "$(printf 'a\rb')" >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --repo-wide --task t1 --text y >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --text y >/dev/null 2>&1; then exit 1; fi
-if $CORE note-decision $A --task ../x --text y >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --repo-wide --text "   " >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --repo-wide --text "$(python3 -c 'print("x" * 501)')" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --repo-wide --text "$(printf 'a\nb')" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --repo-wide --text "$(printf 'a\rb')" >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --repo-wide --task t1 --text y >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --text y >/dev/null 2>&1; then exit 1; fi
+if $CORE note-decision --source owner $A --task ../x --text y >/dev/null 2>&1; then exit 1; fi
 test -z "$(find "$FX" -name decisions.jsonl -type f)"
-$CORE note-decision $A --repo-wide --text "$(python3 -c 'print("x" * 500)')" >/dev/null
-$CORE note-decision $A --task never-recorded --text ok >/dev/null
+$CORE note-decision --source owner $A --repo-wide --text "$(python3 -c 'print("x" * 500)')" >/dev/null
+$CORE note-decision --source owner $A --task never-recorded --text ok >/dev/null
 test "$(wc -l < "$(find "$FX" -name decisions.jsonl -type f)")" -eq 2
 SH
 
@@ -1702,7 +1772,7 @@ check "decisions: retire-decision hides the entry, repeats are no-ops, unknown i
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-id=$($CORE note-decision $A --repo-wide --text "retry in 10 minutes")
+id=$($CORE note-decision --source owner $A --repo-wide --text "retry in 10 minutes")
 id=${id#decision: }
 $CORE decisions --repo-path "$FX_REPO" | grep -q 'retry in 10 minutes'
 test "$($CORE retire-decision $A --id "$id")" = "retired: $id"
@@ -1720,9 +1790,9 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
 RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
 for t in t-open t-failed t-abandoned t-merged t-archived t-unknown; do
-    $CORE note-decision $A --task $t --text "note for $t" >/dev/null
+    $CORE note-decision --source owner $A --task $t --text "note for $t" >/dev/null
 done
-$CORE note-decision $A --repo-wide --text "note for repo" >/dev/null
+$CORE note-decision --source owner $A --repo-wide --text "note for repo" >/dev/null
 mkdir -p "$RD/tasks" "$RD/archive/2026-09/tasks"
 printf '{"status":"implementing"}' > "$RD/tasks/t-open.json"
 printf '{"status":"failed"}' > "$RD/tasks/t-failed.json"
@@ -1783,7 +1853,7 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
 T=$(python3 -c 'print("x" * 390)')
 i=0
-while [ $i -lt 30 ]; do $CORE note-decision $A --repo-wide --text "n$i $T" >/dev/null; i=$((i + 1)); done
+while [ $i -lt 30 ]; do $CORE note-decision --source owner $A --repo-wide --text "n$i $T" >/dev/null; i=$((i + 1)); done
 b=$($CORE decisions --repo-path "$FX_REPO")
 test "$(printf '%s' "$b" | wc -c)" -le 3000
 printf '%s\n' "$b" | tail -n 1 | grep -Eq '^\([0-9]+ older omitted; full list: python3 ~/\.claude/hooks/herdr_orch_core\.py decisions --repo-path .+ --all\)$'
@@ -1801,7 +1871,7 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
 p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$1" "$FX_REPO"; }
 test -z "$(p startup | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
 test -z "$(p resume | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
-$CORE note-decision --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F" --repo-wide --text "serial shipping" >/dev/null
+$CORE note-decision --source owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F" --repo-wide --text "serial shipping" >/dev/null
 ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
 for src in startup resume; do
     p $src | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H | ctx > "$FX/c.$src"
@@ -1822,7 +1892,7 @@ cp "$HANDOVER_STUB" "$FX/bin/herdr"
 sleep 60 & OLD=$!
 S1=11111111-1111-4111-8111-111111111111
 F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
-$CORE note-decision --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F1" --repo-wide --text "owner standing rule" >/dev/null
+$CORE note-decision --source owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F1" --repo-wide --text "owner standing rule" >/dev/null
 RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
 # The rollover verb writes the carry entries and the marker; the marker is then
 # rewritten for the token this check holds.
@@ -1890,7 +1960,7 @@ check "decisions: a malformed record is skipped and the rest of the block stays"
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-id=$($CORE note-decision $A --repo-wide --text "keep me")
+id=$($CORE note-decision --source owner $A --repo-wide --text "keep me")
 id=${id#decision: }
 LOG=$(find "$FX" -name decisions.jsonl -type f)
 printf '%s\n' '{"v":1,"event":"retire","id":"r1r1r1r1r1r1","retires":["x"]}' \
@@ -1907,7 +1977,7 @@ check "decisions: an append after a torn line starts on a new line" <<'SH'
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-id=$($CORE note-decision $A --repo-wide --text "retire me")
+id=$($CORE note-decision --source owner $A --repo-wide --text "retire me")
 id=${id#decision: }
 LOG=$(find "$FX" -name decisions.jsonl -type f)
 printf '%s' '{"v":1,"event":"decision","id":"ffff' >> "$LOG"
@@ -1915,7 +1985,7 @@ test "$($CORE retire-decision $A --id "$id")" = "retired: $id"
 test "$(wc -l < "$LOG")" -eq 3
 test "$(sed -n 2p "$LOG")" = '{"v":1,"event":"decision","id":"ffff'
 test -z "$($CORE decisions --repo-path "$FX_REPO")"
-$CORE note-decision $A --repo-wide --text "after the tear" >/dev/null
+$CORE note-decision --source owner $A --repo-wide --text "after the tear" >/dev/null
 test "$(wc -l < "$LOG")" -eq 4
 $CORE decisions --repo-path "$FX_REPO" | grep -q 'repo: after the tear \['
 SH
@@ -1926,7 +1996,7 @@ S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-$CORE note-decision $A --repo-wide --text "stays live" >/dev/null
+$CORE note-decision --source owner $A --repo-wide --text "stays live" >/dev/null
 chmod 0400 "$RD/decisions.jsonl"
 PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
     $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
@@ -1975,7 +2045,7 @@ S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
 A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
-$CORE note-decision $A --repo-wide --text "stays live" >/dev/null
+$CORE note-decision --source owner $A --repo-wide --text "stays live" >/dev/null
 chmod 0000 "$RD/decisions.jsonl"
 PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
     $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
@@ -2005,7 +2075,7 @@ F=$($CORE claim-owner --repo-path "$R2" --runtime claude --repo-slug "$FX_SLUG" 
 T=$(python3 -c 'print("x" * 390)')
 i=0
 while [ $i -lt 10 ]; do
-    $CORE note-decision --repo-path "$R2" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    $CORE note-decision --source owner --repo-path "$R2" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
         --repo-wide --text "n$i $T" >/dev/null
     i=$((i + 1))
 done
@@ -2047,7 +2117,7 @@ print(c.repo_slug(c.context_git(ctx["root"], "remote", "get-url", "origin"), ctx
 export WORKFLOW_PERSONAL_ACCOUNT=1
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$W" --runtime claude --repo-slug "$WS" --session $S1 --host h --pid $$)
-$CORE note-decision --repo-slug "$WS" --session $S1 --fence "$F" --repo-wide --text "personal note" >/dev/null
+$CORE note-decision --source owner --repo-slug "$WS" --session $S1 --fence "$F" --repo-wide --text "personal note" >/dev/null
 test -f "$HOME/.claude/herdr-orch/$WS/decisions.jsonl"
 $CORE decisions --repo-path "$W" | grep -q 'repo: personal note \['
 test -z "$(env -u WORKFLOW_PERSONAL_ACCOUNT $CORE decisions --repo-path "$W")"

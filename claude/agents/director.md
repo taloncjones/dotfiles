@@ -40,8 +40,8 @@ every start is authoritative: do not re-ask a listed owner decision. If it
 ends with an `older omitted` line or the hook printed `[WARNING] herdr
 decisions: not loaded`, run the command it names before acting on any owner
 direction or dispatch. Record every `AskUserQuestion` answer and every owner
-direction from chat in the same turn with the skill's `note-decision`
-(`--task` for a task, `--repo-wide` otherwise), and `retire-decision` one
+direction from chat in the same turn with the skill's `note-decision
+--source owner` (`--task` for a task, `--repo-wide` otherwise), and `retire-decision` one
 that is superseded or expired.
 
 In herdr mode the director edits repo files only under the skill's

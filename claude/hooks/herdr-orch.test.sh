@@ -14306,6 +14306,21 @@ skill = rd("SKILL.md")
 assert len(skill.encode("utf-8")) <= 67000 and "Contract re-pin" in skill
 PY
 
+check "docs: owner-authority rules accept only owner-source decisions" <<'PY'
+import os
+d = "claude/skills/herdr-orchestration/"
+auto = open(d + "references/auto-actions.md", encoding="utf-8").read()
+skill = open(d + "SKILL.md", encoding="utf-8").read()
+def sec(start, end):
+    return auto[auto.index(start):auto.index(end)]
+assert "--owner-only" in sec("## Repair", "## Doc-rule actions")
+for title, end in (("### Contract re-pin", "### Todo split"), ("### Todo split", "### Delta round")):
+    body = sec(title, end)
+    assert "--owner-only" in body and "--source director" in body, title
+log = skill.split("### Decisions log", 1)[1].split("\n## ", 1)[0]
+assert "--source owner" in log and "--source director" in log
+PY
+
 check "docs: an unexplained contract hash mismatch (verify-contract exit 4) stays an integrity halt" <<'PY'
 import os
 d = "claude/skills/herdr-orchestration/"

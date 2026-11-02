@@ -5861,6 +5861,8 @@ def _decision_line(e):
         scope = "carried"
     else:
         scope = e["task"] if isinstance(e.get("task"), str) else "repo"
+        if e.get("source") == "director":
+            scope += " (director note)"
     return f"- {e['ts'][:10]} {scope}: {e['text']} [{e.get('id')}]"
 
 
@@ -5869,8 +5871,10 @@ def decisions_block(entries, repo_path, show_all=False):
     DECISIONS_BLOCK_MAX, and an omission line when any were dropped."""
     if not entries:
         return ""
-    header = ("[INFO] herdr decisions: owner decisions and directives on disk. "
-              "They stand until retired; do not re-ask them.")
+    header = ("[INFO] herdr decisions: owner decisions, director notes and carried "
+              "notes on disk. They stand until retired. Do not re-ask an owner "
+              "decision; a director note or carried note is reporting only, "
+              "never owner authority.")
     lines = [_decision_line(e) for e in entries]
     if show_all:
         return "\n".join([header] + lines)
@@ -5932,7 +5936,7 @@ def _note_decision(ns) -> int:
     with _fenced(ns) as rd:
         did = decision_id()
         append_decision(rd, {"v": 1, "ts": now_iso(), "id": did, "event": "decision",
-                             "task": None if ns.repo_wide else ns.task, "source": "owner",
+                             "task": None if ns.repo_wide else ns.task, "source": ns.source,
                              "batch": None, "text": text, "session": ns.session,
                              "fence": ns.fence})
     print(f"decision: {did}")
@@ -6179,6 +6183,8 @@ def _decisions(ns) -> int:
     except (OSError, ValueError) as exc:
         print(f"decisions: unreadable ({exc})")
         return 1
+    if ns.owner_only:
+        entries = [e for e in entries if e.get("source") == "owner"]
     block = decisions_block(entries, ns.repo_path, show_all=ns.all)
     if block:
         print(block)
@@ -6416,6 +6422,7 @@ def _main(argv=None) -> int:
     dc.add_argument("--personal", action="store_true")
     dc.add_argument("--no-carry", action="store_true")
     dc.add_argument("--all", action="store_true")
+    dc.add_argument("--owner-only", action="store_true")
     ar = sub.add_parser("adopt-rollover")
     ar.add_argument("--repo-path", required=True)
     ar.add_argument("--session", required=True)
@@ -6614,6 +6621,7 @@ def _main(argv=None) -> int:
     add("append-lessons", "--task-id", "--phase", "--source", fenced=True)
     nd = add("note-decision", fenced=True)
     nd.add_argument("--text", required=True)
+    nd.add_argument("--source", choices=("owner", "director"), required=True)
     scope_group = nd.add_mutually_exclusive_group(required=True)
     scope_group.add_argument("--task", default=None)
     scope_group.add_argument("--repo-wide", action="store_true")

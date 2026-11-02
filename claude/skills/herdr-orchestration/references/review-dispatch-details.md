@@ -119,7 +119,7 @@ review deadline, <launch_id>`, and never fabricate a review record,
   non-approved status.
 - After that write, re-dispatch without asking:
   `dispatch-gate ... --phase review --infra-rerun` (no director-side reset;
-  the gate resets the stale verdict and counts the re-run). Record a note
+  the gate resets the stale verdict and counts the re-run). Record a note (`--source director`)
   from the result's `infra_rerun` field. When it refuses with
   `infrastructure re-run budget spent`, ask once per
   `references/auto-actions.md`. A review `changes-requested` verdict whose
