@@ -214,7 +214,8 @@ Routes for the roles you may name in a focus file:
   `grep -o '"ts": *"[^"]*"' FILE 2>/dev/null` (no output when the file is
   absent) and note it as STAMP. Shell variables do not survive between Bash
   calls, so paste STAMP literally into the loop on every call, each re-arm
-  included (an empty STAMP is `''`). Wait in the foreground, inside one Bash
+  included. Replace only the word STAMP; the single quotes around it stay
+  (with no record, the operand is `''`). Wait in the foreground, inside one Bash
   call, with a bounded until-loop (`until [ -s FILE ] && grep -q
   "WORKER_LAUNCH_ID" FILE && [ "$(grep -o '"ts": *"[^"]*"' FILE)" != 'STAMP' ]
   || [ $SECONDS -ge 540 ]; do sleep 10; done`), where `WORKER_LAUNCH_ID` is
@@ -241,9 +242,8 @@ Routes for the roles you may name in a focus file:
 You dispatch only. Never edit, stage or commit task files yourself: every
 change, even a one-line change, goes to an implement worker you launch with
 `launch --binding`, and review goes to a separate reviewer you launch the
-same way in another pane. A change you make yourself cannot ship:
-`emit-envelope` refuses `pr_ready` without a bound implement attempt and a
-bound review attempt from another pane. These steps replace two ground rules
+same way in another pane. `emit-envelope` refuses `pr_ready` without a
+bound implement attempt and a bound review attempt in distinct panes. These steps replace two ground rules
 a worker follows: you open the draft PR, and you dispatch the review. Read
 each verb's `--help` for its current flags.
 
@@ -260,8 +260,10 @@ each verb's `--help` for its current flags.
    into its own pane, or close its pane first, because a successor row
    tells teardown the prior pane is gone.
 3. Record: `<core-command> write-task <core-context> --repo-slug <repo_slug> --binding <binding_id> --task-id <task_id> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --json '{...}'`
-   with `workers` omitted, `base_sha` `<base_sha>`, and the branch and
-   worktree above.
+   where the JSON object carries exactly these keys: `task_id` `<task_id>`,
+   `repo_slug` `<repo_slug>`, `branch` (the task branch above), `worktree`
+   `<worktree_path>`, and `base_sha` `<base_sha>`. Omit `workers`. `launch`
+   refuses a record missing any of them.
 4. Implement: render the worker brief with
    `<core-command> render-brief <core-context> --repo-slug <repo_slug> --task-id <task_id> --phase implement`
    (add `--focus-file` with a focus file you write when the task has no
@@ -271,15 +273,18 @@ each verb's `--help` for its current flags.
    (a second render for the same task prints the same agent and path, so
    launch each render before you render again). `inspect` and `reprompt` take
    `--runtime` (default claude) and `--personal`; `launch` takes `--personal`
-   only. Pass `--personal` only when `<core-context>` carries it. Read `<dispatch-command> launch --help`
+   only. Add `--personal` only if `<core-context>` already carries it. Read `<dispatch-command> launch --help`
    for the other required flags (`--pane-id`, `--route-json`, `--sandbox`);
    `references/dispatch-adapter.md` gives the `--route-json` value
    (`agent_runtime.py route --role implementation`) and the sandbox value.
    `inspect` needs `--repo-slug --task-id --phase --workspace-id --cwd`. A
    later slice is `reprompt --binding` on the final row or a fresh
    `launch --binding`.
-5. Review: write `review_head_sha` equal to HEAD with `write-task
-   --binding`, render with `render-brief --phase review --focus-file` and a
+5. Review: rewrite the whole record with `write-task --binding` as in step 3, carrying
+   every key it set (`task_id`, `repo_slug`, `branch`, `worktree`,
+   `base_sha`) and adding `review_head_sha` equal to HEAD; `write-task`
+   replaces the record, so a partial rewrite drops the omitted keys. Then
+   render with `render-brief --phase review --focus-file` and a
    focus file you write, and `launch --binding --phase review` in another
    pane. Fix findings by launching a new implement worker, never by editing.
 6. PR: push the task branch and open a draft PR. Never merge or push the

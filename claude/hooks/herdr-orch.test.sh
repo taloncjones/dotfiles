@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 731
+assert t.count("\n") <= 736
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 731
+assert t.count("\n") <= 736
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13544,13 +13544,47 @@ assert waited(old, old) >= 2, "a stale same-launch record ended the wait"
 assert waited(new_rec, old) == 0, "a fresh record after reprompt did not end the wait"
 assert waited(new_rec, None) == 0, "a first record did not end the wait"
 assert waited({"launch_id": "L0", "agent": "z", "ts": "2026-11-02T10:06:00Z"}, old) >= 2, "foreign launch ended the wait"
-for phrase in ("(add `--focus-file` with a focus file you write when the task has no", "`--personal` only when",
+for phrase in ("(add `--focus-file` with a focus file you write when the task has no", "`--personal` only if",
                "--fence <lead_fence> --task-id", "--binding <binding_id> --file ARTIFACT",
                "--binding <binding_id> --json '{...}'"):
     assert phrase in flat, phrase
 assert "(unique per launch)" not in flat and "prints the same agent and path" in flat
 assert "`launch` takes `--personal` only" in flat and "do not survive between Bash calls" in flat
 assert "`summary` holds `outcome`, `follow_ups`, `pr`" in flat
+PY
+
+check "render-brief: lead steps 3 and 5 name every key the bound launch validates" <<'PY'
+import os, re, sys
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+_, brief = rendered("--phase", "lead")
+flat = " ".join(brief.split())
+sys.path.insert(0, "claude/hooks")
+import herdr_dispatch as dsp
+step3 = re.search(r"3\. Record:.*?(?= 4\. Implement:)", flat).group(0)
+step5 = re.search(r"5\. Review:.*?(?= 6\. PR:)", flat).group(0)
+keys_text = re.search(r"carries exactly these keys: (.*?)\. Omit", step3).group(1)
+keys = re.findall(r"(?:^|, (?:and )?)`([a-z_]+)`", keys_text)
+assert set(keys) == {"task_id", "repo_slug", "branch", "worktree", "base_sha"}, keys
+# build the bound record from step 3's key list and run the launch validation
+values = {"task_id": "t1", "repo_slug": "slug1", "branch": "b1", "worktree": os.getcwd(), "base_sha": "a" * 40}
+record = {k: values[k] for k in keys}
+rrepo = {"root": os.getcwd(), "branch": "b1"}
+dsp._validate_task_context(record, rrepo, "slug1")
+for k in keys:
+    bad = dict(record); del bad[k]
+    if k == "task_id":
+        continue
+    try:
+        dsp._validate_task_context(bad, rrepo, "slug1")
+    except dsp.DispatchError:
+        pass
+    else:
+        raise AssertionError("validation accepted a record without " + k)
+for k in keys:
+    assert "`" + k + "`" in step5, "step 5 drops " + k
+assert "review_head_sha" in step5 and "replaces the record" in step5
+assert "Replace only the word STAMP; the single quotes" in flat and "the operand is `''`" in flat
+assert "cannot ship" not in flat and "distinct panes" in flat
 PY
 
 check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'
