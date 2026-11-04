@@ -108,7 +108,6 @@ SHIM_MARK = b"gh_post_shim.py"
 ORIGIN_RE = re.compile(r"[:/]([^/:]+)/[^/]+?(?:\.git)?/?$")
 # `pr close -c`, `-cbye`, `-dc`, `--comment`, `--comment=bye`.
 CLOSE_COMMENT_RE = re.compile(r"^(--comment(=|$)|-[a-z]*c)")
-GH_VALUE_OPTIONS = ("-R", "--repo", "--hostname")
 # Commands that run their argument as a program, and the runner options
 # that take a value (`timeout -s KILL`, `sudo -u me`, `xargs -n 1`).
 COMMAND_RUNNERS = {"timeout", "stdbuf", "nice", "nohup", "time", "xargs", "env", "sudo", "command", "exec", "watch"}
@@ -142,11 +141,6 @@ PR_VALUE_FLAGS = {
     },
 }
 FIELD_FLAGS = ("-f", "-F", "--raw-field", "--field", "--input")
-# gh api flags whose value is the next argument (gh 2.94.0 --help).
-VALUE_FLAGS = FIELD_FLAGS + (
-    "-H", "--header", "-q", "--jq", "-t", "--template",
-    "--hostname", "--cache", "-p", "--preview",
-)
 
 REVIEW_EVENT_PATH = re.compile(r"pulls/[1-9]\d*/reviews(?:/[1-9]\d*/events)?$")
 # Any reviews or events path, including PR segments gh would normalize (`+5`, `%35`, `05`).
@@ -226,7 +220,7 @@ def target_slug(args: list[str]) -> str | None:
     slug = None
     i, _verb = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        _method, path, host, _field = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])
+        _method, path, host, _field = parse_api(normalize_api_args(without_words(args, i)) or without_words(args, i))
         hit = re.match(r"repos/([^/{]+)/([^/{]+)", path or "")
         prefix = f"{host}/" if host else ""
         slug = f"{prefix}{hit.group(1)}/{hit.group(2)}" if hit else None
@@ -285,13 +279,12 @@ def draft_files(args: list[str]) -> list[str]:
     fields and --input for gh api."""
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        api = normalize_api_args(args[i + 1:]) or args[i + 1:]
+        api = normalize_api_args(without_words(args, i)) or without_words(args, i)
         paths = [value[1:] for typed, _key, value in api_fields(api) if typed and value.startswith("@")]
-        path = input_path(api)
-        return paths + ([path] if path is not None else [])
+        return paths + input_paths(api)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     if sub in BODY_FILE_SUBCOMMANDS:
-        path = flag_value(args[j + 1:], ("-F", "--body-file"))
+        path = flag_value(without_words(args, i, j), ("-F", "--body-file"), sub)
         return [path] if path is not None else []
     return []
 
@@ -325,23 +318,54 @@ def exempt_from_go(args: list[str], cwd: str) -> bool:
     return personal_repository(cwd) if owner is None else personal_owner(owner, cwd)
 
 
-def flag_value(args: list[str], names: tuple[str, ...]) -> str | None:
-    """Last value given to one of `names`: `--x v`, `--x=v`, `-x v` or `-xv`."""
-    value, k = None, 0
+def pflag_walk(args: list[str], values: set[str]):
+    """Yield (flag, value) per flag and (None, token) per positional, read the
+    way pflag does: `--x v`, `--x=v`, `-x v`, `-xv`, or a short cluster where
+    the first value flag takes the rest of the token or the next argument.
+    `values` are the value flags (`-x`, `--xx`); the rest are bool flags.
+    A bool flag yields value None; a trailing value flag yields "" (long)
+    or nothing (short). Tokens after `--` are positionals."""
+    k = 0
     while k < len(args):
         tok = args[k]
-        for name in names:
-            if tok == name and k + 1 < len(args):
-                value = args[k + 1]
-                k += 1
-                break
-            if name.startswith("--") and tok.startswith(name + "="):
-                value = tok[len(name) + 1:]
-                break
-            if not name.startswith("--") and tok.startswith(name) and len(tok) > 2 and not tok.startswith("--"):
-                value = tok[2:].removeprefix("=")
-                break
         k += 1
+        if tok == "--":
+            for rest in args[k:]:
+                yield None, rest
+            return
+        if tok.startswith("--"):
+            name, eq, rest = tok.partition("=")
+            if name in values and not eq and k < len(args):
+                rest, k = args[k], k + 1
+            yield name, (rest if eq or name in values else None)
+            continue
+        if not tok.startswith("-") or tok == "-":
+            yield None, tok
+            continue
+        for pos, ch in enumerate(tok[1:], 1):
+            if "-" + ch not in values:
+                if tok[pos + 1:pos + 2] == "=":
+                    break
+                continue
+            rest = tok[pos + 1:]
+            if rest:
+                rest = rest.removeprefix("=")
+            elif k < len(args):
+                rest, k = args[k], k + 1
+            else:
+                break
+            yield "-" + ch, rest
+            break
+
+
+def flag_value(args: list[str], names: tuple[str, ...], sub: tuple[str, ...] = ()) -> str | None:
+    """Last value given to one of `names`. `sub` supplies the subcommand's
+    other value flags so their arguments are skipped."""
+    values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"} | set(names)
+    value = None
+    for flag, found in pflag_walk(args, values):
+        if flag in names and found is not None:
+            value = found
     return value
 
 
@@ -356,31 +380,84 @@ def read_text(path: str, cwd: str) -> tuple[str, str | None]:
         return "unreadable", None
 
 
-def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
-    """(typed, key, value) of each field in a normalized `gh api` argv;
-    typed fields (-F/--field) read `@path` values from a file."""
-    fields, i = [], 0
+# gh api value flags by short name (gh 2.94.0 `gh api --help`); -i and -h take no value.
+API_SHORT_LONG = {
+    "f": "--raw-field", "F": "--field", "H": "--header", "q": "--jq",
+    "t": "--template", "p": "--preview", "X": "--method",
+}
+API_LONG_VALUE = frozenset(API_SHORT_LONG.values()) | {"--cache", "--hostname", "--input"}
+# Value flags in normalized form, derived from the two tables above; the
+# method flag is matched ahead of this set where it matters.
+VALUE_FLAGS = frozenset("-" + short for short in API_SHORT_LONG if short != "X") | (API_LONG_VALUE - {"--method"})
+
+
+def api_pairs(args: list[str]) -> list[tuple[str, str | None]]:
+    """(flag, value) of each flag in a raw or normalized `gh api` argv, read
+    the way pflag does: `-h` is `("-h", None)`, short flags map to their long
+    name, a value flag takes `=value`, the rest of a short word or the next
+    argument (even one that starts with `-`), and `--` ends the flags."""
+    pairs, i = [], 0
     while i < len(args):
         tok = args[i]
-        if tok in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(args):
-            typed, raw, i = tok in ("-F", "--field"), args[i + 1], i + 2
-        elif tok.startswith(("--raw-field=", "--field=")):
-            typed, raw, i = tok.startswith("--field="), tok.split("=", 1)[1], i + 1
-        else:
-            i += 1
+        i += 1
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name in API_LONG_VALUE and not eq:
+                if i >= len(args):
+                    break
+                value, i = args[i], i + 1
+            pairs.append((name, value if eq or name in API_LONG_VALUE else None))
             continue
-        key, _, value = raw.partition("=")
-        fields.append((typed, key, value))
+        if not tok.startswith("-") or tok == "-":
+            continue
+        for pos, ch in enumerate(tok[1:], 1):
+            if ch == "h":
+                pairs.append(("-h", None))
+                break
+            if ch in API_SHORT_LONG:
+                rest = tok[pos + 1:]
+                if rest:
+                    value = rest[1:] if rest[0] == "=" else rest
+                elif i < len(args):
+                    value, i = args[i], i + 1
+                else:
+                    break
+                pairs.append((API_SHORT_LONG[ch], value))
+                break
+            if ch != "i":
+                break
+    return pairs
+
+
+def gh_field_name(key: str) -> str:
+    """Top-level JSON name gh sends a field under: the text before the first
+    `[` or `]`, else the first bracketed name (`event[` and `event[0]` are
+    `event`, `[x]` is `x`)."""
+    parts = [part for part in re.split(r"[\[\]]", key) if part]
+    return parts[0] if parts else key
+
+
+def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
+    """(typed, key, value) of each field in a `gh api` argv; typed fields
+    (-F/--field) read `@path` values from a file."""
+    fields = []
+    for flag, raw in api_pairs(args):
+        if flag in ("--raw-field", "--field"):
+            key, _, value = raw.partition("=")
+            fields.append((flag == "--field", gh_field_name(key), value))
     return fields
 
 
+def input_paths(args: list[str]) -> list[str]:
+    """Every --input value in order; gh reads the last one (pflag last-wins)."""
+    return [value for flag, value in api_pairs(args) if flag == "--input"]
+
+
 def input_path(args: list[str]) -> str | None:
-    for i, tok in enumerate(args):
-        if tok == "--input" and i + 1 < len(args):
-            return args[i + 1]
-        if tok.startswith("--input="):
-            return tok.split("=", 1)[1]
-    return None
+    paths = input_paths(args)
+    return paths[-1] if paths else None
 
 
 def pr_target(args: list[str]) -> tuple[str | None, str | None]:
@@ -389,22 +466,14 @@ def pr_target(args: list[str]) -> tuple[str | None, str | None]:
     i, j = subcommand_index(args)
     slug = target_slug(args)
     if i < len(args) and args[i] == "api":
-        path = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])[1] or ""
+        path = parse_api(normalize_api_args(without_words(args, i)) or without_words(args, i))[1] or ""
         hit = re.search(r"(?:issues|pulls)/(\d+)", path)
         return (hit.group(1) if hit else None), slug
     sub = tuple(args[k] for k in (i, j) if k < len(args))
     values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"}
-    k = j + 1
-    while k < len(args):
-        tok = args[k]
-        if tok == "--":
-            return (args[k + 1] if k + 1 < len(args) else None), slug
-        if tok in values:
-            k += 2
-            continue
-        if not tok.startswith("-"):
-            return tok, slug
-        k += 1
+    for flag, found in pflag_walk(without_words(args, i, j), values):
+        if flag is None:
+            return found, slug
     return None, slug
 
 
@@ -463,12 +532,22 @@ def check_replies(kinds: list[str], sid: str, directory: Path) -> str | None:
 
 
 def api_body(args: list[str], cwd: str) -> tuple[str, str | None]:
-    for typed, key, value in api_fields(args):
-        if key == "body":
-            return read_text(value[1:], cwd) if typed and value.startswith("@") else ("text", value)
     path = input_path(args)
     if path is None:
-        return "none", None
+        bodies = [(typed, value) for typed, key, value in api_fields(args) if key == "body"]
+        if not bodies:
+            return "none", None
+        # gh lets a typed field override a raw one, so a repeated body has no single shown text.
+        if len(bodies) > 1:
+            return "unreadable", None
+        typed, value = bodies[0]
+        if typed and value.startswith("@"):
+            return read_text(value[1:], cwd)
+        # gh expands placeholders in a typed value, so the draft cannot show what is sent.
+        if typed and PLACEHOLDER_RE.search(value):
+            return "unreadable", None
+        return "text", value
+    # gh sends the --input file as the body and moves -f fields into the URL query.
     state, raw = read_text(path, cwd)
     if state != "text":
         return state, None
@@ -485,20 +564,20 @@ def post_body(args: list[str], cwd: str) -> tuple[str, str | None]:
     argument), "text", or "unreadable" (stdin, an editor, a bad file)."""
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        return api_body(normalize_api_args(args[i + 1:]) or args[i + 1:], cwd)
+        return api_body(normalize_api_args(without_words(args, i)) or without_words(args, i), cwd)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
-    rest = args[j + 1:]
+    rest = without_words(args, i, j)
     if sub in CLOSE_SUBCOMMANDS:
-        text = flag_value(rest, ("-c", "--comment"))
+        text = flag_value(rest, ("-c", "--comment"), sub)
         return ("none", None) if text is None else ("text", text)
     if sub not in BODY_FILE_SUBCOMMANDS:
         return "none", None
     if any(t in ("-e", "--editor", "-w", "--web") for t in rest):
         return "unreadable", None
-    path = flag_value(rest, ("-F", "--body-file"))
+    path = flag_value(rest, ("-F", "--body-file"), sub)
     if path is not None:
         return read_text(path, cwd)
-    text = flag_value(rest, ("-b", "--body"))
+    text = flag_value(rest, ("-b", "--body"), sub)
     return ("none", None) if text is None else ("text", text)
 
 
@@ -624,15 +703,11 @@ def graphql_query_from_file(args: list[str]) -> bool:
     return False
 
 
-# gh api's short flags (gh 2.96 `gh api --help`): -i/-h take no value.
-API_BOOL_SHORTS = set("ih")
-API_VALUE_SHORTS = set("XfFHqtp")
-
-
 def normalize_api_args(args: list[str]) -> list[str] | None:
     """Split gh api's argv the way pflag does: a short cluster such as `-iX`
     becomes `-i -X`, a value flag takes the rest of its word or the next
     argument (even one starting with `-`), and `-X=GET` drops the `=`.
+    A bool short (`-i`, `-h`) may take `=value`, as pflag allows.
     None for a short flag gh api does not have."""
     out, i = [], 0
     while i < len(args):
@@ -642,17 +717,19 @@ def normalize_api_args(args: list[str]) -> list[str] | None:
             return out + [tok] + args[i:]
         if not tok.startswith("-") or tok == "-" or tok.startswith("--"):
             out.append(tok)
-            if tok in VALUE_FLAGS + ("--method",) and i < len(args):
+            if (tok in VALUE_FLAGS or tok == "--method") and i < len(args):
                 out.append(args[i])
                 i += 1
             continue
         rest = tok[1:]
         while rest:
             flag, rest = rest[0], rest[1:]
-            if flag in API_BOOL_SHORTS:
+            if flag in "ih":
                 out.append("-" + flag)
+                if rest.startswith("="):
+                    rest = ""
                 continue
-            if flag not in API_VALUE_SHORTS:
+            if flag not in API_SHORT_LONG:
                 return None
             if rest:
                 value = rest[1:] if rest[0] == "=" else rest
@@ -873,14 +950,29 @@ def classify_api(args: list[str]) -> str:
     return "write"
 
 
+def without_words(args: list[str], *indexes: int) -> list[str]:
+    """argv minus the command words at `indexes`, keeping flags that sat
+    before them: cobra hands the command its whole argv less those words."""
+    return [tok for k, tok in enumerate(args) if k not in indexes]
+
+
 def subcommand_index(args: list[str]) -> tuple[int, int]:
-    """Indexes of the first two non-option words (len(args) when absent).
-    Options may sit before either word; -R/--repo/--hostname take a value."""
+    """Indexes of the first two non-option words (len(args) when absent),
+    found the way cobra does before pflag runs: a flag word without `=` takes
+    the next word as its value, except help (a cluster such as `-ab` takes
+    none). Verified against gh 2.94.0 for `-f x api`, `pr -b x review`."""
     found, i = [], 0
     while i < len(args) and len(found) < 2:
-        if not args[i].startswith("-"):
+        tok = args[i]
+        if tok == "--":
+            break
+        if tok == "":
+            pass  # cobra skips an empty word
+        elif not tok.startswith("-"):
             found.append(i)
-        elif args[i] in GH_VALUE_OPTIONS:
+        elif "=" not in tok and tok not in ("-h", "--help", "--version") and (
+            tok.startswith("--") or len(tok) == 2
+        ):
             i += 1
         i += 1
     found += [len(args)] * (2 - len(found))
@@ -896,9 +988,9 @@ def classify_gh(args: list[str]) -> str:
         return "read"
     i, j = subcommand_index(args)
     sub = tuple(args[k] for k in (i, j) if k < len(args))
-    rest = args[j + 1:]
+    rest = without_words(args, i, j)
     if sub[:1] == ("api",):
-        return classify_api(args[i + 1:])
+        return classify_api(without_words(args, i))
     if sub[:1] == ("search",):
         return "read"
     if sub in READ_SUBCOMMANDS:
@@ -920,46 +1012,50 @@ GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 
 
 def _pr_review_scan(rest: list[str]) -> tuple[set[str], bool, bool]:
-    """(events, commented, helped) of `gh pr review` flags: `--approve`,
-    `--request-changes` or their short forms inside a cluster before any value
-    flag; `--help`/`-h` anywhere outside a value shows help."""
-    found: set[str] = set()
-    commented = helped = False
+    """(events, commented, helped) of `gh pr review` flags. Like pflag, the last
+    value of each event flag wins across long and short forms (`-a=false`,
+    `--approve --approve=false`). A short `h` is help whatever follows; the
+    long `--help` is a last-wins Go bool. Help outside a value and before `--`
+    shows help."""
+    events: dict[str, bool] = {}
+    commented = short_help = long_help = False
     k = 0
     while k < len(rest):
         tok = rest[k]
         k += 1
+        if tok == "--":
+            break
         if tok in ("-b", "--body", "-F", "--body-file", "-R", "--repo"):
             k += 1
         elif tok.startswith("--"):
-            name = tok.split("=", 1)[0]
+            name, eq, value = tok.partition("=")
+            on = not eq or value in GO_TRUE
             if name == "--help":
-                helped = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
+                long_help = on
             elif name == "--comment":
-                commented = "=" not in tok or tok.split("=", 1)[1] in GO_TRUE
-            elif name in ("--approve", "--request-changes"):
-                if "=" not in tok or tok.split("=", 1)[1] in GO_TRUE:
-                    found.add("approve" if name == "--approve" else "request-changes")
+                commented = on
+            elif name == "--approve":
+                events["approve"] = on
+            elif name == "--request-changes":
+                events["request-changes"] = on
         elif tok.startswith("-") and len(tok) > 1:
             for pos, ch in enumerate(tok[1:], 1):
                 if ch in "bFR":
                     k += pos == len(tok) - 1
                     break
                 if ch == "h":
-                    value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
-                    helped = value is None or value in GO_TRUE
-                    if value is not None:
+                    short_help = True
+                    break
+                if ch in "car":
+                    eq = tok[pos + 1:pos + 2] == "="
+                    on = not eq or tok[pos + 2:] in GO_TRUE
+                    if ch == "c":
+                        commented = on
+                    else:
+                        events["approve" if ch == "a" else "request-changes"] = on
+                    if eq:
                         break
-                elif ch == "c":
-                    value = tok[pos + 2:] if tok[pos + 1:pos + 2] == "=" else None
-                    commented = value is None or value in GO_TRUE
-                    if value is not None:
-                        break
-                elif ch == "a":
-                    found.add("approve")
-                elif ch == "r":
-                    found.add("request-changes")
-    return found, commented, helped
+    return {e for e, on in events.items() if on}, commented, short_help or long_help
 
 
 def _pr_review_event(rest: list[str]) -> str | None:
@@ -1031,7 +1127,18 @@ def _json_strings(node) -> list[str]:
 def repeated_input(api: list[str]) -> bool:
     """True when a gh api argv repeats --input, so the guard and gh could read
     different files."""
-    return sum(1 for t in api if t == "--input" or t.startswith("--input=")) > 1
+    return len(input_paths(api)) > 1
+
+
+def api_help(api: list[str]) -> bool:
+    """True when gh prints help for this raw gh api argv instead of sending it:
+    a short cluster reaches pflag's help shorthand `h` (any `=value`), or the
+    last long --help is Go-true."""
+    pairs = api_pairs(api)
+    if any(flag == "-h" for flag, _value in pairs):
+        return True
+    helps = [value for flag, value in pairs if flag == "--help"]
+    return bool(helps) and (helps[-1] is None or helps[-1] in GO_TRUE)
 
 
 def api_methods(api: list[str]) -> set[str]:
@@ -1060,6 +1167,8 @@ def _api_review_event(api: list[str], cwd: str, owner: str, repo: str, cache: di
     if path is None:
         return "unknown" if method != "GET" else None
     api = filled_api
+    if repeated_input(api) and (is_graphql_path(path) or LOOSE_REVIEW_PATH.search(path)):
+        return "unknown"
     if is_graphql_path(path):
         return _graphql_event(api, cwd)
     if method == "GET":
@@ -1096,9 +1205,9 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
     cwd = cwd or os.getcwd()
     i, j = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        api = normalize_api_args(args[i + 1:]) or args[i + 1:]
-        if repeated_input(api):
-            return "unknown"
+        if api_help(without_words(args, i)):
+            return None
+        api = normalize_api_args(without_words(args, i)) or without_words(args, i)
         cache: dict = {}
         base = _api_review_event(api, cwd, "owner", "repo", cache, False)
         raw_method, raw_path, _host, has_field = parse_api(api)
@@ -1116,7 +1225,7 @@ def review_event(args: list[str], cwd: str | None = None) -> str | None:
                     return "unknown"
         return "unknown" if mixed and base is not None else base
     if tuple(args[k] for k in (i, j) if k < len(args)) == ("pr", "review"):
-        return _pr_review_event(args[j + 1:])
+        return _pr_review_event(without_words(args, i, j))
     return None
 
 
@@ -1127,12 +1236,16 @@ def pinned_review(args: list[str]) -> tuple[str, str, str, str, str | None] | No
     i, _j = subcommand_index(args)
     if i >= len(args) or args[i] != "api":
         return None
-    api = normalize_api_args(args[i + 1:])
+    api = normalize_api_args(without_words(args, i))
     if api is None or input_path(api) is not None:
         return None
     method, path, host, has_field = parse_api(api)
     hit = REVIEW_POST_PATH.fullmatch(path or "")
     if (method or ("POST" if has_field else "GET")) != "POST" or not hit:
+        return None
+    keys = {key for _typed, key, _value in api_fields(api)}
+    # Any other text-bearing field (`comments[][body]`) would post text the draft never shows.
+    if keys - {"body", "commit_id", "event"}:
         return None
     shas = {value for _typed, key, value in api_fields(api) if key == "commit_id"}
     if len(shas) != 1 or not SHA40_RE.fullmatch(next(iter(shas))):
@@ -1823,7 +1936,12 @@ def draft_main(argv: list[str]) -> int:
     cwd = os.getcwd()
     digest = draft_hash(args, cwd)
     if digest is None:
-        print("draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor", file=sys.stderr)
+        print(
+            "draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor; "
+            "a -F/--field body holding {owner}, {repo}, {branch} or :owner, :repo, :branch is expanded "
+            "by gh, so use -f/--raw-field, which sends it unexpanded",
+            file=sys.stderr,
+        )
         return 1
     event = review_event(args, cwd)
     if event == "unknown" or (event and pinned_review(args) is None):
