@@ -14321,6 +14321,34 @@ log = skill.split("### Decisions log", 1)[1].split("\n## ", 1)[0]
 assert "--source owner" in log and "--source director" in log
 PY
 
+check "docs: every decisions-block reader treats only owner entries as authority" <<'PY'
+import re
+d = "claude/skills/herdr-orchestration/"
+def rd(p):
+    return " ".join(open(p, encoding="utf-8").read().split())
+away = rd(d + "references/away-mode.md")
+step = away.split("3. Withdraw an ask", 1)[1].split(" 4. Ask the rest", 1)[0]
+assert "--owner-only" in step and "non-zero exit" in step, step
+flat = rd(d + "SKILL.md")
+log = flat.split("The `director_rollover` hook injects", 1)[1].split("A gated post", 1)[0]
+assert "That block is authoritative" not in log and "owner entries" in log, log
+exit2 = flat.split("An exit 2 naming `--source`", 1)[1][:700]
+assert "stale" in exit2 and "old core" in exit2, exit2
+agent = rd("claude/agents/director.md")
+blk = agent.split("In herdr mode the `[INFO] herdr decisions` block", 1)[1][:300]
+assert "owner" in blk and "authoritative: do not re-ask a listed owner decision" not in blk
+for name in ("claude/agents/director.md", d + "references/rollover.md"):
+    t = rd(name)
+    assert "act on its `carried:`" not in t, name
+    assert "not owner authority" in t, name
+for name in ("SKILL.md", "references/auto-actions.md", "references/away-mode.md",
+             "references/rollover.md", "references/state-layout.md", "references/posting.md",
+             "references/legacy-wrappers.md"):
+    t = rd(d + name)
+    for m in re.finditer(r"live decision", t):
+        assert "--owner-only" in t[m.start():m.start() + 400], name
+PY
+
 check "docs: an unexplained contract hash mismatch (verify-contract exit 4) stays an integrity halt" <<'PY'
 import os
 d = "claude/skills/herdr-orchestration/"

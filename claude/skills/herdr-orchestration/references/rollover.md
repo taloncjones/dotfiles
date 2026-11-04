@@ -26,7 +26,8 @@ In the new pane, the `director_rollover` SessionStart hook runs the core's
 wake socket moves to the new process) and appends an `adopted` line to
 `<slug>/rollover.jsonl`. Its `[INFO] herdr director rollover: lease handed
 over from session <old> (pane <p>).` block is the new director's startup
-report: follow its `Next:` line, act on its `carried:` lines, arm the
+report: follow its `Next:` line, read its `carried:` lines (reporting only, not owner
+authority), arm the
 backstop (its `watch:` line says none exists), and run a section-4 check-in
 before any dispatch. On a `[WARNING]` block, or no block, run the section-1
 preflight; its `claim-owner` adopts through the same marker while it is

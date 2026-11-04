@@ -345,9 +345,10 @@ as each `AskUserQuestion` answer or owner direction given in chat, record it
 
 Use `--source owner` for an `AskUserQuestion` answer or an owner direction
 from chat, and `--source director` for everything else you record. Only owner
-entries are authority. An exit 2 naming `--source` means the loaded procedure
-is stale: re-read this section, repeat any owner-authority lookup, record
-again. Use `--task` for a decision about one task and `--repo-wide` for a standing
+entries are authority. An exit 2 naming `--source` has two causes: a stale
+loaded procedure (re-read this section, repeat any owner-authority lookup,
+record again) or an old core that lacks `--source` (update the dotfiles
+install; re-reading cannot help). Use `--task` for a decision about one task and `--repo-wide` for a standing
 directive. It prints `decision: <id>`. Retire a superseded or expired one
 (for example "retry in 10 minutes" once retried):
 `python3 "$CORE" retire-decision --repo-slug <slug> --session <id> --fence <fence> --id <id>`.
@@ -366,8 +367,8 @@ leaves the panel's queue on its own, but the id stays in the file until you
 rewrite it.
 
 The `director_rollover` hook injects the live entries as an `[INFO] herdr
-decisions` block at every session start. That block is authoritative: do not
-re-ask a listed decision. When it ends with an `older omitted` line, run the
+decisions` block at every session start. Only its owner entries are
+authoritative: do not re-ask a listed owner decision. When it ends with an `older omitted` line, run the
 `--all` command it names before acting on any owner direction or starting any
 dispatch. On `[WARNING] herdr decisions: not loaded`, run the command it
 names the same way. `decisions.jsonl` is described in
