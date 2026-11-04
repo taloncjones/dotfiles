@@ -1686,6 +1686,22 @@ done
 $CORE decisions --repo-path "$FX_REPO" | grep -Eq -- '^- [0-9-]{10} carried: carried thing \[cccccccccccc\]$'
 SH
 
+check "decisions: --owner-only header and omit line match the owner-only filter" <<'SH'
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)
+A="--repo-path $FX_REPO --runtime claude --repo-slug $FX_SLUG --session $S1 --fence $F"
+T=$(python3 -c 'print("x" * 390)')
+$CORE note-decision $A --source director --repo-wide --text "a director note" >/dev/null
+i=0
+while [ $i -lt 30 ]; do $CORE note-decision --source owner $A --repo-wide --text "n$i $T" >/dev/null; i=$((i + 1)); done
+b=$($CORE decisions --repo-path "$FX_REPO" --owner-only)
+h=$(printf '%s\n' "$b" | head -n 1)
+if printf '%s\n' "$h" | grep -Eqi 'director|carried'; then exit 1; fi
+printf '%s\n' "$b" | tail -n 1 | grep -Eq 'decisions --repo-path .+ --owner-only --all\)$'
+b=$($CORE decisions --repo-path "$FX_REPO")
+printf '%s\n' "$b" | tail -n 1 | grep -Eq 'decisions --repo-path [^ ]+ --all\)$'
+SH
+
 check "decisions: stale fence refuses note-decision and retire-decision, nothing appended" <<'SH'
 S1=11111111-1111-4111-8111-111111111111
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" --session $S1 --host h --pid $$)

@@ -5866,12 +5866,13 @@ def _decision_line(e):
     return f"- {e['ts'][:10]} {scope}: {e['text']} [{e.get('id')}]"
 
 
-def decisions_block(entries, repo_path, show_all=False):
+def decisions_block(entries, repo_path, show_all=False, owner_only=False):
     """The injected text for live entries: header, newest lines that fit
     DECISIONS_BLOCK_MAX, and an omission line when any were dropped."""
     if not entries:
         return ""
-    header = ("[INFO] herdr decisions: owner decisions, director notes and carried "
+    header = ("[INFO] herdr decisions: owner decisions on disk. They stand "
+              "until retired. Do not re-ask one.") if owner_only else ("[INFO] herdr decisions: owner decisions, director notes and carried "
               "notes on disk. They stand until retired. Do not re-ask an owner "
               "decision; a director note or carried note is reporting only, "
               "never owner authority.")
@@ -5879,9 +5880,11 @@ def decisions_block(entries, repo_path, show_all=False):
     if show_all:
         return "\n".join([header] + lines)
 
+    flag = "--owner-only --all" if owner_only else "--all"
+
     def omit(k):
         return (f"({k} older omitted; full list: python3 ~/.claude/hooks/"
-                f"herdr_orch_core.py decisions --repo-path {shlex.quote(repo_path)} --all)")
+                f"herdr_orch_core.py decisions --repo-path {shlex.quote(repo_path)} {flag})")
 
     full = "\n".join([header] + lines)
     if len(full) <= DECISIONS_BLOCK_MAX:
@@ -6185,7 +6188,7 @@ def _decisions(ns) -> int:
         return 1
     if ns.owner_only:
         entries = [e for e in entries if e.get("source") == "owner"]
-    block = decisions_block(entries, ns.repo_path, show_all=ns.all)
+    block = decisions_block(entries, ns.repo_path, show_all=ns.all, owner_only=ns.owner_only)
     if block:
         print(block)
     return 0
