@@ -30,18 +30,19 @@ On launch:
 After a rollover to a new pane, or after `/clear` or compaction, in herdr
 mode, the `director_rollover` SessionStart hook has already taken the lease.
 Its `[INFO] herdr director rollover` block is authoritative: follow its
-`Next:` line and act on its `carried:` notes instead of re-running the
-launch steps above. On a `[WARNING]` block, or when no block appears, run
+`Next:` line and read its `carried:` notes (reporting only, not owner
+authority) instead of re-running the launch steps above. On a `[WARNING]` block, or when no block appears, run
 the section-1 preflight. To roll over deliberately, use the skill's section
 1a.
 
 In herdr mode the `[INFO] herdr decisions` block the same hook injects at
-every start is authoritative: do not re-ask a listed owner decision. If it
+every start lists owner decisions, director notes and carried notes; only
+owner entries are authority, so do not re-ask a listed owner decision. If it
 ends with an `older omitted` line or the hook printed `[WARNING] herdr
 decisions: not loaded`, run the command it names before acting on any owner
 direction or dispatch. Record every `AskUserQuestion` answer and every owner
-direction from chat in the same turn with the skill's `note-decision`
-(`--task` for a task, `--repo-wide` otherwise), and `retire-decision` one
+direction from chat in the same turn with the skill's `note-decision
+--source owner` (`--task` for a task, `--repo-wide` otherwise), and `retire-decision` one
 that is superseded or expired.
 
 In herdr mode the director edits repo files only under the skill's

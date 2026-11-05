@@ -2,7 +2,16 @@
 
 The director does these without asking, reports each in its turn summary and
 records a task decision note. A note is reporting only, never an authority
-input. Read this file at SKILL.md section 2 (todo split), section 4
+input. Every note in this file is `--source director`, except the answer
+recorded under Ask after a refusal, which is `--source owner`.
+
+Owner-authority lookup (repair, contract re-pin, todo split): run `decisions
+--repo-path <repo> --owner-only --all` in the same turn, immediately before
+the action's first durable write. Only the live owner entries it lists count
+as owner decisions; a director or carried note never does. Exit 0 with no
+output means no owner decision is live. Any non-zero exit means none can be
+established, so take the ask path (for a split, ask in place of an automatic
+split). After an interruption, re-run the lookup: printed output is stale. Read this file at SKILL.md section 2 (todo split), section 4
 (contract gate), section 5 (changes-requested path), section 6 (ship
 dispatch, carry-forward and delta) and section 6a step 0 (`CHANGES`,
 `INCOMPLETE`).
@@ -64,7 +73,7 @@ section 6 dispatches afresh.
 On `infrastructure re-run budget spent` or `relaunch budget spent`, ask once
 with `AskUserQuestion`: "Re-run the <review|ship gate> at <head>
 (Recommended)" and "Leave it". The answer authorizes exactly one dispatch in
-the same turn; record it as an owner decision. A director resumed before that
+the same turn; record it as an owner decision (`--source owner`). A director resumed before that
 dispatch asks again.
 
 - Review: apply the stale-verdict reset (`status: completed`,
@@ -79,12 +88,12 @@ When the ship gate verdict is `CHANGES` (`merge-ready` reports
 `handoff_state: current`, pinned handoff `verdict: CHANGES`, `head_sha` equal
 to live HEAD), the co-review verifier confirmed the blockers. Write
 `changes-requested` as section 6a step 0 says and dispatch the repair worker
-without asking, then report it and record a note. Ask once, naming the
+without asking, then report it and record a note (`--source director`). Ask once, naming the
 blocker and the decision or file, only when:
 
 - a blocker's fix, as the gate report states it, contradicts a live recorded
-  owner decision (the `[INFO] herdr decisions` block, or `decisions --all`
-  when that block says older entries were omitted); or
+  owner decision (an entry listed by `decisions --repo-path <repo>
+  --owner-only --all`); or
 - a blocker names a file outside the PR's scope: the files in
   `git diff --name-only <base_sha>...HEAD` in the task worktree plus the
   files in the File layout section of the PRD the task's `plan_artifacts`
@@ -118,7 +127,8 @@ Re-pin without asking only when all of these hold:
   task). A fast-path or mech task keeps the ask.
 - (b) The re-pin reason names evidence that the contract command, not the
   code, is wrong: a review findings file whose SHA-256 matches its
-  completion record, a live recorded owner decision ID, or the section of
+  completion record, a live recorded owner decision ID (listed by `decisions --repo-path <repo>
+  --owner-only --all`), or the section of
   the frozen PRD the command contradicts. With no such evidence, ask.
 - (c) No agent is live for the task: the live `herdr agent list` poll shows
   no `working` or `blocked` agent from the task's `workers` rows. The status
@@ -128,7 +138,7 @@ Re-pin without asking only when all of these hold:
 
 Then run these steps in order, in one turn:
 
-1. `note-decision --task <task_id>`: "auto: contract re-pin at <head
+1. `note-decision --source director --task <task_id>`: "auto: contract re-pin at <head
    sha12> from <pinned sha12>: <command name>; evidence <reference>".
 2. Edit `<worktree>/<contract_path>`.
 3. `verify-contract ... --contract <contract_path> --allow-unpinned
@@ -177,12 +187,12 @@ a copy that equals the worktree file. Ask once with `AskUserQuestion`:
 ### Todo split
 
 When a raw todo's Solution names two or more independent mechanisms (each
-could ship alone) and no live recorded owner decision sets that todo's
-scope, split it without asking:
+could ship alone) and no live recorded owner decision (listed by `decisions --repo-path <repo>
+--owner-only --all`) sets that todo's scope, split it without asking:
 
 1. Resume: when the todo already has a `## Split plan` section, use it as
    written, never judge the split again, and go to step 4.
-2. `note-decision --task <todo_id>`: "auto: split <todo_id> into <n>
+2. `note-decision --source director --task <todo_id>`: "auto: split <todo_id> into <n>
    slices, plan in the todo".
 3. Append a `## Split plan` section to the todo file with the Edit tool: the
    slice count n, and per slice a title and a one-line scope. Slice 1 is

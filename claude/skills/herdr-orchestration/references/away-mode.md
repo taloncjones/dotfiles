@@ -54,10 +54,12 @@ and prints `owner: stale-fence` (exit 1, no write) under an old fence.
    ask with a task is stale when its `task_status` is null or terminal, or its
    `action` is set and differs from the task's `action=` in this `next`. A
    repo-wide ask is never stale.
-3. Withdraw an ask (`--reason withdrawn`) only when a live decision in the
-   `[INFO] herdr decisions` block with the same scope (same task, or repo-wide
-   for a repo-wide ask) already answers it. A retired decision never withdraws
-   a fresh ask.
+3. Withdraw an ask (`--reason withdrawn`) only when a live owner decision with
+   the same scope (same task, or repo-wide for a repo-wide ask) already
+   answers it. Look it up with `decisions --repo-path <repo> --owner-only
+   --all` in the same turn; a director or carried note never withdraws an ask,
+   and a non-zero exit means none can be confirmed, so ask. A retired decision
+   never withdraws a fresh ask.
 4. Ask the rest four per `AskUserQuestion` call, oldest first, recommendation
    first. Compose two to four options for a check-in ask (it carries none).
 5. Record each answer at once:
