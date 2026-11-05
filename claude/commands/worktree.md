@@ -135,7 +135,12 @@ git worktree list
 
 ## Remove Worktree
 
+Run the ignored-content check first. On exit 1, show the listed paths and ask
+whether to keep the worktree (Recommended) or remove it and discard them. On
+exit 2, stop and report.
+
 ```bash
+~/.claude/skills/post-merge/scripts/worktree_ignored_check.py <path>
 git worktree remove <path>
 git branch -d <branch>  # if branch should also be deleted
 ```

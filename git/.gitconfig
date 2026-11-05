@@ -106,8 +106,12 @@
 			if [ \"$key\" = \"branch\" ]; then \
 				br=\"${value#refs/heads/}\"; \
 				if echo \"$gone\" | grep -qxF \"$br\"; then \
-					echo \"Removing worktree: $wt ($br)\"; \
-					git worktree remove \"$wt\"; \
+					if \"$HOME/.claude/skills/post-merge/scripts/worktree_ignored_check.py\" \"$wt\" >/dev/null 2>&1; then \
+						echo \"Removing worktree: $wt ($br)\"; \
+						git worktree remove \"$wt\"; \
+					else \
+						echo \"Skipping worktree: $wt (ignored files exist only there, or the check failed; run /post-merge or /done)\"; \
+					fi; \
 				fi; \
 			fi; \
 		done; \

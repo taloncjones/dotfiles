@@ -23,7 +23,12 @@ the Step 2 confirmation. Steps 0-3 run; Step 4 runs only when a Jira key
 exists; Step 5 is skipped and reported as
 "lessons distillation pending (human)". A dirty worktree stops teardown
 instead of asking; the director
-records it and a human finishes this skill.
+records it and a human finishes this skill. The Step 1 ignored-content check
+runs too: exit 1 stops teardown before anything is deleted and the director
+records `teardown_blocked: "ignored-content"`, naming the printed paths in the
+check-in report; exit 2 records `teardown_blocked: "ignored-check-failed"`
+with the stderr line. A human finishes `/post-merge` interactively, which
+re-runs the check and asks the Step 2 question.
 
 ## Target resolution
 
@@ -43,6 +48,13 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
   PR's `headRefName`. Note its path and whether the working tree is clean
   (`git -C <wt> status --short`). Refuse to remove a dirty worktree without an
   explicit OK.
+- **Ignored content:** when the worktree directory exists, run
+  `<skill dir>/scripts/worktree_ignored_check.py <wt>` (path resolved from the
+  directory of this loaded skill) and keep its stdout and exit status. Exit 0:
+  nothing at risk. Exit 1: stdout lists ignored files (specs, plans, notes)
+  that exist only in the worktree and would be deleted with it. Exit 2: the
+  check could not finish. A registered worktree whose directory is gone has
+  nothing to check; Step 3 only prunes it.
 - **Remote branch:** `git ls-remote --heads origin <headRefName>` — GitHub
   auto-deletes the branch on merge in many repos, so this is often already gone.
 - **Co-review leftovers (if you ran co-review):** `refs/coreview/<n>`,
@@ -90,7 +102,23 @@ put the exact Jira comment text in the preview of every option that posts it:
 that answer is the go for the comment. Other direction comes through the
 free-form option.
 
+When the ignored-content check exited 1, list the paths and add a second
+question to the same `AskUserQuestion` call: "Ignored files exist only in
+worktree `<wt>`: `<paths>`. Teardown would delete them. What should it do?"
+Options: "Keep the worktree; finish the rest of teardown (Recommended)" and
+"Remove the worktree and discard them". Exit 2 is reported and stops worktree
+removal; it is never a question. Codex asks the same in prose.
+
 ## Step 3 — Apply teardown
+
+Re-run `<skill dir>/scripts/worktree_ignored_check.py <wt>` immediately
+before removing the worktree. Exit 0: remove. Exit 1
+with the owner's "discard" answer: remove only when every printed path was in
+the list the owner saw; a new path stops and is reported. Exit 1 with "keep",
+or exit 2: skip the worktree removal and the local branch delete (the branch
+is still checked out there) and report it. The remote branch and co-review
+leftovers still run. Keeping the worktree leaves the owner free to save the
+files by hand and rerun `/post-merge`.
 
 ```bash
 # Worktree removal. Plain `git worktree remove` FAILS on a worktree that
