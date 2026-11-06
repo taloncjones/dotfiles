@@ -113,7 +113,9 @@ removal; it is never a question. Codex asks the same in prose.
 ## Step 3 — Apply teardown
 
 Re-run `<skill dir>/scripts/worktree_ignored_check.py <wt>` immediately
-before removing the worktree. Exit 0: remove. Exit 1
+before removing the worktree. When `<wt>` is not a directory, skip the
+check and only run `git worktree prune` (the registration is all that is left).
+Otherwise, exit 0: remove. Exit 1
 with the owner's "discard" answer: remove only when every printed path was in
 the list the owner saw; a new path stops and is reported. Exit 1 with "keep",
 or exit 2: skip the worktree removal and the local branch delete (the branch
@@ -128,12 +130,17 @@ files by hand and rerun `/post-merge`.
 # In a herdr session the git metadata guard denies deleting a task's worktree
 # or branch until its record reads merged; the Step 2 confirmation is the
 # explicit confirmation the DOTFILES_ALLOW_GIT_META=1 override requires.
-# Runs only when the re-check above exits 0; after an owner "discard" answer
-# run the second line alone.
-<skill dir>/scripts/worktree_ignored_check.py "<wt>" && {
-  DOTFILES_ALLOW_GIT_META=1 git worktree remove "<wt>" 2>/dev/null \
-    || { rm -rf "<wt>" && git worktree prune; }
-}
+# Runs only when the re-check above exits 0, or when <wt> is already gone.
+# After an owner "discard" answer, run only the `DOTFILES_ALLOW_GIT_META=1 git
+# worktree remove ... || { rm -rf ...; }` command, without the check.
+if [ ! -d "<wt>" ]; then
+  git worktree prune
+else
+  <skill dir>/scripts/worktree_ignored_check.py "<wt>" && {
+    DOTFILES_ALLOW_GIT_META=1 git worktree remove "<wt>" 2>/dev/null \
+      || { rm -rf "<wt>" && git worktree prune; }
+  }
+fi
 
 # Local branch: -D, not -d. A squash-merged branch's commits are NOT ancestors
 # of the base, so -d refuses ("not fully merged") even though the PR is merged.

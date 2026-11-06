@@ -140,7 +140,7 @@ def main():
         if not at_risk:
             return 0
         emit("\n".join(at_risk) + "\n", sys.stdout)
-        summary = "worktree_ignored_check: %d ignored path(s) exist only in, or differ from the main checkout, %s\n" % (len(at_risk), sys.argv[1])
+        summary = "worktree_ignored_check: %d ignored path(s) exist only in, or differ from, the main checkout: %s\n" % (len(at_risk), sys.argv[1])
         if differing:
             summary += "worktree_ignored_check: differ from the main copy (still at risk): %s\n" % ", ".join(differing)
         emit(summary, sys.stderr)

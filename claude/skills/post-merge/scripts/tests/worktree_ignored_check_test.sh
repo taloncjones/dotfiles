@@ -236,5 +236,17 @@ expect "callers gate removal on the check" "$bad" ""
 printf '```bash\n~/x/worktree_ignored_check.py "$P"\ngit worktree remove "$P"\n```\n' > "$ROOT/bad.md"
 expect "wiring assertion catches a bare check line" "$([ -n "$(wiring_bad "$ROOT/bad.md")" ] && echo caught || echo missed)" caught
 
+# 18. Step 3 of post-merge: a missing worktree directory skips the check and
+# prunes; an existing one stays gated on the check.
+step3=$(awk '/^## Step 3/ {on=1} on' "$REPO/claude/skills/post-merge/SKILL.md")
+case "$step3" in *'[ ! -d "<wt>" ]'*'git worktree prune'*) s=present ;; *) s=missing ;; esac
+expect "Step 3 prunes when the worktree directory is gone" "$s" present
+
+# 19. Summary line reads "exist only in, or differ from, the main checkout: <wt>".
+mkdir -p "$ROOT/s1"
+err=$("$CHECK" "$ROOT/s1/none" 2>&1 >/dev/null)
+grep -q 'differ from the main checkout, ' "$REPO/claude/skills/post-merge/scripts/worktree_ignored_check.py" && s=comma || s=colon
+expect "summary line uses a colon" "$s" colon
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
