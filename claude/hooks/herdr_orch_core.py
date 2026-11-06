@@ -738,7 +738,9 @@ BRIEF_BLOCK_RE = re.compile(r"^```brief:([a-z0-9-]+)\n(.*?)\n```$", re.M | re.S)
 BRIEF_TOKEN_RE = re.compile(r"<[A-Za-z][^<>\s]{0,40}>")
 # Left for the briefed agent; the adapter's attempt context supplies the first three.
 BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>",
-                                 "<outcome>", "<n>", "<artifact-list-json>"})
+                                 "<outcome>", "<n>", "<artifact-list-json>", "<binding_id>",
+                                 "<lead_fence>"})
+# Only the lead brief may leave these; the unfilled-token guard exempts them for that phase alone.
 BRIEF_LEAD_FIELDS = frozenset({"<binding_id>", "<lead_fence>"})
 # The lead renders its own routing and ground rules in place of the worker's.
 BRIEF_LEAD_BLOCKS = {"routing": "routing-lead", "ground-rules": "ground-rules-lead"}
@@ -961,9 +963,8 @@ def render_brief(rd, record, ns, repo_root):
     names = [BRIEF_LEAD_BLOCKS.get(n, n) if ns.phase == "lead" else n for n in spec["blocks"]]
     text = "\n\n".join(_brief_fill(blocks[name], values).rstrip("\n") if ns.phase == "lead"
                         else _brief_fill(blocks[name], values) for name in names)
-    left = set(BRIEF_TOKEN_RE.findall(text)) - BRIEF_WORKER_FIELDS - {"<task-body>"}
-    if ns.phase == "lead":
-        left -= BRIEF_LEAD_FIELDS
+    exempt = BRIEF_WORKER_FIELDS if ns.phase == "lead" else BRIEF_WORKER_FIELDS - BRIEF_LEAD_FIELDS
+    left = set(BRIEF_TOKEN_RE.findall(text)) - exempt - {"<task-body>"}
     _require(not left, f"brief template left unfilled tokens: {', '.join(sorted(left))}")
     body = "\n\n".join(part for part in (focus, todo) if part)
     return agent, text.replace("<task-body>", body, 1) + "\n"

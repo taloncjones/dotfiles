@@ -13618,9 +13618,24 @@ PY
 check "render-brief: the unfilled-token guard exempts the binding tokens only for the lead phase" <<'PY'
 import os
 exec(open(os.environ["BRIEF_FIXTURE"]).read())
-assert "<binding_id>" not in c.BRIEF_WORKER_FIELDS and "<lead_fence>" not in c.BRIEF_WORKER_FIELDS
 assert c.BRIEF_LEAD_FIELDS == {"<binding_id>", "<lead_fence>"}
 rendered("--phase", "lead")
+rec = open(task_file).read()
+tpl = open(c.BRIEF_TEMPLATE_PATH).read()
+# a stray binding token in a non-lead block must now be refused
+import pathlib
+bad = pathlib.Path(tmp) / "bad-template.md"
+bad.write_text(tpl.replace("## Workspace", "## Workspace <binding_id>", 1))
+c.BRIEF_TEMPLATE_PATH = bad
+ns = type("N", (), dict(phase="implement", focus_file=focus, findings=None, artifact_class=None,
+                        prd_cap=None, no_workflow=False, tier=None, prior_handoff=None,
+                        repo_slug=slug, runtime="claude", personal=False))()
+try:
+    c.render_brief(pathlib.Path(rd), json.loads(rec), ns, pathlib.Path(repo))
+except SystemExit as exc:
+    assert exc.code == 2, exc
+else:
+    raise AssertionError("implement render accepted a stray <binding_id>")
 PY
 
 check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'
