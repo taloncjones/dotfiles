@@ -106,7 +106,7 @@
 			if [ \"$key\" = \"branch\" ]; then \
 				br=\"${value#refs/heads/}\"; \
 				if echo \"$gone\" | grep -qxF \"$br\"; then \
-					if \"$HOME/.claude/skills/post-merge/scripts/worktree_ignored_check.py\" \"$wt\" >/dev/null 2>&1; then \
+					if [ ! -d \"$wt\" ] || \"$HOME/.claude/skills/post-merge/scripts/worktree_ignored_check.py\" \"$wt\" >/dev/null 2>&1; then \
 						echo \"Removing worktree: $wt ($br)\"; \
 						git worktree remove \"$wt\"; \
 					else \

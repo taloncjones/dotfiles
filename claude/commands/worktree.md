@@ -135,14 +135,16 @@ git worktree list
 
 ## Remove Worktree
 
-Run the ignored-content check first. On exit 1, show the listed paths and ask
-whether to keep the worktree (Recommended) or remove it and discard them. On
+The ignored-content check gates the removal: `git worktree remove` runs only
+when the check exits 0. On exit 1, nothing was removed; show the listed paths
+and ask whether to keep the worktree (Recommended) or remove it and discard
+them, and on the discard answer run `git worktree remove <path>` by itself. On
 exit 2, stop and report.
 
 ```bash
-~/.claude/skills/post-merge/scripts/worktree_ignored_check.py <path>
-git worktree remove <path>
-git branch -d <branch>  # if branch should also be deleted
+~/.claude/skills/post-merge/scripts/worktree_ignored_check.py <path> && \
+  git worktree remove <path>
+git branch -d <branch>  # if branch should also be deleted, after the removal
 ```
 
 Worktrees allow working on multiple branches simultaneously without stashing or committing incomplete work.

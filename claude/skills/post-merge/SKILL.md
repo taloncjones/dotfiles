@@ -52,7 +52,8 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
   `<skill dir>/scripts/worktree_ignored_check.py <wt>` (path resolved from the
   directory of this loaded skill) and keep its stdout and exit status. Exit 0:
   nothing at risk. Exit 1: stdout lists ignored files (specs, plans, notes)
-  that exist only in the worktree and would be deleted with it. Exit 2: the
+  that exist only in, or differ from the main checkout's copy, in the worktree
+  (submodules included) and would be deleted with it. Exit 2: the
   check could not finish. A registered worktree whose directory is gone has
   nothing to check; Step 3 only prunes it.
 - **Remote branch:** `git ls-remote --heads origin <headRefName>` — GitHub
@@ -104,7 +105,7 @@ free-form option.
 
 When the ignored-content check exited 1, list the paths and add a second
 question to the same `AskUserQuestion` call: "Ignored files exist only in
-worktree `<wt>`: `<paths>`. Teardown would delete them. What should it do?"
+(or differ from the main checkout in) worktree `<wt>`: `<paths>`. Teardown would delete them. What should it do?"
 Options: "Keep the worktree; finish the rest of teardown (Recommended)" and
 "Remove the worktree and discard them". Exit 2 is reported and stops worktree
 removal; it is never a question. Codex asks the same in prose.
@@ -127,8 +128,12 @@ files by hand and rerun `/post-merge`.
 # In a herdr session the git metadata guard denies deleting a task's worktree
 # or branch until its record reads merged; the Step 2 confirmation is the
 # explicit confirmation the DOTFILES_ALLOW_GIT_META=1 override requires.
-DOTFILES_ALLOW_GIT_META=1 git worktree remove "<wt>" 2>/dev/null \
-  || { rm -rf "<wt>" && git worktree prune; }
+# Runs only when the re-check above exits 0; after an owner "discard" answer
+# run the second line alone.
+<skill dir>/scripts/worktree_ignored_check.py "<wt>" && {
+  DOTFILES_ALLOW_GIT_META=1 git worktree remove "<wt>" 2>/dev/null \
+    || { rm -rf "<wt>" && git worktree prune; }
+}
 
 # Local branch: -D, not -d. A squash-merged branch's commits are NOT ancestors
 # of the base, so -d refuses ("not fully merged") even though the PR is merged.

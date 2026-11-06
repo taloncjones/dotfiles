@@ -67,16 +67,15 @@ Tell user: "Changed directory to main worktree"
 # Get worktree path for this branch
 WORKTREE_PATH=$(git worktree list | grep "$BRANCH_NAME" | awk '{print $1}')
 
-# Stop if ignored files (specs, plans) exist only in the worktree
-~/.claude/skills/post-merge/scripts/worktree_ignored_check.py "$WORKTREE_PATH"
-
-# Remove worktree
-git worktree remove "$WORKTREE_PATH"
+# Remove the worktree only when the check exits 0 (nothing at risk)
+~/.claude/skills/post-merge/scripts/worktree_ignored_check.py "$WORKTREE_PATH" && \
+  git worktree remove "$WORKTREE_PATH"
 ```
 
-If the check exits 1, show the listed paths and ask: "Keep the worktree
-(Recommended)" or "Remove the worktree and discard them". Remove only on the
-second answer. If it exits 2, stop and report the stderr line.
+If the check exits 1, nothing was removed. Show the listed paths and ask: "Keep
+the worktree (Recommended)" or "Remove the worktree and discard them". On the
+second answer only, run `git worktree remove "$WORKTREE_PATH"` by itself. If it
+exits 2, stop and report the stderr line.
 
 If the worktree was on a **detached HEAD** (PR review worktree, e.g., `<repo>-pr<N>`):
 

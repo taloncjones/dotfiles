@@ -148,19 +148,93 @@ printf '%s\n' /docs/superpowers/ node_modules/ > "$A/clone/.gitignore"
 git -C "$A/clone" add .gitignore
 git -C "$A/clone" commit -qm init
 git -C "$A/clone" push -q origin main
-for b in keep drop; do
+for b in keep drop miss; do
     git -C "$A/clone" worktree add -q "$A/wt-$b" -b "$b"
     git -C "$A/wt-$b" push -q -u origin "$b" 2>/dev/null
 done
 mkdir -p "$A/wt-keep/docs/superpowers/specs" "$A/wt-drop/node_modules/x"
 echo spec > "$A/wt-keep/docs/superpowers/specs/s.md"
 echo m > "$A/wt-drop/node_modules/x/i.js"
-git -C "$A/clone" push -q origin --delete keep drop
+rm -rf "$A/wt-miss"
+git -C "$A/clone" push -q origin --delete keep drop miss
 out=$(cd "$A/clone" && HOME="$A/home" GIT_CONFIG_GLOBAL="$A/gitconfig" git worktree-prune 2>&1)
 case "$out" in *"Skipping worktree: "*"/wt-keep "*) s=yes ;; *) s=no ;; esac
 expect "alias prints skip line for spec worktree" "$s" yes
 expect "alias keeps spec worktree" "$([ -d "$A/wt-keep" ] && echo kept || echo gone)" kept
 expect "alias removes regenerable worktree" "$([ -d "$A/wt-drop" ] && echo kept || echo gone)" gone
+case "$(git -C "$A/clone" worktree list --porcelain)" in *"/wt-miss"*) s=registered ;; *) s=pruned ;; esac
+expect "alias prunes worktree whose directory is gone" "$s" pruned
+
+# Build $ROOT/<name>/m (main with submodule "sub") and $ROOT/<name>/w (worktree, submodule initialized).
+sub_fixture() {
+    mkdir -p "$ROOT/$1"
+    git init -q -b main "$ROOT/$1/s"
+    printf '%s\n' /notes/ node_modules/ > "$ROOT/$1/s/.gitignore"
+    git -C "$ROOT/$1/s" add .gitignore
+    git -C "$ROOT/$1/s" commit -qm init
+    git init -q -b main "$ROOT/$1/m"
+    git -C "$ROOT/$1/m" -c protocol.file.allow=always submodule add -q "$ROOT/$1/s" sub
+    git -C "$ROOT/$1/m" commit -qm sub
+    git -C "$ROOT/$1/m" worktree add -q "$ROOT/$1/w" -b feat
+}
+
+# 12. Ignored file inside an initialized submodule
+sub_fixture c12
+git -C "$ROOT/c12/w" -c protocol.file.allow=always submodule update -q --init
+mkdir -p "$ROOT/c12/w/sub/notes"
+echo n > "$ROOT/c12/w/sub/notes/spec.md"
+out=$("$CHECK" "$ROOT/c12/w" 2>/dev/null); rc=$?
+expect "submodule ignored file: exit 1" "$rc" 1
+expect "submodule ignored file: stdout" "$out" "sub/notes/spec.md"
+
+# 13. Submodule with only regenerable ignored files
+sub_fixture c13
+git -C "$ROOT/c13/w" -c protocol.file.allow=always submodule update -q --init
+mkdir -p "$ROOT/c13/w/sub/node_modules/x"
+echo m > "$ROOT/c13/w/sub/node_modules/x/i.js"
+out=$("$CHECK" "$ROOT/c13/w" 2>/dev/null); rc=$?
+expect "submodule regenerable only: exit 0" "$rc" 0
+expect "submodule regenerable only: stdout empty" "$out" ""
+
+# 14. Uninitialized submodule: empty passes, content fails closed
+sub_fixture c14
+out=$("$CHECK" "$ROOT/c14/w" 2>/dev/null); rc=$?
+expect "uninitialized empty submodule: exit 0" "$rc" 0
+echo stray > "$ROOT/c14/w/sub/stray.txt"
+out=$("$CHECK" "$ROOT/c14/w" 2>/dev/null); rc=$?
+expect "uninitialized submodule with content: exit 2" "$rc" 2
+expect "uninitialized submodule with content: stdout empty" "$out" ""
+
+# 15. Unexpected errors exit 2, not 1
+out=$(PATH=/nonexistent /usr/bin/python3 "$CHECK" "$ROOT/c1/w" 2>/dev/null); rc=$?
+expect "missing git binary: exit 2" "$rc" 2
+expect "missing git binary: stdout empty" "$out" ""
+
+# 16. A differing main copy is labelled on stderr
+err=$("$CHECK" "$ROOT/c4/w" 2>&1 >/dev/null)
+case "$err" in *"differ from the main copy"*"docs/superpowers/specs/b.md"*) s=labelled ;; *) s=unlabelled ;; esac
+expect "differing main copy: stderr label" "$s" labelled
+err=$("$CHECK" "$ROOT/c1/w" 2>&1 >/dev/null)
+case "$err" in *"differ from the main copy"*) s=labelled ;; *) s=plain ;; esac
+expect "worktree-only file: no differing label" "$s" plain
+
+# 17. Wiring: in every caller, the check line must gate what follows it
+# (&& chain or if/then); a bare check line followed by a removal is the bug.
+wiring_bad() {
+    awk -v md="${1##*.}" '
+        md == "md" && /^```/ { fence = !fence; next }
+        md == "md" && !fence { next }
+        /^[ \t]*#/ { next }
+        /worktree_ignored_check/ && !/&&/ && !/then/ { print FILENAME ":" FNR ": " $0 }
+    ' "$1"
+}
+bad=""
+for f in claude/commands/done.md claude/commands/worktree.md claude/skills/post-merge/SKILL.md git/.gitconfig; do
+    bad="$bad$(wiring_bad "$REPO/$f")"
+done
+expect "callers gate removal on the check" "$bad" ""
+printf '```bash\n~/x/worktree_ignored_check.py "$P"\ngit worktree remove "$P"\n```\n' > "$ROOT/bad.md"
+expect "wiring assertion catches a bare check line" "$([ -n "$(wiring_bad "$ROOT/bad.md")" ] && echo caught || echo missed)" caught
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
