@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 736
+assert t.count("\n") <= 741
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 736
+assert t.count("\n") <= 741
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13498,6 +13498,9 @@ assert "/leads/<binding_id>/tasks/td-render-x.review.json" in flat, "lead brief 
 assert not re.search(r"(?<!>)/tasks/td-render-x\.done\.json", flat.replace("/leads/<binding_id>/tasks/", "")), flat
 assert flat.count("WORKER_LAUNCH_ID") >= 2 and "never ends the wait" in flat, "lead wait lacks the identity check"
 assert "its done record resumes you" not in flat
+assert "call whose timeout you raise above the loop" in flat and "Never close a pane whose worker is still working" in flat
+assert "agent_runtime.py route --step implementation-review" in flat and "--sandbox read-only" in flat
+assert "never inside the task worktree" in flat and "30 minutes pass. At the deadline" not in flat
 assert "repeating `--file`" in flat and "herdr_orch_core.py\" emit-envelope" in flat
 assert "\n\n\n" not in brief, "doubled blank line in the lead render"
 left = set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", brief.replace(focus_text, "")))
@@ -13544,7 +13547,7 @@ assert waited(old, old) >= 2, "a stale same-launch record ended the wait"
 assert waited(new_rec, old) == 0, "a fresh record after reprompt did not end the wait"
 assert waited(new_rec, None) == 0, "a first record did not end the wait"
 assert waited({"launch_id": "L0", "agent": "z", "ts": "2026-11-02T10:06:00Z"}, old) >= 2, "foreign launch ended the wait"
-for phrase in ("(add `--focus-file` with a focus file you write when the task has no", "`--personal` only if",
+for phrase in ("(add `--focus-file` with a focus file you write in your scratchpad, never", "`--personal` only if",
                "--fence <lead_fence> --task-id", "--binding <binding_id> --file ARTIFACT",
                "--binding <binding_id> --json '{...}'"):
     assert phrase in flat, phrase
@@ -13585,6 +13588,39 @@ for k in keys:
 assert "review_head_sha" in step5 and "replaces the record" in step5
 assert "Replace only the word STAMP; the single quotes" in flat and "the operand is `''`" in flat
 assert "cannot ship" not in flat and "distinct panes" in flat
+PY
+
+check "render-brief: lead step 4 and 5 render commands carry the lead's workflow opt-in state" <<'PY'
+import os, re, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+def descendants(*lead_flags):
+    _, brief = rendered("--phase", "lead", *lead_flags)
+    flat = " ".join(brief.split())
+    step4 = re.search(r"4\. Implement: render the worker brief with `(python3 [^`]*--phase implement[^`]*)`", flat).group(1)
+    step5 = re.search(r"`render-brief (--phase review[^`]*?) --focus-file`", flat).group(1)
+    base = step4.split(" --phase implement")[0]
+    cmds = {"implement": step4, "review": base + " " + step5 + " --focus-file " + focus}
+    briefs = {}
+    for phase, cmd in cmds.items():
+        p = subprocess.run(["bash", "-c", cmd + (" --focus-file " + focus if phase == "implement" else "")],
+                           capture_output=True, text=True)
+        assert p.returncode == 0, (phase, cmd, p.stderr)
+        briefs[phase] = " ".join(open(json.loads(p.stdout)["brief_path"]).read().split())
+    return briefs
+for phase, text in descendants("--no-workflow").items():
+    assert "Workflow opt-in: withheld for this task" in text, phase
+    assert "granted by the user's standing order" not in text, phase
+for phase, text in descendants().items():
+    assert "Workflow opt-in: granted by the user's standing order" in text, phase
+    assert "withheld" not in text.split("Workflow opt-in:")[1].split(".")[0], phase
+PY
+
+check "render-brief: the unfilled-token guard exempts the binding tokens only for the lead phase" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+assert "<binding_id>" not in c.BRIEF_WORKER_FIELDS and "<lead_fence>" not in c.BRIEF_WORKER_FIELDS
+assert c.BRIEF_LEAD_FIELDS == {"<binding_id>", "<lead_fence>"}
+rendered("--phase", "lead")
 PY
 
 check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'

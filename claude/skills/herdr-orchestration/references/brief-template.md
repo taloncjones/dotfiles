@@ -216,7 +216,7 @@ Routes for the roles you may name in a focus file:
   calls, so paste STAMP literally into the loop on every call, each re-arm
   included. Replace only the word STAMP; the single quotes around it stay
   (with no record, the operand is `''`). Wait in the foreground, inside one Bash
-  call, with a bounded until-loop (`until [ -s FILE ] && grep -q
+  call whose timeout you raise above the loop, with a bounded until-loop (`until [ -s FILE ] && grep -q
   "WORKER_LAUNCH_ID" FILE && [ "$(grep -o '"ts": *"[^"]*"' FILE)" != 'STAMP' ]
   || [ $SECONDS -ge 540 ]; do sleep 10; done`), where `WORKER_LAUNCH_ID` is
   the `launch_id` the `launch` you just ran printed (a `reprompt` keeps it).
@@ -224,8 +224,10 @@ Routes for the roles you may name in a focus file:
   `ts` is newer than STAMP: a record from an earlier worker, phase or
   reprompted slice never ends the wait (`reprompt` keeps the `launch_id` and
   leaves the old file).
-  Re-arm until it appears or 30 minutes pass. At the deadline, close with
-  `--outcome paused --reason timeout`.
+  Re-arm the wait until it appears; each wait is bounded, the slice is not. If
+  one wait passes 30 minutes with no change in the worker's pane, close with
+  `--outcome paused --reason timeout`. Never close a pane whose worker is
+  still working.
 - A stop-gate refusal is a reminder, not a request to emit. While a worker
   you launched is still running, keep waiting in your own loop; nothing
   wakes a stopped lead.
@@ -265,9 +267,10 @@ each verb's `--help` for its current flags.
    `<worktree_path>`, and `base_sha` `<base_sha>`. Omit `workers`. `launch`
    refuses a record missing any of them.
 4. Implement: render the worker brief with
-   `<core-command> render-brief <core-context> --repo-slug <repo_slug> --task-id <task_id> --phase implement`
-   (add `--focus-file` with a focus file you write when the task has no
-   todo body, or the render exits 2) and launch it with
+   `<core-command> render-brief <core-context> --repo-slug <repo_slug> --task-id <task_id> --phase implement<no-workflow-flag>`
+   (add `--focus-file` with a focus file you write in your scratchpad, never
+   inside the task worktree, when the task has no todo body, or the render
+   exits 2) and launch it with
    `<dispatch-command> launch --binding <binding_id> --phase implement --repo-slug <repo_slug> --task-id <task_id> --workspace-id <workspace_id> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --cwd <worktree_path>`
    plus the printed `agent` as `--agent` and `brief_path` as `--prompt-file`
    (a second render for the same task prints the same agent and path, so
@@ -284,9 +287,11 @@ each verb's `--help` for its current flags.
    every key it set (`task_id`, `repo_slug`, `branch`, `worktree`,
    `base_sha`) and adding `review_head_sha` equal to HEAD; `write-task`
    replaces the record, so a partial rewrite drops the omitted keys. Then
-   render with `render-brief --phase review --focus-file` and a
-   focus file you write, and `launch --binding --phase review` in another
-   pane. Fix findings by launching a new implement worker, never by editing.
+   render with `render-brief --phase review<no-workflow-flag> --focus-file` and a
+   focus file you write in your scratchpad, never inside the task worktree,
+   and `launch --binding --phase review` in another pane with the review
+   route (`agent_runtime.py route --step implementation-review`, not step
+   4's implementation route) and `--sandbox read-only`. Fix findings by launching a new implement worker, never by editing.
 6. PR: push the task branch and open a draft PR. Never merge or push the
    default branch.
 7. `<core-command> emit-artifacts <core-context> --repo-slug <repo_slug> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --task-id <task_id> --binding <binding_id> --file ARTIFACT`
