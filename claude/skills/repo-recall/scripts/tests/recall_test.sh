@@ -651,5 +651,26 @@ test_external_linked_separate_metadata_fails_closed() {
 }
 test_external_linked_separate_metadata_fails_closed
 
+echo "== todos symlink"
+test_todos_symlink_search() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r")
+  local store="$SANDBOX/store"
+  mkdir -p "$store/pending"
+  printf '# Store todo\n\nSymlinkstoreneedle\n' > "$store/pending/t.md"
+  ln -s "$store" "$r/.todos"
+  recall "$r" search --json Symlinkstoreneedle
+  assert_eq "todos symlink search exits 0" "$RC" 0
+  assert_contains "todos symlink hit path" "$OUT" '"path": ".todos/pending/t.md"'
+  assert_contains "todos symlink hit kind" "$OUT" '"kind": "todos"'
+  ( cd "$r" && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m init \
+    && git worktree add -q --detach "$SANDBOX/wt2" )
+  local wt; wt=$(/usr/bin/env realpath "$SANDBOX/wt2")
+  rm -rf "$wt/.todos"; ln -s "$r/.todos" "$wt/.todos"
+  recall "$wt" search --json Symlinkstoreneedle
+  assert_eq "linked worktree todos search exits 0" "$RC" 0
+  assert_contains "linked worktree hit path" "$OUT" '"path": ".todos/pending/t.md"'
+}
+test_todos_symlink_search
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

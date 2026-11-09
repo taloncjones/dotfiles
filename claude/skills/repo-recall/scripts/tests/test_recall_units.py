@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Unit tests for the pure functions in recall.py."""
+import contextlib
 import importlib.util
+import io
 import os
+import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -248,6 +252,143 @@ class CorruptionClassification(unittest.TestCase):
         self.assertFalse(recall.is_corruption(sqlite3.OperationalError("fts5: syntax error near ...")))
         self.assertFalse(recall.is_corruption(sqlite3.OperationalError("attempt to write a readonly database")))
         self.assertFalse(recall.is_corruption(sqlite3.DatabaseError("note: file is not a database")))
+
+
+class TodosLink(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.top = self.tmp / "repo"
+        self.cfg = self.tmp / "cfg"
+        self.env = {"HOME": str(self.tmp / "home")}
+        self.store = self.tmp / "store"
+        (self.top / "docs" / "specs").mkdir(parents=True)
+        (self.top / ".git" / "pending").mkdir(parents=True)
+        (self.top / ".git" / "pending" / "g.md").write_text("# G\nbody")
+        (self.top / "docs" / "specs" / "s.md").write_text("# S\nbody")
+        self.make_store(self.store, "t.md", "# T\nbody")
+
+    def make_store(self, store, name, text):
+        for sub in ("pending", "completed"):
+            (store / sub).mkdir(parents=True, exist_ok=True)
+        (store / "pending" / name).write_text(text)
+
+    def link(self, target):
+        os.symlink(target, self.top / ".todos")
+
+    def sources(self, canonical=None):
+        return recall.collect_sources(
+            self.top, canonical or self.top, self.cfg, self.env, quiet=True
+        )
+
+    def todos(self, canonical=None):
+        return {s.display: s for s in self.sources(canonical) if s.kind == "todos"}
+
+    def ctx(self):
+        return types.SimpleNamespace(
+            toplevel=self.top, canonical=self.top, memory_config_dir=self.cfg
+        )
+
+    def test_external_todos_link_indexed_with_todos_display(self):
+        self.link(self.store)
+        got = self.todos()
+        self.assertEqual(list(got), [".todos/pending/t.md"])
+        self.assertEqual(got[".todos/pending/t.md"].path, self.store / "pending" / "t.md")
+
+    def test_todos_link_does_not_unlock_other_symlinks(self):
+        self.link(self.store)
+        os.symlink(self.top / "docs/specs", self.top / "docs/linkdir")
+        os.symlink(self.top / "docs/specs/s.md", self.top / "docs/link.md")
+        displays = {s.display for s in self.sources()}
+        self.assertNotIn("docs/link.md", displays)
+        self.assertFalse(any(d.startswith("docs/linkdir/") for d in displays))
+        self.assertIn(".todos/pending/t.md", displays)
+
+    def test_todos_link_into_git_refused(self):
+        self.link(self.top / ".git")
+        self.assertEqual(self.todos(), {})
+
+    def test_todos_link_to_repo_or_ancestor_refused(self):
+        (self.top / "inner" / "pending").mkdir(parents=True)
+        (self.top / "inner" / "pending" / "i.md").write_text("# I\nbody")
+        (self.top / "pending").mkdir()
+        (self.top / "pending" / "p.md").write_text("# P\nbody")
+        (self.tmp / "pending").mkdir()
+        (self.tmp / "pending" / "a.md").write_text("# A\nbody")
+        canon = self.tmp / "main"
+        canon.mkdir()
+        for target, canonical in [
+            (self.top, None),
+            (self.top / "inner", None),
+            (self.tmp, None),
+            (self.tmp, canon),
+        ]:
+            with self.subTest(target=str(target)):
+                link = self.top / ".todos"
+                if link.is_symlink():
+                    link.unlink()
+                self.link(target)
+                self.assertEqual(self.todos(canonical), {})
+
+    def test_todos_link_dangling_or_loop_refused(self):
+        self.link(self.tmp / "missing")
+        self.assertEqual(self.todos(), {})
+        (self.top / ".todos").unlink()
+        self.link(".todos")
+        self.assertEqual(self.todos(), {})
+
+    def test_symlinks_inside_todos_target_refused(self):
+        self.link(self.store)
+        os.symlink(self.store / "pending" / "t.md", self.store / "pending" / "link.md")
+        (self.store / "pending" / "deep").mkdir()
+        (self.store / "pending" / "deep" / "d.md").write_text("# D\nbody")
+        (self.store / "pending" / "TODO.md").write_text("index")
+        real = self.tmp / "realdone"
+        real.mkdir()
+        (real / "c.md").write_text("# C\nbody")
+        (self.store / "completed").rmdir()
+        os.symlink(real, self.store / "completed")
+        self.assertEqual(list(self.todos()), [".todos/pending/t.md"])
+
+    def test_refresh_retarget_keeps_chunks(self):
+        store_b = self.tmp / "store_b"
+        self.make_store(store_b, "t.md", "# T\nbetaneedle")
+        (self.store / "pending" / "t.md").write_text("# T\nalphaneedle")
+        self.link(self.store)
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(recall.SCHEMA)
+        recall.refresh(conn, self.ctx(), quiet=True)
+        (self.top / ".todos").unlink()
+        self.link(store_b)
+        recall.refresh(conn, self.ctx(), quiet=True)
+        beta = conn.execute("SELECT display FROM chunks WHERE chunks MATCH 'betaneedle'").fetchall()
+        alpha = conn.execute("SELECT display FROM chunks WHERE chunks MATCH 'alphaneedle'").fetchall()
+        self.assertEqual(beta, [(".todos/pending/t.md",)])
+        self.assertEqual(alpha, [])
+
+    @unittest.skipIf(os.geteuid() == 0, "chmod 0 does not deny reads as root")
+    def test_unreadable_todos_subdir_warns_and_recovers(self):
+        (self.store / "completed" / "c.md").write_text("# C\ncompletedneedle")
+        self.link(self.store)
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(recall.SCHEMA)
+        recall.refresh(conn, self.ctx(), quiet=True)
+
+        def displays():
+            return {r[0] for r in conn.execute("SELECT display FROM files")}
+
+        self.assertIn(".todos/completed/c.md", displays())
+        os.chmod(self.store / "completed", 0)
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                recall.refresh(conn, self.ctx(), quiet=False)
+            self.assertEqual(err.getvalue().count("cannot list"), 1)
+            self.assertNotIn(".todos/completed/c.md", displays())
+            self.assertIn(".todos/pending/t.md", displays())
+        finally:
+            os.chmod(self.store / "completed", 0o755)
+        recall.refresh(conn, self.ctx(), quiet=True)
+        self.assertIn(".todos/completed/c.md", displays())
 
 
 if __name__ == "__main__":

@@ -364,6 +364,38 @@ def _extra_globs(env, quiet):
     return out
 
 
+def _todos_link_target(toplevel, canonical, quiet):
+    """Resolved target of a symlinked <toplevel>/.todos, or None when absent,
+    a real directory, or refused (one warning per refusal)."""
+    link = Path(toplevel) / ".todos"
+    if not link.is_symlink():
+        return None
+
+    def refuse(subject, reason):
+        warn(f".todos symlink refused: {subject} is {reason}", quiet)
+
+    try:
+        target = link.resolve(strict=True)
+    except (OSError, RuntimeError):
+        refuse(link, "a link that does not resolve")
+        return None
+    if not target.is_dir():
+        refuse(target, "not a directory")
+        return None
+    if ".git" in target.parts:
+        refuse(target, "inside a .git directory")
+        return None
+    top = Path(toplevel).resolve()
+    canon = Path(canonical).resolve()
+    if target == top or top in target.parents:
+        refuse(target, "inside the repository")
+        return None
+    if target in (top, canon) or target in top.parents or target in canon.parents:
+        refuse(target, "the repository or an ancestor of it")
+        return None
+    return target
+
+
 def collect_sources(toplevel, canonical, config_dir, env=None, quiet=False):
     """Every eligible file, each once, tagged by first-matching kind
     (memory > extra > findings > handoffs > todos > docs)."""
@@ -374,12 +406,12 @@ def collect_sources(toplevel, canonical, config_dir, env=None, quiet=False):
     extra = _extra_globs(env, quiet)
     seen = {}
 
-    def consider(path, root, kind):
+    def consider(path, root, kind, display=None):
         if not eligible(path, Path(root), kind):
             return
         key = path.resolve()
         if key not in seen:
-            seen[key] = Source(key, display_path(key, toplevel, home), kind)
+            seen[key] = Source(key, display or display_path(key, toplevel, home), kind)
 
     for d in memory_dirs(config_dir, toplevel, canonical):
         for p in sorted(d.glob("*.md")):
@@ -391,6 +423,19 @@ def collect_sources(toplevel, canonical, config_dir, env=None, quiet=False):
         for rel in tree:
             if _rule_matches(rel, base, recursive):
                 consider(toplevel / rel, toplevel, kind)
+    target = _todos_link_target(toplevel, canonical, quiet)
+    if target is not None:
+        for sub in ("pending", "completed"):
+            sub_dir = target / sub
+            if not sub_dir.is_dir():
+                continue
+            try:
+                entries = sorted(sub_dir.iterdir())
+            except OSError as exc:
+                warn(f".todos symlink: cannot list {sub_dir}: {exc}", quiet)
+                continue
+            for p in entries:
+                consider(p, target, "todos", display=f".todos/{sub}/{p.name}")
     return sorted(seen.values(), key=lambda s: (KIND_ORDER.index(s.kind), s.display))
 
 
@@ -615,6 +660,7 @@ def refresh(conn, ctx, full=False, quiet=False):
             "SELECT path, display, kind, mtime_ns, size, sha256 FROM files")}
         added = modified = removed = 0
         current = set()
+        current_displays = set()
         for src in sources:
             try:
                 st = src.path.stat()
@@ -624,6 +670,7 @@ def refresh(conn, ctx, full=False, quiet=False):
             row = known.get(str(src.path))
             if row and row[3] == st.st_mtime_ns and row[4] == st.st_size and row[2] == src.kind:
                 current.add(str(src.path))  # unchanged: stat only, no read
+                current_displays.add(src.display)
                 continue
             try:
                 data = src.path.read_bytes()
@@ -632,6 +679,7 @@ def refresh(conn, ctx, full=False, quiet=False):
                 warn(f"skipping {src.display}: {exc}", quiet)
                 continue
             current.add(str(src.path))
+            current_displays.add(src.display)
             digest = hashlib.sha256(data).hexdigest()
             if row and row[5] == digest and row[2] == src.kind:
                 conn.execute("UPDATE files SET mtime_ns=?, size=? WHERE path=?",
@@ -646,7 +694,8 @@ def refresh(conn, ctx, full=False, quiet=False):
                 added += 1
         for path, row in known.items():
             if path not in current:
-                conn.execute("DELETE FROM chunks WHERE display = ?", (row[1],))
+                if row[1] not in current_displays:
+                    conn.execute("DELETE FROM chunks WHERE display = ?", (row[1],))
                 conn.execute("DELETE FROM files WHERE path = ?", (path,))
                 removed += 1
         files = conn.execute("SELECT count(*) FROM files").fetchone()[0]
