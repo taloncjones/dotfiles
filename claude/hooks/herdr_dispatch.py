@@ -1029,10 +1029,13 @@ def launch(
                     "reason": "blocked-before-prompt",
                 },
             }
+        identity = _runtime_identity(herdr_cli, pane_id, runtime, child_env)
         records.update(
             launch_id,
             status="ready",
             capture_after_sha256=capture_after_sha256,
+            runtime_pid=identity and identity["pid"],
+            runtime_started_ns=identity and identity["started_ns"],
         )
         launch_prompt = _lifecycle_prompt(
             prompt,
@@ -1910,13 +1913,88 @@ def _await_pane_idle(herdr_cli, pane_id, env):
     return _poll(lambda: _pane_idle(herdr_cli, pane_id, env))
 
 
-def _occupant_proven(task, index, panes):
-    # The pane's launch token names this attempt, and no later row claims the
-    # pane: a successor may be reserved (row written) before its agent starts.
-    row = task["workers"][index]
+START_SLOP_NS = 3 * 10**9  # two whole-second etime reads plus call latency
+
+
+def _etime_seconds(text):
+    """Parse ps etime `[[dd-]hh:]mm:ss` to seconds, or None."""
+    match = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", (text or "").strip())
+    if not match:
+        return None
+    days, hours, minutes, seconds = (int(g or 0) for g in match.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+
+
+def _process_started_ns(pid, cmdline):
+    """Start time of local process `pid` when its command equals `cmdline`."""
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-o", "etime=", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = result.stdout.strip().split(None, 1)
+    if result.returncode != 0 or len(parts) != 2 or parts[1].strip() != cmdline.strip():
+        return None
+    elapsed = _etime_seconds(parts[0])
+    return None if elapsed is None else time.time_ns() - elapsed * 10**9
+
+
+def _runtime_identity(herdr_cli, pane_id, runtime, env):
+    """{"pid", "started_ns"} of the pane's one runtime process, or None."""
+    try:
+        result = _run_herdr(herdr_cli, ["pane", "process-info", "--pane", pane_id], env=env)
+    except DispatchError:
+        return None
+    info = result.get("process_info") if isinstance(result, dict) else None
+    foreground = info.get("foreground_processes") if isinstance(info, dict) else None
+    if not isinstance(foreground, list):
+        return None
+    found = [p for p in foreground
+             if isinstance(p, dict) and isinstance(p.get("argv0"), str)
+             and Path(p["argv0"]).name == runtime]
+    if len(found) != 1:
+        return None
+    pid, cmdline = found[0].get("pid"), found[0].get("cmdline")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+        return None
+    if not isinstance(cmdline, str) or not cmdline.strip():
+        return None
+    started = _process_started_ns(pid, cmdline)
+    return None if started is None else {"pid": pid, "started_ns": started}
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _same_incarnation(row, runtime_identity):
+    if row.get("status") != "launched" or not isinstance(runtime_identity, dict):
+        return False
+    pid, started = row.get("runtime_pid"), row.get("runtime_started_ns")
+    if not _is_int(pid) or not _is_int(started):
+        return False
+    return (runtime_identity.get("pid") == pid
+            and abs(runtime_identity.get("started_ns", 0) - started) <= START_SLOP_NS)
+
+
+def _pane_launch_token(panes, row):
     entry = next((p for p in panes if p.get("pane_id") == row["pane_id"]), None)
     tokens = entry.get("tokens") if entry else None
-    if not isinstance(tokens, dict) or tokens.get("launch_id") != row["launch_id"]:
+    return tokens.get("launch_id") if isinstance(tokens, dict) else None
+
+
+def _occupant_proven(task, index, panes, runtime_identity=None):
+    # The launch token names this attempt, or (token expired) the pane still
+    # runs the runtime process the launch recorded; and no later row claims
+    # the pane: a successor may be reserved (row written) before its agent starts.
+    row = task["workers"][index]
+    if not any(p.get("pane_id") == row["pane_id"] for p in panes):
+        return False
+    token = _pane_launch_token(panes, row)
+    if token is not None and token != row["launch_id"]:
+        return False
+    if token is None and not _same_incarnation(row, runtime_identity):
         return False
     return not any(isinstance(w, dict) and w.get("pane_id") == row["pane_id"]
                    for w in task["workers"][index + 1:])
@@ -2162,7 +2240,9 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
     if state == "present" and record.get("agent_status") not in AGENT_STATES:
         return {**base, "status": "busy", "agent": "busy", "pane": "untouched"}
     if state == "present":
-        if not _occupant_proven(task, index, panes):
+        identity = (_runtime_identity(herdr_cli, row["pane_id"], row.get("runtime"), env)
+                    if _pane_launch_token(panes, row) is None else None)
+        if not _occupant_proven(task, index, panes, identity):
             return {**base, "status": "occupant-unverified", "agent": "live",
                     "pane": "untouched"}
         if not row.get("exit_requested"):

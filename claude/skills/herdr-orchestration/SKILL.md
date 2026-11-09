@@ -279,7 +279,11 @@ after every other action.
 
 Run the `settle --launch-id <launch>` line `next` prints for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
-means report it. `settle` keeps its root pane (the first row's) and last pane, except in a
+means report it. After an expired launch token (24 h), `settle` still proves the
+occupant when the row is `launched`, last on its pane, and the pane runs the
+runtime process the launch recorded (same pid and start time); a token naming
+another launch, or a row launched before this check, stays `occupant-unverified`.
+`settle` keeps its root pane (the first row's) and last pane, except in a
 gate-only workspace (every row `ship`): there it closes the workspace
 (`herdr workspace close`, never `--group`) once `workspace get` shows the
 worktree (`workspace-closed`, else `kept-workspace-unverified`). It closes any other pane once every row that
