@@ -451,7 +451,10 @@ fi
 # - lie: exits 0 and changes nothing;
 # - truncate: empties (or creates) settings.json and exits 0;
 # - tearreg: overwrites the registry with non-JSON and exits 0;
-# - tearmk: overwrites known_marketplaces.json with a JSON array and exits 0.
+# - tearmk: overwrites known_marketplaces.json with a JSON array and exits 0;
+# - hang: records its pid in $SWEEP_PIDFILE when set, truncates settings.json
+#   when present, then sleeps 20 s as a child;
+# - orphan: backgrounds a 20 s sleep holding stdout, then acts normally.
 SWEEP_BIN="$TMP/sweep-bin"
 mkdir -p "$SWEEP_BIN"
 cat >"$SWEEP_BIN/claude" <<'EOF'
@@ -468,6 +471,9 @@ case "${SWEEP_STUB:-ok}" in
     truncate) : >"$cfg/settings.json"; exit 0 ;;
     tearreg) printf 'not json\n' >"$cfg/plugins/installed_plugins.json"; exit 0 ;;
     tearmk) printf '[1]\n' >"$cfg/plugins/known_marketplaces.json"; exit 0 ;;
+    hang) [ -n "${SWEEP_PIDFILE-}" ] && echo $$ >"$SWEEP_PIDFILE"
+          [ -f "$cfg/settings.json" ] && : >"$cfg/settings.json"; sleep 20; exit 0 ;;
+    orphan) sleep 20 & ;;
 esac
 python3 - "$cfg" "$@" <<'PY'
 import json, os, shutil, sys
@@ -871,6 +877,162 @@ if ! (export PATH="$NOPY_SWEEP_BIN"; sweep_retired_claude_plugins "$ARGCFG" "[te
     pass "sweep fails with [X] when python3 is missing"
 else
     fail "sweep fails with [X] when python3 is missing"
+fi
+
+# Timeout: a hung CLI is killed with its group, the sweep skips the rest of
+# the config dir, and the next run retries. Command substitution makes a
+# surviving grandchild hold the pipe, so the elapsed bound catches it.
+HANGCFG="$TMP/sweep-hang"
+mkdir -p "$HANGCFG/plugins/cache/ecc"
+printf '{"ecc": {}}\n' >"$HANGCFG/plugins/known_marketplaces.json"
+printf '{"version": 2, "plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
+    >"$HANGCFG/plugins/installed_plugins.json"
+printf '{"enabledPlugins": {"keep@me": true}}\n' >"$HANGCFG/settings.json"
+cp "$HANGCFG/settings.json" "$TMP/hang.before"
+: >"$TMP/hang-trace"
+hang_start=$(date +%s)
+hang_out=$( (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/hang-trace" SWEEP_STUB=hang \
+    SWEEP_TEST_CLAUDE_TIMEOUT=1 HOME="$TMP/sweep-home"
+    sweep_retired_claude_plugins "$HANGCFG" "[test]") 2>&1 )
+hang_rc=$?
+hang_elapsed=$(( $(date +%s) - hang_start ))
+if [ "$hang_rc" -eq 1 ] && [ "$hang_elapsed" -le 10 ] &&
+   printf '%s\n' "$hang_out" | grep -qxF "[test] [X] claude plugin marketplace remove ecc timed out after 1s for $HANGCFG; skipping the rest of the sweep here (the next run retries); run by hand: CLAUDE_CONFIG_DIR=$HANGCFG claude plugin marketplace remove ecc" &&
+   ! printf '%s\n' "$hang_out" | grep -qF '[OK]' &&
+   [ "$(wc -l <"$TMP/hang-trace" | tr -d ' ')" = 1 ] &&
+   grep -q '"ecc"' "$HANGCFG/plugins/known_marketplaces.json" &&
+   [ -d "$HANGCFG/plugins/cache/ecc" ] &&
+   grep -q 'superpowers@claude-plugins-official' "$HANGCFG/plugins/installed_plugins.json"; then
+    pass "sweep times out a hung claude and skips the rest of the config dir"
+else
+    fail "sweep times out a hung claude and skips the rest of the config dir (rc=$hang_rc elapsed=$hang_elapsed: $hang_out)"
+fi
+if cmp -s "$HANGCFG/settings.json" "$TMP/hang.before"; then
+    pass "sweep restores settings.json after a timed-out claude call"
+else
+    fail "sweep restores settings.json after a timed-out claude call"
+fi
+if (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/hang-trace" HOME="$TMP/sweep-home"
+    sweep_retired_claude_plugins "$HANGCFG" "[test]") >"$TMP/sweep.out" 2>&1 &&
+   ! grep -q '"ecc"' "$HANGCFG/plugins/known_marketplaces.json" &&
+   ! grep -q 'superpowers@claude-plugins-official' "$HANGCFG/plugins/installed_plugins.json" &&
+   [ "$(wc -l <"$TMP/hang-trace" | tr -d ' ')" = 3 ]; then
+    pass "sweep retries a timed-out plugin on the next run"
+else
+    fail "sweep retries a timed-out plugin on the next run"
+fi
+
+# A claude call that exits normally but leaves a descendant holding stdout.
+ORPHCFG="$TMP/sweep-orphan"
+mkdir -p "$ORPHCFG/plugins"
+printf '{"ecc": {}}\n' >"$ORPHCFG/plugins/known_marketplaces.json"
+orph_start=$(date +%s)
+orph_out=$( (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=orphan HOME="$TMP/sweep-home"
+    sweep_retired_claude_plugins "$ORPHCFG" "[test]") 2>&1 )
+orph_rc=$?
+orph_elapsed=$(( $(date +%s) - orph_start ))
+if [ "$orph_rc" -eq 0 ] && [ "$orph_elapsed" -le 10 ] &&
+   printf '%s\n' "$orph_out" | grep -qF '[test] [OK] Removed ecc@ecc'; then
+    pass "sweep kills a descendant left by a claude call that exited"
+else
+    fail "sweep kills a descendant left by a claude call that exited (rc=$orph_rc elapsed=$orph_elapsed: $orph_out)"
+fi
+
+# A signal between Popen and the handle assignment is deferred, not lost.
+SIGCFG="$TMP/sweep-signal"
+mkdir -p "$SIGCFG/plugins"
+printf '{"ecc": {}}\n' >"$SIGCFG/plugins/known_marketplaces.json"
+sig_start=$(date +%s)
+sig_out=$( (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=hang \
+    SWEEP_TEST_SIGNAL_AT_LAUNCH=TERM HOME="$TMP/sweep-home"
+    sweep_retired_claude_plugins "$SIGCFG" "[test]") 2>&1 )
+sig_rc=$?
+sig_elapsed=$(( $(date +%s) - sig_start ))
+if [ "$sig_rc" -eq 143 ] && [ "$sig_elapsed" -le 10 ]; then
+    pass "sweep kills the claude group when a signal arrives during launch"
+else
+    fail "sweep kills the claude group when a signal arrives during launch (rc=$sig_rc elapsed=$sig_elapsed: $sig_out)"
+fi
+
+# A signal during the wait: the CLI group dies, settings.json is restored, and
+# the sweep dies by the signal itself so a calling bash script aborts (an exit
+# status of 130 alone makes bash carry on). The harness runs a bash wrapper in
+# its own process group and signals that whole group, as a terminal does.
+cat >"$TMP/sig-harness.py" <<'PY'
+import os, signal, subprocess, sys, time
+sig, ign_hup, cfg, marker, pidfile, out, wrapper = sys.argv[1:8]
+settings = cfg + "/settings.json"
+def pre():
+    if ign_hup == "1":
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+fh = open(out, "w")
+p = subprocess.Popen(["bash", "-c", wrapper], stdout=fh, stderr=subprocess.STDOUT,
+                     preexec_fn=pre, start_new_session=True)
+end = time.time() + 15
+while time.time() < end and not (os.path.exists(pidfile) and os.path.getsize(pidfile)
+                                 and os.path.getsize(settings) == 0):
+    time.sleep(0.05)
+os.killpg(p.pid, getattr(signal, "SIG" + sig))
+try:
+    rc = p.wait(timeout=20)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    rc = "hung"
+stub = int(open(pidfile).read())
+end = time.time() + 10
+while time.time() < end:
+    try:
+        os.killpg(stub, 0)
+    except ProcessLookupError:
+        if os.path.getsize(settings) > 0:
+            break
+    except PermissionError:
+        pass
+    time.sleep(0.05)
+try:
+    os.killpg(stub, 0)
+    gone = 0
+except ProcessLookupError:
+    gone = 1
+except PermissionError:
+    gone = 0
+print(f"RC={rc} CONTINUED={int(os.path.exists(marker))} GONE={gone}")
+PY
+sig_case() { # sig ign_hup timeout name
+    SGCFG="$TMP/sweep-sig-$4"
+    mkdir -p "$SGCFG/plugins"
+    printf '{"ecc": {}}\n' >"$SGCFG/plugins/known_marketplaces.json"
+    printf '{"a": 1}\n' >"$SGCFG/settings.json"
+    cp "$SGCFG/settings.json" "$TMP/sig-$4.before"
+    rm -f "$TMP/sig-$4.marker" "$TMP/sig-$4.pid"
+    SGWRAP="DOTFILEDIR='$DOTFILEDIR'; . '$DOTFILEDIR/$LINKS'
+        sweep_retired_claude_plugins '$SGCFG' '[test]' || true
+        : >'$TMP/sig-$4.marker'"
+    sig_res=$(PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=hang \
+        SWEEP_PIDFILE="$TMP/sig-$4.pid" SWEEP_TEST_CLAUDE_TIMEOUT="$3" HOME="$TMP/sweep-home" \
+        python3 "$TMP/sig-harness.py" "$1" "$2" "$SGCFG" "$TMP/sig-$4.marker" "$TMP/sig-$4.pid" \
+        "$TMP/sig-$4.out" "$SGWRAP" 2>&1)
+}
+sig_case INT 0 60 int
+if [ "$sig_res" = "RC=-2 CONTINUED=0 GONE=1" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-int.before"; then
+    pass "SIGINT during the wait kills the claude group, restores settings, and aborts the calling script"
+else
+    fail "SIGINT during the wait kills the claude group, restores settings, and aborts the calling script ($sig_res)"
+fi
+sig_case TERM 0 60 term
+if [ "$sig_res" = "RC=-15 CONTINUED=0 GONE=1" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-term.before"; then
+    pass "SIGTERM during the wait kills the claude group, restores settings, and aborts the calling script"
+else
+    fail "SIGTERM during the wait kills the claude group, restores settings, and aborts the calling script ($sig_res)"
+fi
+# With HUP ignored in the parent (nohup), SIGHUP must not end the sweep: the
+# 2 s timeout fires instead and the script carries on.
+sig_case HUP 1 2 hup
+if [ "$sig_res" = "RC=0 CONTINUED=1 GONE=1" ] && grep -q 'timed out after 2s' "$TMP/sig-hup.out" &&
+   cmp -s "$SGCFG/settings.json" "$TMP/sig-hup.before"; then
+    pass "an inherited ignored SIGHUP is not overridden by the sweep"
+else
+    fail "an inherited ignored SIGHUP is not overridden by the sweep ($sig_res)"
 fi
 
 # --- link_claude_config_dir integration (real repo template) ---

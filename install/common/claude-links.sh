@@ -316,7 +316,7 @@ sweep_retired_claude_plugins() {
     return 1
   fi
   RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" python3 - "$cfg" "$label" "$@" <<'PY'
-import datetime, json, os, shutil, subprocess, sys, tempfile
+import atexit, datetime, json, os, shutil, signal, subprocess, sys, tempfile, time
 
 cfg, label, wanted = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:]
 retired = json.loads(os.environ["RETIRED_CLAUDE_PLUGINS_JSON"])
@@ -331,10 +331,42 @@ markets_path = os.path.join(plugins_dir, "known_marketplaces.json")
 settings_path = os.path.join(cfg, "settings.json")
 personal_cfg = os.path.abspath(os.path.join(os.path.expanduser("~"), ".claude"))
 git_missing_noted = False
+# Seconds before a hung claude call is killed; the override is test-only.
+CLAUDE_TIMEOUT = float(os.environ.get("SWEEP_TEST_CLAUDE_TIMEOUT") or 60)
+launching, received = False, []
 
 
 class Unreadable(Exception):
     pass
+
+
+class ClaudeTimeout(Exception):
+    pass
+
+
+def on_signal(signum, _frame):
+    # The CLI runs in its own session, so a terminal signal no longer reaches
+    # it; exit through SystemExit so run_claude's finally kills its group.
+    received.append(signum)
+    if launching:
+        return
+    sys.exit(128 + signum)
+
+
+def die_by_signal():
+    # Runs after the cleanup. A normal exit would tell a calling bash script
+    # the interrupt was handled, so it would carry on; die by the signal.
+    if received:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        signal.signal(received[0], signal.SIG_DFL)
+        os.kill(os.getpid(), received[0])
+
+
+atexit.register(die_by_signal)
+for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    if signal.getsignal(_sig) != signal.SIG_IGN:  # keep an inherited ignore (nohup)
+        signal.signal(_sig, on_signal)
 
 
 def registry_valid(data):
@@ -443,6 +475,38 @@ def restore_torn(snap, args):
     return torn
 
 
+def launch(argv, **kw):
+    proc = subprocess.Popen(argv, **kw)
+    test_sig = os.environ.get("SWEEP_TEST_SIGNAL_AT_LAUNCH")  # test-only
+    if test_sig:
+        os.kill(os.getpid(), getattr(signal, "SIG" + test_sig))
+    return proc
+
+
+def kill_group(proc):
+    # SIGKILL the CLI's group, then reap the leader and wait for the group to
+    # empty, all within one 5 s deadline. False means it is still present.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # macOS raises PermissionError for a group of only unreaped zombies
+    deadline = time.monotonic() + 5
+    try:
+        proc.wait(timeout=max(deadline - time.monotonic(), 0))
+    except subprocess.TimeoutExpired:
+        return False
+    while True:
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass  # macOS: a group holding only unreaped zombies; keep polling
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def run_claude(plugin, *args):
     claude = shutil.which("claude")
     if not claude:
@@ -457,10 +521,37 @@ def run_claude(plugin, *args):
     else:
         env["CLAUDE_CONFIG_DIR"] = cfg
         prefix = f"CLAUDE_CONFIG_DIR={cfg} "
+    global launching
     snap = snapshot()
+    proc, rc, timed_out = None, None, False
     with tempfile.TemporaryDirectory() as cwd:
-        rc = subprocess.run([claude, *args], cwd=cwd, env=env, stdin=subprocess.DEVNULL).returncode
-    if restore_torn(snap, args):
+        try:
+            launching = True
+            proc = launch([claude, *args], cwd=cwd, env=env,
+                          stdin=subprocess.DEVNULL, start_new_session=True)
+            launching = False
+            if received:
+                sys.exit(128 + received[0])
+            rc = proc.wait(timeout=CLAUDE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            launching = False
+            group_gone = True
+            if proc is not None:
+                # Always: a leader that exited may leave descendants behind.
+                group_gone = kill_group(proc)
+            torn = restore_torn(snap, args) if group_gone else None
+    if not group_gone:
+        print(f"{label} [X] claude {' '.join(args)} left processes running in group {proc.pid} "
+              f"for {cfg}; guarded files not restored")
+        raise ClaudeTimeout
+    if timed_out:
+        print(f"{label} [X] claude {' '.join(args)} timed out after {CLAUDE_TIMEOUT:g}s for {cfg}; "
+              f"skipping the rest of the sweep here (the next run retries); "
+              f"run by hand: {prefix}claude {' '.join(args)}")
+        raise ClaudeTimeout
+    if torn:
         return False
     if rc != 0:
         print(f"{label} [X] claude {' '.join(args)} exited {rc} for {cfg}; "
@@ -621,6 +712,9 @@ for plugin in wanted:
     except Unreadable as exc:
         # Earlier plugins' completed changes stay; nothing further is touched.
         print(f"{label} [X] unreadable plugin registry in {cfg} ({exc}); stopping")
+        status = 1
+        break
+    except ClaudeTimeout:
         status = 1
         break
     except OSError as exc:
