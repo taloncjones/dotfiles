@@ -17,6 +17,16 @@ RETIRED_CLAUDE_PLUGINS_JSON='{
               "source": "https://github.com/obra/superpowers.git"}
 }'
 
+# Claude Code plugin registry format v2: each plugin id maps to a list of
+# record objects. The settings reconcile and sweep_retired_claude_plugins
+# both exec this one definition, so they agree on which registries they read.
+CLAUDE_REGISTRY_RULE_PY='
+def registry_valid(data):
+    plugins = data.get("plugins", {}) if isinstance(data, dict) else None
+    return isinstance(plugins, dict) and all(
+        isinstance(recs, list) and all(isinstance(r, dict) for r in recs) for recs in plugins.values())
+'
+
 # Seed a machine-local file from a template, with defensive symlink + size guards.
 # Why this exists: the destination is intended to be a real file (Claude/plugin
 # installers write into it), but earlier dotfiles installs symlinked it to a repo
@@ -91,9 +101,11 @@ reconcile_claude_settings_file() {
   fi
 
   RECONCILE_LABEL="$label" RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" \
+    CLAUDE_REGISTRY_RULE_PY="$CLAUDE_REGISTRY_RULE_PY" \
     python3 - "$tmpl" "$dest" <<'PY'
 import json, os, sys
 
+exec(os.environ["CLAUDE_REGISTRY_RULE_PY"])
 label = os.environ.get("RECONCILE_LABEL", "[claude-links]")
 tmpl_path, dest_path = sys.argv[1], sys.argv[2]
 with open(tmpl_path) as fh:
@@ -159,7 +171,7 @@ RETIRED_ENV_KEYS = ("ECC_CONTEXT_MONITOR_COST_WARNINGS", "ECC_DISABLED_HOOKS", "
                     "GATEGUARD_EXEMPT_GLOBS")
 installed_plugins_path = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plugins", "installed_plugins.json")
 installed_names = set()
-# Same validity rule as sweep_retired_claude_plugins. Unreadable means every
+# Shared registry_valid rule (CLAUDE_REGISTRY_RULE_PY). Unreadable means every
 # retired plugin may still be there: keep them pinned off and keep ECC's
 # isolation keys rather than act on a guess.
 try:
@@ -168,11 +180,9 @@ try:
             raise ValueError("symlinked registry")
         with open(installed_plugins_path) as fh:
             installed = json.load(fh)
-        plugins = installed.get("plugins", {}) if isinstance(installed, dict) else None
-        if not (isinstance(plugins, dict) and all(
-                isinstance(recs, list) and all(isinstance(r, dict) for r in recs) for recs in plugins.values())):
+        if not registry_valid(installed):
             raise ValueError("unexpected registry shape")
-        installed_names = set(plugins)
+        installed_names = set(installed.get("plugins", {}))
     # A known retired marketplace can still offer its plugin, so it counts
     # as installed too -- the same evidence the sweep uses.
     known_path = os.path.join(os.path.dirname(installed_plugins_path), "known_marketplaces.json")
@@ -315,9 +325,11 @@ sweep_retired_claude_plugins() {
     echo "$label [X] python3 not on PATH; cannot sweep retired plugins in $cfg"
     return 1
   fi
-  RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" python3 - "$cfg" "$label" "$@" <<'PY'
+  RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" \
+    CLAUDE_REGISTRY_RULE_PY="$CLAUDE_REGISTRY_RULE_PY" python3 - "$cfg" "$label" "$@" <<'PY'
 import atexit, datetime, json, os, shutil, signal, subprocess, sys, tempfile, time
 
+exec(os.environ["CLAUDE_REGISTRY_RULE_PY"])
 cfg, label, wanted = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:]
 retired = json.loads(os.environ["RETIRED_CLAUDE_PLUGINS_JSON"])
 wanted = wanted or list(retired)
@@ -367,13 +379,6 @@ atexit.register(die_by_signal)
 for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     if signal.getsignal(_sig) != signal.SIG_IGN:  # keep an inherited ignore (nohup)
         signal.signal(_sig, on_signal)
-
-
-def registry_valid(data):
-    # Same rule as the reconcile's registry read.
-    plugins = data.get("plugins", {}) if isinstance(data, dict) else None
-    return isinstance(plugins, dict) and all(
-        isinstance(recs, list) and all(isinstance(r, dict) for r in recs) for recs in plugins.values())
 
 
 def is_object(data):
@@ -665,6 +670,22 @@ def remove_path(path):
         return False
     return True
 
+
+def registry_format_unknown():
+    # Parseable JSON in a shape other than v2, such as an older dict-valued
+    # registry. Unreadable files are not this case; read_state reports them.
+    try:
+        data, _raw = read_json(registry_path, lambda _data: True, True)
+        read_json(markets_path, is_object, False)
+    except Unreadable:
+        return False
+    return not registry_valid(data)
+
+
+if registry_format_unknown():
+    print(f"{label} [WARNING] plugin registry in {cfg} is not in the v2 format this sweep reads; "
+          f"retired-plugin sweep skipped, nothing changed")
+    sys.exit(0)
 
 try:
     read_state()

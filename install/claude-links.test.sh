@@ -451,6 +451,7 @@ fi
 # - lie: exits 0 and changes nothing;
 # - truncate: empties (or creates) settings.json and exits 0;
 # - tearreg: overwrites the registry with non-JSON and exits 0;
+# - tearv1: overwrites the registry with a parseable non-v2 shape and exits 0;
 # - tearmk: overwrites known_marketplaces.json with a JSON array and exits 0;
 # - hang: records its pid in $SWEEP_PIDFILE when set, truncates settings.json
 #   when present, then sleeps 20 s as a child;
@@ -470,6 +471,7 @@ case "${SWEEP_STUB:-ok}" in
     lie) exit 0 ;;
     truncate) : >"$cfg/settings.json"; exit 0 ;;
     tearreg) printf 'not json\n' >"$cfg/plugins/installed_plugins.json"; exit 0 ;;
+    tearv1) printf '{"plugins": {"ecc@ecc": {"scope": "user"}}}\n' >"$cfg/plugins/installed_plugins.json"; exit 0 ;;
     tearmk) printf '[1]\n' >"$cfg/plugins/known_marketplaces.json"; exit 0 ;;
     hang) [ -n "${SWEEP_PIDFILE-}" ] && echo $$ >"$SWEEP_PIDFILE"
           [ -f "$cfg/settings.json" ] && : >"$cfg/settings.json"; sleep 20; exit 0 ;;
@@ -688,14 +690,13 @@ else
     fail "sweep fails when ECC needs the CLI and none is on PATH"
 fi
 
-# An unreadable, wrong-shape or symlinked registry fails closed: no CLI call,
+# An unreadable or symlinked registry fails closed: no CLI call,
 # no change, cache kept.
-for shape in bad-json bad-shape symlink; do
+for shape in bad-json symlink; do
     BADSWEEP="$TMP/sweep-$shape"
     mkdir -p "$BADSWEEP/plugins/cache/ecc"
     case "$shape" in
         bad-json) printf 'not json\n' >"$BADSWEEP/plugins/installed_plugins.json" ;;
-        bad-shape) printf '{"plugins": {"ecc@ecc": {"scope": "user"}}}\n' >"$BADSWEEP/plugins/installed_plugins.json" ;;
         symlink)
             printf '{"version": 2, "plugins": {"ecc@ecc": []}}\n' >"$TMP/sweep-real-registry.json"
             ln -s "$TMP/sweep-real-registry.json" "$BADSWEEP/plugins/installed_plugins.json" ;;
@@ -713,6 +714,79 @@ for shape in bad-json bad-shape symlink; do
         fail "sweep fails closed on a $shape registry"
     fi
 done
+
+# A parseable non-v2 registry is skipped with one warning and no writes.
+for shape in dict-valued list-plugins; do
+    SKIPCFG="$TMP/sweep-skip-$shape"
+    mkdir -p "$SKIPCFG/plugins/cache/ecc" "$SKIPCFG/plugins/marketplaces/ecc" \
+        "$SKIPCFG/plugins/cache/temp_git_1_ecc" "$SKIPCFG/plugins/cache/.retired-temp_git_9"
+    git -C "$SKIPCFG/plugins/cache/temp_git_1_ecc" init -q
+    git -C "$SKIPCFG/plugins/cache/temp_git_1_ecc" remote add origin https://github.com/affaan-m/ECC.git
+    case "$shape" in
+        dict-valued) printf '{"version": 1, "plugins": {"ecc@ecc": {"version": "2.0.0", "installPath": "/x"}}}\n' >"$SKIPCFG/plugins/installed_plugins.json" ;;
+        list-plugins) printf '{"plugins": []}\n' >"$SKIPCFG/plugins/installed_plugins.json" ;;
+    esac
+    printf '{"ecc": {}}\n' >"$SKIPCFG/plugins/known_marketplaces.json"
+    printf '{"enabledPlugins": {"keep@me": true}}\n' >"$SKIPCFG/settings.json"
+    cp "$SKIPCFG/plugins/installed_plugins.json" "$TMP/skip.reg"
+    cp "$SKIPCFG/plugins/known_marketplaces.json" "$TMP/skip.mk"
+    cp "$SKIPCFG/settings.json" "$TMP/skip.settings"
+    printf '[test] [WARNING] plugin registry in %s is not in the v2 format this sweep reads; retired-plugin sweep skipped, nothing changed\n' "$SKIPCFG" >"$TMP/skip.want"
+    : >"$TMP/sweep-trace"
+    skip_rc=0
+    (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" HOME="$TMP/sweep-home"
+     sweep_retired_claude_plugins "$SKIPCFG" "[test]") >"$TMP/sweep.out" 2>&1 || skip_rc=$?
+    set -- "$SKIPCFG"/plugins/installed_plugins.json.bak-retired-*
+    if [ "$skip_rc" = 0 ] &&
+       cmp -s "$TMP/sweep.out" "$TMP/skip.want" &&
+       [ ! -s "$TMP/sweep-trace" ] &&
+       cmp -s "$SKIPCFG/plugins/installed_plugins.json" "$TMP/skip.reg" &&
+       cmp -s "$SKIPCFG/plugins/known_marketplaces.json" "$TMP/skip.mk" &&
+       cmp -s "$SKIPCFG/settings.json" "$TMP/skip.settings" &&
+       [ ! -e "$1" ] &&
+       [ -d "$SKIPCFG/plugins/cache/ecc" ] && [ -d "$SKIPCFG/plugins/marketplaces/ecc" ] &&
+       [ -d "$SKIPCFG/plugins/cache/temp_git_1_ecc" ] && [ -d "$SKIPCFG/plugins/cache/.retired-temp_git_9" ]; then
+        pass "sweep skips a $shape registry with one warning"
+    else
+        fail "sweep skips a $shape registry with one warning"
+    fi
+done
+
+# A malformed known_marketplaces.json still fails closed, even with a non-v2 registry.
+MKCFG="$TMP/sweep-skip-badmk"
+mkdir -p "$MKCFG/plugins"
+printf '{"version": 1, "plugins": {"ecc@ecc": {"installPath": "/x"}}}\n' >"$MKCFG/plugins/installed_plugins.json"
+printf '[]\n' >"$MKCFG/plugins/known_marketplaces.json"
+cp "$MKCFG/plugins/installed_plugins.json" "$TMP/mk.reg"
+cp "$MKCFG/plugins/known_marketplaces.json" "$TMP/mk.mk"
+: >"$TMP/sweep-trace"
+if ! (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" HOME="$TMP/sweep-home"
+      sweep_retired_claude_plugins "$MKCFG" "[test]") >"$TMP/sweep.out" 2>&1 &&
+   grep -qF '[X] unreadable plugin registry' "$TMP/sweep.out" &&
+   ! grep -qF '[WARNING]' "$TMP/sweep.out" &&
+   [ ! -s "$TMP/sweep-trace" ] &&
+   cmp -s "$MKCFG/plugins/installed_plugins.json" "$TMP/mk.reg" &&
+   cmp -s "$MKCFG/plugins/known_marketplaces.json" "$TMP/mk.mk"; then
+    pass "sweep fails closed on a bad known_marketplaces.json with a non-v2 registry"
+else
+    fail "sweep fails closed on a bad known_marketplaces.json with a non-v2 registry"
+fi
+
+# A CLI call that rewrites the registry to a non-v2 shape is rolled back.
+V1CFG="$TMP/sweep-tearv1"
+mkdir -p "$V1CFG/plugins"
+printf '{"version": 2, "plugins": {"ecc@ecc": [{"scope": "project", "projectPath": "/p"}]}}\n' >"$V1CFG/plugins/installed_plugins.json"
+printf '{"ecc": {}}\n' >"$V1CFG/plugins/known_marketplaces.json"
+cp "$V1CFG/plugins/installed_plugins.json" "$TMP/v1.reg"
+: >"$TMP/sweep-trace"
+if ! (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" HOME="$TMP/sweep-home" SWEEP_STUB=tearv1
+      sweep_retired_claude_plugins "$V1CFG" "[test]") >"$TMP/sweep.out" 2>&1 &&
+   cmp -s "$V1CFG/plugins/installed_plugins.json" "$TMP/v1.reg" &&
+   grep -qF 'unreadable; restored it' "$TMP/sweep.out"; then
+    pass "sweep restores a registry the CLI call rewrote to a non-v2 shape"
+else
+    fail "sweep restores a registry the CLI call rewrote to a non-v2 shape"
+fi
 
 # The registry decides: a CLI that exits 0 but leaves the marketplace
 # registered is a failure, even after the prune clears the records.
