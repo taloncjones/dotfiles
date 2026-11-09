@@ -25,7 +25,7 @@ installation under either runtime's skills directory.
 | memory   | Claude auto-memory for this tree and its main checkout     |
 | extra    | `RECALL_EXTRA_GLOBS` (colon-separated, repo-relative)      |
 
-Files over 1 MiB, symlinks, non-UTF-8 files, `.git/`, worktree dirs and
+Files over 1 MiB, symlinks (except the top-level `.todos`, below), non-UTF-8 files, `.git/`, worktree dirs and
 `node_modules/` are skipped. Every path is indexed once under the first
 matching kind: memory, extra, findings, handoffs, todos, docs.
 
@@ -99,8 +99,12 @@ locked or missing, 8 bad eval input, 64 usage.
   `index --full`. Editors and git checkouts change mtime, so this does not
   occur in normal use.
 - Headings deeper than `###` stay inside their parent section.
-- Symlinked directories (e.g. `.todos` shared across worktrees) are never
-  indexed — symlinks are deliberately not descended to prevent scope expansion.
+- Symlinks are skipped, except a top-level `.todos` symlink to a directory
+  (shared across worktrees or linked to a private store): its `pending/` and
+  `completed/` files are indexed as `.todos/<sub>/<name>`. The link is
+  refused, with one `recall: .todos symlink refused` warning, when it does not
+  resolve, is not a directory, has a `.git` component, lies inside the repo, or
+  is the repo or an ancestor of it. Symlinks inside the target stay skipped.
 
 ## Golden set and the embeddings decision
 
