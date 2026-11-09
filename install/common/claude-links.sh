@@ -316,7 +316,7 @@ sweep_retired_claude_plugins() {
     return 1
   fi
   RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" python3 - "$cfg" "$label" "$@" <<'PY'
-import datetime, json, os, shutil, signal, subprocess, sys, tempfile, time
+import atexit, datetime, json, os, shutil, signal, subprocess, sys, tempfile, time
 
 cfg, label, wanted = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:]
 retired = json.loads(os.environ["RETIRED_CLAUDE_PLUGINS_JSON"])
@@ -333,7 +333,7 @@ personal_cfg = os.path.abspath(os.path.join(os.path.expanduser("~"), ".claude"))
 git_missing_noted = False
 # Seconds before a hung claude call is killed; the override is test-only.
 CLAUDE_TIMEOUT = float(os.environ.get("SWEEP_TEST_CLAUDE_TIMEOUT") or 60)
-launching, pending = False, []
+launching, received = False, []
 
 
 class Unreadable(Exception):
@@ -347,14 +347,26 @@ class ClaudeTimeout(Exception):
 def on_signal(signum, _frame):
     # The CLI runs in its own session, so a terminal signal no longer reaches
     # it; exit through SystemExit so run_claude's finally kills its group.
+    received.append(signum)
     if launching:
-        pending.append(signum)
         return
     sys.exit(128 + signum)
 
 
+def die_by_signal():
+    # Runs after the cleanup. A normal exit would tell a calling bash script
+    # the interrupt was handled, so it would carry on; die by the signal.
+    if received:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        signal.signal(received[0], signal.SIG_DFL)
+        os.kill(os.getpid(), received[0])
+
+
+atexit.register(die_by_signal)
 for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-    signal.signal(_sig, on_signal)
+    if signal.getsignal(_sig) != signal.SIG_IGN:  # keep an inherited ignore (nohup)
+        signal.signal(_sig, on_signal)
 
 
 def registry_valid(data):
@@ -476,8 +488,8 @@ def kill_group(proc):
     # empty, all within one 5 s deadline. False means it is still present.
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    except (ProcessLookupError, PermissionError):
+        pass  # macOS raises PermissionError for a group of only unreaped zombies
     deadline = time.monotonic() + 5
     try:
         proc.wait(timeout=max(deadline - time.monotonic(), 0))
@@ -518,8 +530,8 @@ def run_claude(plugin, *args):
             proc = launch([claude, *args], cwd=cwd, env=env,
                           stdin=subprocess.DEVNULL, start_new_session=True)
             launching = False
-            if pending:
-                sys.exit(128 + pending[0])
+            if received:
+                sys.exit(128 + received[0])
             rc = proc.wait(timeout=CLAUDE_TIMEOUT)
         except subprocess.TimeoutExpired:
             timed_out = True
