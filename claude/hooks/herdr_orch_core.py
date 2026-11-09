@@ -797,6 +797,19 @@ def _brief_git(worktree, *args):
         _require(False, f"git {' '.join(args[:2])} failed in the task worktree: {exc}")
 
 
+def _bound_worker_agents(rd, task_id):
+    """Agent names a task lead's bound records already hold for task_id."""
+    names = set()
+    for rec in payload_files(rd / "leads", "*"):
+        try:
+            task = json.loads(read_payload_text(rec / "tasks" / f"{task_id}.json"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        workers = task.get("workers") if isinstance(task, dict) else None
+        names |= {w.get("agent") for w in workers or [] if isinstance(w, dict)}
+    return names
+
+
 def _brief_routing(runtime, config, skip=()):
     routes = config.get("routes", {})
     lines = []
@@ -916,6 +929,7 @@ def render_brief(rd, record, ns, repo_root):
     worktree, task_id = record["worktree"], record["task_id"]
     head = _brief_git(worktree, "rev-parse", "HEAD")
     existing = {w.get("agent") for w in record.get("workers") or [] if isinstance(w, dict)}
+    existing |= _bound_worker_agents(rd, task_id)
     agent = agent_name(spec["prefix"], record["branch"].rsplit("/", 1)[-1], existing)
     _require(AGENT_NAME_RE.fullmatch(agent), f"agent name {agent!r} is not a valid herdr name")
     focus = Path(ns.focus_file).read_text(encoding="utf-8").strip() if ns.focus_file else ""
@@ -933,6 +947,8 @@ def render_brief(rd, record, ns, repo_root):
         "phase": ns.phase, "emit_phase": spec["emit"], "workspace_id": record["workspace_id"],
         "core-command": f'python3 "{Path(__file__).resolve()}"',
         "dispatch-command": f'python3 "{Path(__file__).resolve().parent / "herdr_dispatch.py"}"',
+        "hooks-dir": str(Path(__file__).resolve().parent),
+        "references-dir": str(BRIEF_TEMPLATE_PATH.parent),
         "core-context": (f'--repo-path "{repo_root}" --runtime {ns.runtime}'
                          + (" --personal" if ns.personal else "")),
         "routing-lines": _brief_routing(ns.runtime, config, ("impl",) if ns.phase == "lead" else ()),

@@ -13214,7 +13214,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 741
+assert t.count("\n") <= 742
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13253,7 +13253,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 741
+assert t.count("\n") <= 742
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13496,7 +13496,7 @@ assert "dispatch-adapter.md" in flat and "--route-json" in flat and "--cwd" in f
 assert "/leads/<binding_id>/tasks/td-render-x.done.json" in flat, "lead brief waits on the wrong done path"
 assert "/leads/<binding_id>/tasks/td-render-x.review.json" in flat, "lead brief omits the bound review path"
 assert not re.search(r"(?<!>)/tasks/td-render-x\.done\.json", flat.replace("/leads/<binding_id>/tasks/", "")), flat
-assert flat.count("WORKER_LAUNCH_ID") >= 2 and "never ends the wait" in flat, "lead wait lacks the identity check"
+assert flat.count("WORKER_LAUNCH_ID") >= 2 and "never end it" in flat, "lead wait lacks the identity check"
 assert "its done record resumes you" not in flat
 assert "call whose timeout you raise above the loop" in flat and "Never close a pane whose worker is still working" in flat
 assert "agent_runtime.py route --step implementation-review" in flat and "--sandbox read-only" in flat
@@ -13519,41 +13519,73 @@ line = "LESSON: " + tag + " Dispatch through the bound launch verb."
 assert c.harvest_lesson_lines(line, "td-render-x", "implement") == [line]
 PY
 
-check "render-brief: lead wait ignores a stale same-launch done record" <<'PY'
+check "render-brief: lead wait never pastes record data and matches the launch exactly" <<'PY'
 import os, re, subprocess, tempfile, json
 exec(open(os.environ["BRIEF_FIXTURE"]).read())
 _, brief = rendered("--phase", "lead")
 flat = " ".join(brief.split())
-until = re.search(r"`(until \[ -s FILE \].*?done)`", flat).group(1)
-capture = re.search(r"`(grep -o '\"ts\": \*\"\[\^\"\]\*\"' FILE 2>/dev/null)`", flat).group(1)
+capture = re.search(r"store the record's current stamp in a file .*? with `(python3 -c '.*?' RECORD_FILE STAMP_FILE)`", flat).group(1)
+until = re.search(r"`(until python3 -c '.*?' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID .*?; done)`", flat).group(1)
 until = until.replace("540", "2").replace("sleep 10", "sleep 0.3")
 def write(f, rec):
     open(f, "w").write(json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n")
-def waited(record, prior_record):
+def waited(record, prior_record, launch="L1"):
     d = tempfile.mkdtemp()
-    f = os.path.join(d, "t.done.json")
+    f, st = os.path.join(d, "t.done.json"), os.path.join(d, "t.stamp")
+    marker = os.path.join(d, "MARKER")
+    def fill(text):
+        return text.replace("RECORD_FILE", f).replace("STAMP_FILE", st).replace("WORKER_LAUNCH_ID", launch).replace("MARKER", marker)
     if prior_record is not None:
         write(f, prior_record)
-    # process 1: the lead captures the stamp; process 2: waits with it pasted in
-    stamp = subprocess.run(["bash", "-c", capture.replace("FILE", f)], capture_output=True, text=True).stdout.strip()
+    # process 1: the capture command stores the stamp; process 2: the loop reads it back
+    subprocess.run(["bash", "-c", capture.replace("RECORD_FILE", f).replace("STAMP_FILE", st)], check=True)
     if record is not None:
         write(f, record)
-    script = "SECONDS=0\n" + until.replace("FILE", f).replace("WORKER_LAUNCH_ID", "L1").replace("STAMP", stamp) + "\necho $SECONDS\n"
+    script = "SECONDS=0\n" + fill(until) + "\necho $SECONDS\n"
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
+    assert not os.path.exists(marker), "record data ran as shell code"
     return int(out.strip())
 old = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:00:00Z"}
 new_rec = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:05:00Z"}
+assert waited(None, None) >= 2, "no record ended the wait"
 assert waited(old, old) >= 2, "a stale same-launch record ended the wait"
-assert waited(new_rec, old) == 0, "a fresh record after reprompt did not end the wait"
+assert waited(new_rec, old) == 0, "a fresh exact record did not end the wait"
 assert waited(new_rec, None) == 0, "a first record did not end the wait"
-assert waited({"launch_id": "L0", "agent": "z", "ts": "2026-11-02T10:06:00Z"}, old) >= 2, "foreign launch ended the wait"
+foreign = {"launch_id": "L0", "agent": "L1", "note": "L1", "ts": "2026-11-02T10:06:00Z"}
+assert waited(foreign, old) >= 2, "a foreign record naming the launch id elsewhere ended the wait"
+assert waited(dict(new_rec, launch_id="L10"), old) >= 2, "a longer launch id ended the wait"
+assert waited(dict(new_rec, launch_id="L"), old) >= 2, "a shorter launch id ended the wait"
+hostile = dict(old, ts="'; touch MARKER; : '")
+assert waited(hostile, hostile) >= 2, "a hostile stamp ended the wait"
+assert waited(None, hostile) >= 2, "a hostile prior record ended the wait"
+assert waited(new_rec, hostile) == 0, "a fresh record after a hostile stamp did not end the wait"
 for phrase in ("(add `--focus-file` with a focus file you write in your scratchpad, never", "`--personal` only if",
                "--fence <lead_fence> --task-id", "--binding <binding_id> --file ARTIFACT",
                "--binding <binding_id> --json '{...}'"):
     assert phrase in flat, phrase
 assert "(unique per launch)" not in flat and "prints the same agent and path" in flat
-assert "`launch` takes `--personal` only" in flat and "do not survive between Bash calls" in flat
+for token in ("<references-dir>", "<hooks-dir>"):
+    assert token not in flat, token
+for name in ("task-leads.md", "dispatch-adapter.md", "agent_runtime.py", "herdr_envelope.py"):
+    mentions = [m for m in re.findall(r"(\S*" + re.escape(name) + ")", flat)]
+    assert mentions and all(m.lstrip("`(").startswith("/") for m in mentions), (name, mentions)
+assert "`launch` takes `--personal` only" in flat
 assert "`summary` holds `outcome`, `follow_ups`, `pr`" in flat
+PY
+
+check "render-brief: a render after a bound worker takes a fresh agent name" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+first, _ = rendered("--phase", "implement")
+bound = os.path.join(rd, "leads", "B1", "tasks")
+os.makedirs(bound)
+open(os.path.join(bound, "td-render-x.json"), "w").write(json.dumps(
+    {"task_id": "td-render-x", "workers": [{"agent": first["agent"], "phase": "implement"}]}))
+second, _ = rendered("--phase", "implement")
+assert second["agent"] != first["agent"], (first, second)
+assert second["brief_path"] != first["brief_path"], (first, second)
+review, _ = rendered("--phase", "review", "--focus-file", focus)
+assert review["agent"] not in (first["agent"], second["agent"]) and len(review["agent"]) <= 32, review
 PY
 
 check "render-brief: lead steps 3 and 5 name every key the bound launch validates" <<'PY'
@@ -13586,7 +13618,7 @@ for k in keys:
 for k in keys:
     assert "`" + k + "`" in step5, "step 5 drops " + k
 assert "review_head_sha" in step5 and "replaces the record" in step5
-assert "Replace only the word STAMP; the single quotes" in flat and "the operand is `''`" in flat
+assert "Never paste a value read from a record into a command" in flat
 assert "cannot ship" not in flat and "distinct panes" in flat
 PY
 

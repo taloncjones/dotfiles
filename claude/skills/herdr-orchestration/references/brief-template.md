@@ -209,21 +209,22 @@ Routes for the roles you may name in a focus file:
   `DONE_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.done.json`
   and a bound reviewer's verdict is
   `REVIEW_FILE=<account_payload>/leads/<binding_id>/tasks/<task_id>.review.json`
-  (the launcher-level `tasks/` path is never written for your workers). Before
-  each `launch` or `reprompt`, read the file's current stamp with
-  `grep -o '"ts": *"[^"]*"' FILE 2>/dev/null` (no output when the file is
-  absent) and note it as STAMP. Shell variables do not survive between Bash
-  calls, so paste STAMP literally into the loop on every call, each re-arm
-  included. Replace only the word STAMP; the single quotes around it stay
-  (with no record, the operand is `''`). Wait in the foreground, inside one Bash
-  call whose timeout you raise above the loop, with a bounded until-loop (`until [ -s FILE ] && grep -q
-  "WORKER_LAUNCH_ID" FILE && [ "$(grep -o '"ts": *"[^"]*"' FILE)" != 'STAMP' ]
-  || [ $SECONDS -ge 540 ]; do sleep 10; done`), where `WORKER_LAUNCH_ID` is
-  the `launch_id` the `launch` you just ran printed (a `reprompt` keeps it).
-  Accept a record only if its `launch_id` or `agent` names that worker and its
-  `ts` is newer than STAMP: a record from an earlier worker, phase or
-  reprompted slice never ends the wait (`reprompt` keeps the `launch_id` and
-  leaves the old file).
+  (the launcher-level `tasks/` path is never written for your workers). Never
+  paste a value read from a record into a command: a record is data. Before
+  each `launch` or `reprompt`, store the record's current stamp in a file in
+  your scratchpad (never inside the task worktree), one stamp file per record
+  file, with `python3 -c 'import json,sys;o=open(sys.argv[2],"w");o.write(str(json.load(open(sys.argv[1])).get("ts","")) if __import__("os").path.exists(sys.argv[1]) else "")' RECORD_FILE STAMP_FILE`
+  (an empty stamp file means no record yet; if the command fails, do not
+  launch). Replace RECORD_FILE with the DONE_FILE or REVIEW_FILE path and
+  STAMP_FILE with your stamp file path. Wait in the foreground, inside one Bash
+  call whose timeout you raise above the loop, with `until python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));t=d.get("ts");sys.exit(0 if d.get("launch_id")==sys.argv[3] and isinstance(t,str) and t not in ("",open(sys.argv[2]).read()) else 1)' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID 2>/dev/null || [ $SECONDS -ge 540 ]; do sleep 10; done`,
+  where WORKER_LAUNCH_ID is the `launch_id` the `launch` you just ran printed
+  (a `reprompt` keeps it). The loop ends the wait only for a record whose
+  `launch_id` equals that id exactly and whose `ts` differs from the stored
+  stamp; no record, an older record, a record from another worker, phase or
+  reprompted slice, and a longer or shorter id never end it (`reprompt` keeps
+  the `launch_id` and leaves the old file). Paste the same loop on every
+  Bash call, each re-arm included; the stamp file keeps the stamp.
   Re-arm the wait until it appears; each wait is bounded, the slice is not. If
   one wait passes 30 minutes with no change in the worker's pane, close with
   `--outcome paused --reason timeout`. Never close a pane whose worker is
@@ -256,7 +257,7 @@ each verb's `--help` for its current flags.
    with your session, host and pid. It prints `<lead_fence>`. If a step's
    result is lost, read the state it writes before any retry
    (`<dispatch-command> inspect --binding <binding_id>` with the flags step 4
-   lists, the bound task record, `gh pr list --head <branch>`), and follow the recovery in `task-leads.md`; never
+   lists, the bound task record, `gh pr list --head <branch>`), and follow the recovery in `<references-dir>/task-leads.md`; never
    relaunch or re-claim blind. Before re-dispatching a worker whose
    delivery or completion is uncertain, end the prior worker: re-dispatch
    into its own pane, or close its pane first, because a successor row
@@ -273,13 +274,13 @@ each verb's `--help` for its current flags.
    exits 2) and launch it with
    `<dispatch-command> launch --binding <binding_id> --phase implement --repo-slug <repo_slug> --task-id <task_id> --workspace-id <workspace_id> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --cwd <worktree_path>`
    plus the printed `agent` as `--agent` and `brief_path` as `--prompt-file`
-   (a second render for the same task prints the same agent and path, so
-   launch each render before you render again). `inspect` and `reprompt` take
+   (a render repeated before the first worker is bound prints the same
+   agent and path, so launch each render before you render again). `inspect` and `reprompt` take
    `--runtime` (default claude) and `--personal`; `launch` takes `--personal`
    only. Add `--personal` only if `<core-context>` already carries it. Read `<dispatch-command> launch --help`
    for the other required flags (`--pane-id`, `--route-json`, `--sandbox`);
-   `references/dispatch-adapter.md` gives the `--route-json` value
-   (`agent_runtime.py route --role implementation`) and the sandbox value.
+   `<references-dir>/dispatch-adapter.md` gives the `--route-json` value
+   (`<hooks-dir>/agent_runtime.py route --role implementation`) and the sandbox value.
    `inspect` needs `--repo-slug --task-id --phase --workspace-id --cwd`. A
    later slice is `reprompt --binding` on the final row or a fresh
    `launch --binding`.
@@ -290,7 +291,7 @@ each verb's `--help` for its current flags.
    render with `render-brief --phase review<no-workflow-flag> --focus-file` and a
    focus file you write in your scratchpad, never inside the task worktree,
    and `launch --binding --phase review` in another pane with the review
-   route (`agent_runtime.py route --step implementation-review`, not step
+   route (`<hooks-dir>/agent_runtime.py route --step implementation-review`, not step
    4's implementation route) and `--sandbox read-only`. Fix findings by launching a new implement worker, never by editing.
 6. PR: push the task branch and open a draft PR. Never merge or push the
    default branch.
@@ -300,7 +301,7 @@ each verb's `--help` for its current flags.
 8. `<core-command> emit-envelope <core-context> --repo-slug <repo_slug> --session "$CLAUDE_CODE_SESSION_ID" --fence <lead_fence> --binding <binding_id> --json '{...}'`
    with exactly `task_id`, `attempt`, `sequence` and `summary`; for
    `pr_ready`, `summary` holds `outcome`, `follow_ups`, `pr`,
-   `expected_base_sha` and `reason` (null), and `herdr_envelope.py`
+   `expected_base_sha` and `reason` (null), and `<hooks-dir>/herdr_envelope.py`
    `valid_envelope` gives the exact shape. Then
    close your worker panes.
 ```
