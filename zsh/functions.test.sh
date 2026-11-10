@@ -540,11 +540,14 @@ SPU_SHAPEHOME="$TMP/spu-shapehome"
 mkdir -p "$SPU_SHAPEHOME/.claude/plugins"
 printf '{"plugins": {"superpowers@claude-plugins-official": {"scope": "user"}}}\n' \
     >"$SPU_SHAPEHOME/.claude/plugins/installed_plugins.json"
-if ! run_spu_case "$SPU_SHAPEHOME" superpowers-uninstall &&
-   grep -qF "unreadable plugin registry" "$TMP/out"; then
-    pass "superpowers-uninstall treats a malformed record shape as unreadable"
+: >"$TMP/spu-trace"
+if run_spu_case "$SPU_SHAPEHOME" superpowers-uninstall &&
+   [ "$(grep -cF "[WARNING] plugin registry in $SPU_SHAPEHOME/.claude is not in the v2 format this sweep reads; retired-plugin sweep skipped, nothing changed" "$TMP/out")" = 1 ] &&
+   ! grep -qF "unreadable plugin registry" "$TMP/out" &&
+   [ ! -s "$TMP/spu-trace" ]; then
+    pass "superpowers-uninstall warns once, exits 0 and calls no CLI on a dict-valued registry"
 else
-    fail "superpowers-uninstall treats a malformed record shape as unreadable"
+    fail "superpowers-uninstall warns once, exits 0 and calls no CLI on a dict-valued registry"
 fi
 
 SPU_EMPTYHOME="$TMP/spu-emptyhome"
