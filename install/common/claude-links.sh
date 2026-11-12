@@ -317,6 +317,8 @@ PY
 # pruned from the registry, because a CLI project uninstall rewrites that
 # project's own settings file and cannot reach a deleted project at all.
 # Usage: sweep_retired_claude_plugins <cfg_dir> <label> [plugin_id ...]
+# Status: 0 done, 1 failed, 2 usage error, 3 skipped older-format registry,
+# 128+n signal.
 sweep_retired_claude_plugins() {
   local cfg="${1:?sweep_retired_claude_plugins: config dir required}"
   local label="${2:?sweep_retired_claude_plugins: label required}"
@@ -701,21 +703,23 @@ def remove_path(path):
     return True
 
 
-def registry_format_unknown():
-    # Parseable JSON in a shape other than v2, such as an older dict-valued
-    # registry. Unreadable files are not this case; read_state reports them.
+def registry_is_older_format():
+    # The older format maps each plugin id to one record object instead of
+    # v2's list. Any other non-v2 shape is corrupt; read_state fails it closed.
     try:
         data, _raw = read_json(registry_path, lambda _data: True, True)
         read_json(markets_path, is_object, False)
     except Unreadable:
         return False
-    return not registry_valid(data)
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    return (not registry_valid(data) and isinstance(plugins, dict)
+            and all(isinstance(rec, dict) for rec in plugins.values()))
 
 
-if registry_format_unknown():
+if registry_is_older_format():
     print(f"{label} [WARNING] plugin registry in {cfg} is not in the v2 format this sweep reads; "
           f"retired-plugin sweep skipped, nothing changed")
-    sys.exit(0)
+    sys.exit(3)
 
 try:
     read_state()

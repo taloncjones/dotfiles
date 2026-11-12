@@ -467,6 +467,31 @@ else
     fail "ecc-uninstall reports failure when the shared sweep fails"
 fi
 
+# 6e. A skipped older-format registry is an incomplete uninstall: keep the checkout.
+ECCS_HOME="$TMP/eccs-home"
+mkdir -p "$ECCS_HOME/.claude/plugins" "$TMP/eccs-checkout"
+printf '{"plugins": {"ecc@ecc": {"scope": "user"}}}\n' >"$ECCS_HOME/.claude/plugins/installed_plugins.json"
+: >"$TMP/eccm-trace"
+if ! HOME="$ECCS_HOME" ECCM_TRACE="$TMP/eccm-trace" zsh -f -c "
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        path=('$TMP/stubs/eccm' /usr/bin /bin)
+        DOTFILEDIR='$REPO'
+        ECC_REPO_DIR='$TMP/eccs-checkout'
+        CLAUDE_WORK_CONFIG_DIR='$TMP/eccs-no-work'
+        CODEX_WORKFLOW_MARKETPLACE_DIR='$TMP/eccs-codex'
+        _codex_remove_plugin() { return 0; }
+        _ecc_sweep_legacy_vendored() { return 0; }
+        ecc-uninstall" >"$TMP/out" 2>&1 &&
+   [ -d "$TMP/eccs-checkout" ] &&
+   grep -qF '[X] ECC uninstall was incomplete' "$TMP/out" &&
+   ! grep -qF '[OK] ECC uninstalled' "$TMP/out" &&
+   [ ! -s "$TMP/eccm-trace" ]; then
+    pass "ecc-uninstall keeps the checkout and reports incomplete when the sweep skips an older-format registry"
+else
+    fail "ecc-uninstall keeps the checkout and reports incomplete when the sweep skips an older-format registry"
+fi
+
 # 7. Superpowers retirement.
 if run_case broken '
     for f in superpowers-install superpowers-update _codex_stage_superpowers_plugin _codex_install_superpowers_plugin _codex_update_superpowers_plugin; do
@@ -541,13 +566,13 @@ mkdir -p "$SPU_SHAPEHOME/.claude/plugins"
 printf '{"plugins": {"superpowers@claude-plugins-official": {"scope": "user"}}}\n' \
     >"$SPU_SHAPEHOME/.claude/plugins/installed_plugins.json"
 : >"$TMP/spu-trace"
-if run_spu_case "$SPU_SHAPEHOME" superpowers-uninstall &&
+if ! run_spu_case "$SPU_SHAPEHOME" superpowers-uninstall &&
    [ "$(grep -cF "[WARNING] plugin registry in $SPU_SHAPEHOME/.claude is not in the v2 format this sweep reads; retired-plugin sweep skipped, nothing changed" "$TMP/out")" = 1 ] &&
-   ! grep -qF "unreadable plugin registry" "$TMP/out" &&
+   [ "$(grep -cF "[X] superpowers@claude-plugins-official not removed: the sweep skipped the older-format plugin registry in $SPU_SHAPEHOME/.claude" "$TMP/out")" = 1 ] &&
    [ ! -s "$TMP/spu-trace" ]; then
-    pass "superpowers-uninstall warns once, exits 0 and calls no CLI on a dict-valued registry"
+    pass "superpowers-uninstall fails and calls no CLI when the sweep skips an older-format registry"
 else
-    fail "superpowers-uninstall warns once, exits 0 and calls no CLI on a dict-valued registry"
+    fail "superpowers-uninstall fails and calls no CLI when the sweep skips an older-format registry"
 fi
 
 SPU_EMPTYHOME="$TMP/spu-emptyhome"

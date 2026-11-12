@@ -172,6 +172,36 @@ else
     fail "update --ai fails on an unfinished sweep after running Codex"
 fi
 
+# An older-format registry is skipped by the sweep and stays green; a corrupt
+# one fails the run.
+for shape in older corrupt; do
+    SK_HOME="$TMP/sk-home-$shape"
+    mkdir -p "$SK_HOME/.claude/plugins" "$SK_HOME/.codex"
+    case "$shape" in
+        older) printf '{"plugins": {"ecc@ecc": {"scope": "user"}}}\n' ;;
+        corrupt) printf '{"plugins": null}\n' ;;
+    esac >"$SK_HOME/.claude/plugins/installed_plugins.json"
+    sk_rc=0
+    env -i HOME="$SK_HOME" PATH="$STUB_BIN" TMPDIR="$TMP" CODEX_HOME="$SK_HOME/.codex" \
+        DOTFILEDIR="$DOTFILEDIR" bash "$AI_UPDATE" >"$TMP/sk.log" 2>&1 || sk_rc=$?
+    if [ "$shape" = older ]; then
+        if [ "$sk_rc" = 0 ] && grep -qF '[ai-update] Done.' "$TMP/sk.log"; then
+            pass "update --ai stays green when the sweep skips an older-format registry"
+        else
+            fail "update --ai stays green when the sweep skips an older-format registry"
+        fi
+    else
+        if [ "$sk_rc" = 1 ] &&
+           grep -qF "[ai-update] [X] unreadable plugin registry in $SK_HOME/.claude (" "$TMP/sk.log" &&
+           grep -qF '[ai-update] [X] retired plugin sweep incomplete' "$TMP/sk.log" &&
+           ! grep -qF '[ai-update] Done.' "$TMP/sk.log"; then
+            pass "update --ai fails on a corrupt non-v2 registry after running Codex"
+        else
+            fail "update --ai fails on a corrupt non-v2 registry after running Codex"
+        fi
+    fi
+done
+
 # herdr detection override: a valid remote cache yields the override; an
 # invalid one fails the run after the later steps ran.
 HM_HOME="$TMP/hm-home"

@@ -287,6 +287,13 @@ function _claude_sweep_retired() {
     fi
     bash -c '. "$1"; sweep_retired_claude_plugins "$2" "$3" "$4"' _ \
         "$links" "$cfg_dir" "$label" "$plugin_id"
+    local rc=$?
+    # 3: the sweep skipped an older-format registry and removed nothing.
+    if (( rc == 3 )); then
+        echo "$label [X] $plugin_id not removed: the sweep skipped the older-format plugin registry in $cfg_dir"
+        return 1
+    fi
+    return $rc
 }
 
 # --- Codex plugin lifecycle ---

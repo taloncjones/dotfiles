@@ -755,8 +755,9 @@ for shape in bad-json symlink; do
     fi
 done
 
-# A parseable non-v2 registry is skipped with one warning and no writes.
-for shape in dict-valued list-plugins; do
+# An older-format registry (plugins maps ids to objects) is skipped with one
+# warning, no writes and exit 3.
+for shape in dict-valued dict-scope; do
     SKIPCFG="$TMP/sweep-skip-$shape"
     mkdir -p "$SKIPCFG/plugins/cache/ecc" "$SKIPCFG/plugins/marketplaces/ecc" \
         "$SKIPCFG/plugins/cache/temp_git_1_ecc" "$SKIPCFG/plugins/cache/.retired-temp_git_9"
@@ -764,7 +765,7 @@ for shape in dict-valued list-plugins; do
     git -C "$SKIPCFG/plugins/cache/temp_git_1_ecc" remote add origin https://github.com/affaan-m/ECC.git
     case "$shape" in
         dict-valued) printf '{"version": 1, "plugins": {"ecc@ecc": {"version": "2.0.0", "installPath": "/x"}}}\n' >"$SKIPCFG/plugins/installed_plugins.json" ;;
-        list-plugins) printf '{"plugins": []}\n' >"$SKIPCFG/plugins/installed_plugins.json" ;;
+        dict-scope) printf '{"plugins": {"ecc@ecc": {"scope": "user"}}}\n' >"$SKIPCFG/plugins/installed_plugins.json" ;;
     esac
     printf '{"ecc": {}}\n' >"$SKIPCFG/plugins/known_marketplaces.json"
     printf '{"enabledPlugins": {"keep@me": true}}\n' >"$SKIPCFG/settings.json"
@@ -777,7 +778,7 @@ for shape in dict-valued list-plugins; do
     (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" HOME="$TMP/sweep-home"
      sweep_retired_claude_plugins "$SKIPCFG" "[test]") >"$TMP/sweep.out" 2>&1 || skip_rc=$?
     set -- "$SKIPCFG"/plugins/installed_plugins.json.bak-retired-*
-    if [ "$skip_rc" = 0 ] &&
+    if [ "$skip_rc" = 3 ] &&
        cmp -s "$TMP/sweep.out" "$TMP/skip.want" &&
        [ ! -s "$TMP/sweep-trace" ] &&
        cmp -s "$SKIPCFG/plugins/installed_plugins.json" "$TMP/skip.reg" &&
@@ -789,6 +790,38 @@ for shape in dict-valued list-plugins; do
         pass "sweep skips a $shape registry with one warning"
     else
         fail "sweep skips a $shape registry with one warning"
+    fi
+done
+
+# Parseable non-v2 shapes that are not the older format are corrupt: exit 1.
+for shape in null list number plugins-null plugins-list record-number record-string mixed-records; do
+    CORCFG="$TMP/sweep-corrupt-$shape"
+    mkdir -p "$CORCFG/plugins/cache/ecc"
+    case "$shape" in
+        null) printf 'null\n' ;;
+        list) printf '[]\n' ;;
+        number) printf '42\n' ;;
+        plugins-null) printf '{"plugins": null}\n' ;;
+        plugins-list) printf '{"plugins": []}\n' ;;
+        record-number) printf '{"plugins": {"ecc@ecc": [1]}}\n' ;;
+        record-string) printf '{"plugins": {"ecc@ecc": "x"}}\n' ;;
+        mixed-records) printf '{"plugins": {"ecc@ecc": {"scope": "user"}, "superpowers@x": [{"scope": "user"}]}}\n' ;;
+    esac >"$CORCFG/plugins/installed_plugins.json"
+    printf '{"ecc": {}}\n' >"$CORCFG/plugins/known_marketplaces.json"
+    cp "$CORCFG/plugins/installed_plugins.json" "$TMP/cor.before"
+    : >"$TMP/sweep-trace"
+    cor_rc=0
+    (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" HOME="$TMP/sweep-home"
+     sweep_retired_claude_plugins "$CORCFG" "[test]") >"$TMP/sweep.out" 2>&1 || cor_rc=$?
+    if [ "$cor_rc" = 1 ] &&
+       grep -qF '[X] unreadable plugin registry' "$TMP/sweep.out" &&
+       ! grep -qF '[WARNING]' "$TMP/sweep.out" &&
+       [ ! -s "$TMP/sweep-trace" ] &&
+       cmp -s "$CORCFG/plugins/installed_plugins.json" "$TMP/cor.before" &&
+       [ -d "$CORCFG/plugins/cache/ecc" ]; then
+        pass "sweep fails closed with exit 1 on a $shape registry"
+    else
+        fail "sweep fails closed with exit 1 on a $shape registry"
     fi
 done
 

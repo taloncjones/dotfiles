@@ -25,8 +25,9 @@ link_claude_config_dir "$HOME"/.claude-work
 # finish plugin retirements, so here a step that cannot run IS a failure.
 # The sweep's failure is deferred so the reconcile and Codex steps still run.
 sweep_status=0
-sweep_retired_claude_plugins "$HOME"/.claude "[ai-update]" || sweep_status=1
-sweep_retired_claude_plugins "$HOME"/.claude-work "[ai-update]" || sweep_status=1
+# Status 3 is the older-format skip, which stays green.
+sweep_retired_claude_plugins "$HOME"/.claude "[ai-update]" || [ $? -eq 3 ] || sweep_status=1
+sweep_retired_claude_plugins "$HOME"/.claude-work "[ai-update]" || [ $? -eq 3 ] || sweep_status=1
 reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$HOME"/.claude/settings.json "[ai-update]"
 reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$HOME"/.claude-work/settings.json "[ai-update]"
 
