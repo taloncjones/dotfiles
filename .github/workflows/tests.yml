@@ -61,7 +61,8 @@ jobs:
   # (2) a hook may return, so the guard fails OPEN -- before main(), and
   # before any crash handler is installed.
   hook-import-floor:
-    runs-on: ubuntu-latest
+    # Pinned: Ubuntu 26.04 (ubuntu-latest since 2026-11) has no Python 3.9 build.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
