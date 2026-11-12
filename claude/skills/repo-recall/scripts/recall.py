@@ -364,6 +364,16 @@ def _extra_globs(env, quiet):
     return out
 
 
+def _dir_key(path):
+    """(st_dev, st_ino) of path, or None when it does not exist. Any other
+    stat failure raises OSError."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return st.st_dev, st.st_ino
+
+
 def _todos_link_target(toplevel, canonical, quiet):
     """Resolved target of a symlinked <toplevel>/.todos, or None when absent,
     a real directory, or refused (one warning per refusal)."""
@@ -382,15 +392,29 @@ def _todos_link_target(toplevel, canonical, quiet):
     if not target.is_dir():
         refuse(target, "not a directory")
         return None
-    if ".git" in target.parts:
-        refuse(target, "inside a .git directory")
-        return None
+    # resolve() keeps case and firmlink spellings; compare by stat identity.
     top = Path(toplevel).resolve()
     canon = Path(canonical).resolve()
-    if target == top or top in target.parents:
+    chain = [target, *target.parents]
+    cannot_read = "a directory whose identity cannot be read"
+    try:
+        chain_keys = [_dir_key(p) for p in chain]
+        git_keys = [_dir_key(p.parent / ".git") for p in chain if p != p.parent]
+        top_key = _dir_key(top)
+        root_keys = [_dir_key(p) for p in [*top.parents, canon, *canon.parents]]
+    except OSError:
+        refuse(target, cannot_read)
+        return None
+    if None in chain_keys or top_key is None or None in root_keys:
+        refuse(target, cannot_read)
+        return None
+    if any(key == git for key, git in zip(chain_keys, git_keys)):
+        refuse(target, "inside a .git directory")
+        return None
+    if top_key in chain_keys:
         refuse(target, "inside the repository")
         return None
-    if target in (top, canon) or target in top.parents or target in canon.parents:
+    if chain_keys[0] in root_keys:
         refuse(target, "the repository or an ancestor of it")
         return None
     return target
@@ -427,7 +451,7 @@ def collect_sources(toplevel, canonical, config_dir, env=None, quiet=False):
     if target is not None:
         for sub in ("pending", "completed"):
             sub_dir = target / sub
-            if not sub_dir.is_dir():
+            if sub_dir.is_symlink() or not sub_dir.is_dir():
                 continue
             try:
                 entries = sorted(sub_dir.iterdir())
