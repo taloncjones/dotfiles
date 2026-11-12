@@ -455,7 +455,13 @@ fi
 # - tearmk: overwrites known_marketplaces.json with a JSON array and exits 0;
 # - hang: records its pid in $SWEEP_PIDFILE when set, truncates settings.json
 #   when present, then sleeps 20 s as a child;
-# - orphan: backgrounds a 20 s sleep holding stdout, then acts normally.
+# - orphan: backgrounds a 20 s sleep holding stdout, then acts normally;
+# - tearboth: empties settings.json, overwrites the registry with non-JSON, exits 0;
+# - latejoin: empties settings.json and starts a helper that leaves the stub's
+#   process group (a zombie child keeps the group alive), appends LEFT to
+#   $SWEEP_JOINFILE, waits for the stub to die plus $SWEEP_REJOIN_DELAY
+#   seconds, appends REJOINING, rejoins the group, then sleeps. The stub
+#   records its pid in $SWEEP_PIDFILE only after LEFT, then sleeps 20 s.
 SWEEP_BIN="$TMP/sweep-bin"
 mkdir -p "$SWEEP_BIN"
 cat >"$SWEEP_BIN/claude" <<'EOF'
@@ -475,6 +481,40 @@ case "${SWEEP_STUB:-ok}" in
     tearmk) printf '[1]\n' >"$cfg/plugins/known_marketplaces.json"; exit 0 ;;
     hang) [ -n "${SWEEP_PIDFILE-}" ] && echo $$ >"$SWEEP_PIDFILE"
           [ -f "$cfg/settings.json" ] && : >"$cfg/settings.json"; sleep 20; exit 0 ;;
+    tearboth) : >"$cfg/settings.json"
+              printf 'not json\n' >"$cfg/plugins/installed_plugins.json"; exit 0 ;;
+    latejoin) [ -f "$cfg/settings.json" ] && : >"$cfg/settings.json"
+          python3 - "$SWEEP_JOINFILE" "${SWEEP_REJOIN_DELAY:-0}" <<'PYH' &
+import os, sys, time
+joinfile, delay = sys.argv[1], float(sys.argv[2])
+old = os.getpgrp()
+zombie = os.fork()
+if zombie == 0:
+    os._exit(0)
+os.setpgid(0, 0)
+with open(joinfile, "a") as fh:
+    fh.write(f"LEFT {os.getpid()}\n")
+parent = os.getppid()
+end = time.time() + 20
+while os.getppid() == parent and time.time() < end:
+    time.sleep(0.02)
+time.sleep(delay)
+with open(joinfile, "a") as fh:
+    fh.write("REJOINING\n")
+try:
+    os.setpgid(0, old)
+except OSError:
+    print("REJOIN_FAILED", file=sys.stderr)
+    sys.exit(1)
+os.waitpid(zombie, 0)
+time.sleep(20)
+PYH
+          n=0
+          while ! grep -q '^LEFT' "$SWEEP_JOINFILE" 2>/dev/null && [ "$n" -lt 200 ]; do
+              sleep 0.05; n=$((n + 1))
+          done
+          [ -n "${SWEEP_PIDFILE-}" ] && echo $$ >"$SWEEP_PIDFILE"
+          sleep 20; exit 0 ;;
     orphan) sleep 20 & ;;
 esac
 python3 - "$cfg" "$@" <<'PY'
@@ -1034,7 +1074,7 @@ fi
 # its own process group and signals that whole group, as a terminal does.
 cat >"$TMP/sig-harness.py" <<'PY'
 import os, signal, subprocess, sys, time
-sig, ign_hup, cfg, marker, pidfile, out, wrapper = sys.argv[1:8]
+sig, ign_hup, cfg, marker, pidfile, out, wrapper, how, joinfile = sys.argv[1:10]
 settings = cfg + "/settings.json"
 def pre():
     if ign_hup == "1":
@@ -1046,13 +1086,39 @@ end = time.time() + 15
 while time.time() < end and not (os.path.exists(pidfile) and os.path.getsize(pidfile)
                                  and os.path.getsize(settings) == 0):
     time.sleep(0.05)
-os.killpg(p.pid, getattr(signal, "SIG" + sig))
+stub = int(open(pidfile).read())
+signum = getattr(signal, "SIG" + sig)
+def sweep_pid():
+    return int(subprocess.check_output(["ps", "-o", "ppid=", "-p", str(stub)]).split()[0])
+early = 0
+if how == "group":
+    os.killpg(p.pid, signum)
+elif how == "sweep":
+    os.kill(sweep_pid(), signum)
+elif how == "double":
+    sweep = sweep_pid()
+    os.kill(sweep, signal.SIGSTOP)
+    os.killpg(p.pid, signal.SIGINT)
+    os.kill(sweep, signal.SIGTERM)
+    os.kill(sweep, signal.SIGCONT)
+elif how == "cleanup":
+    # The stub leader is reaped by kill_group; the group is still polling while
+    # the helper has left and not yet rejoined.
+    end = time.time() + 15
+    while time.time() < end:
+        try:
+            os.kill(stub, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    seen = open(joinfile).read()
+    early = int("LEFT" in seen and "REJOINING" not in seen)
+    os.killpg(p.pid, signum)
 try:
     rc = p.wait(timeout=20)
 except subprocess.TimeoutExpired:
     os.killpg(p.pid, signal.SIGKILL)
     rc = "hung"
-stub = int(open(pidfile).read())
 end = time.time() + 10
 while time.time() < end:
     try:
@@ -1070,43 +1136,163 @@ except ProcessLookupError:
     gone = 1
 except PermissionError:
     gone = 0
-print(f"RC={rc} CONTINUED={int(os.path.exists(marker))} GONE={gone}")
+print(f"RC={rc} CONTINUED={int(os.path.exists(marker))} GONE={gone} EARLY={early}")
 PY
-sig_case() { # sig ign_hup timeout name
+sig_case() { # sig ign_hup timeout name how stub rejoin_delay
     SGCFG="$TMP/sweep-sig-$4"
     mkdir -p "$SGCFG/plugins"
     printf '{"ecc": {}}\n' >"$SGCFG/plugins/known_marketplaces.json"
     printf '{"a": 1}\n' >"$SGCFG/settings.json"
     cp "$SGCFG/settings.json" "$TMP/sig-$4.before"
-    rm -f "$TMP/sig-$4.marker" "$TMP/sig-$4.pid"
+    rm -f "$TMP/sig-$4.marker" "$TMP/sig-$4.pid" "$TMP/sig-$4.join"
     SGWRAP="DOTFILEDIR='$DOTFILEDIR'; . '$DOTFILEDIR/$LINKS'
         sweep_retired_claude_plugins '$SGCFG' '[test]' || true
         : >'$TMP/sig-$4.marker'"
-    sig_res=$(PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=hang \
-        SWEEP_PIDFILE="$TMP/sig-$4.pid" SWEEP_TEST_CLAUDE_TIMEOUT="$3" HOME="$TMP/sweep-home" \
+    sig_res=$(PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB="${6:-hang}" \
+        SWEEP_PIDFILE="$TMP/sig-$4.pid" SWEEP_JOINFILE="$TMP/sig-$4.join" \
+        SWEEP_REJOIN_DELAY="${7:-0}" SWEEP_TEST_CLAUDE_TIMEOUT="$3" HOME="$TMP/sweep-home" \
         python3 "$TMP/sig-harness.py" "$1" "$2" "$SGCFG" "$TMP/sig-$4.marker" "$TMP/sig-$4.pid" \
-        "$TMP/sig-$4.out" "$SGWRAP" 2>&1)
+        "$TMP/sig-$4.out" "$SGWRAP" "${5:-group}" "$TMP/sig-$4.join" 2>&1)
+    # A helper that stayed out of the group outlives the case; kill it by pid.
+    helper=$(sed -n 's/^LEFT //p' "$TMP/sig-$4.join" 2>/dev/null | head -1)
+    [ -n "$helper" ] && kill -9 "$helper" 2>/dev/null
 }
 sig_case INT 0 60 int
-if [ "$sig_res" = "RC=-2 CONTINUED=0 GONE=1" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-int.before"; then
+if [ "$sig_res" = "RC=-2 CONTINUED=0 GONE=1 EARLY=0" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-int.before"; then
     pass "SIGINT during the wait kills the claude group, restores settings, and aborts the calling script"
 else
     fail "SIGINT during the wait kills the claude group, restores settings, and aborts the calling script ($sig_res)"
 fi
-sig_case TERM 0 60 term
-if [ "$sig_res" = "RC=-15 CONTINUED=0 GONE=1" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-term.before"; then
-    pass "SIGTERM during the wait kills the claude group, restores settings, and aborts the calling script"
+# Only the sweep gets the signal: it must still die by it, which bash reports
+# as a job notice (a plain exit 143 prints nothing).
+sig_case TERM 0 60 term sweep
+if [ "$sig_res" = "RC=0 CONTINUED=1 GONE=1 EARLY=0" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-term.before" &&
+   grep -q 'Terminated' "$TMP/sig-term.out"; then
+    pass "SIGTERM to the sweep alone kills the claude group, restores settings, and the sweep dies by the signal"
 else
-    fail "SIGTERM during the wait kills the claude group, restores settings, and aborts the calling script ($sig_res)"
+    fail "SIGTERM to the sweep alone kills the claude group, restores settings, and the sweep dies by the signal ($sig_res)"
+fi
+# A second signal while the sweep is cleaning up must not cut the cleanup short.
+sig_case INT 0 60 double double
+if [ "$sig_res" = "RC=-2 CONTINUED=0 GONE=1 EARLY=0" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-double.before"; then
+    pass "two signals during the cleanup cannot abort it: the claude group dies and settings are restored"
+else
+    fail "two signals during the cleanup cannot abort it: the claude group dies and settings are restored ($sig_res)"
+fi
+# A first signal while kill_group still polls after a timeout.
+sig_case INT 0 1 cleanup cleanup latejoin 2
+if [ "$sig_res" = "RC=-2 CONTINUED=0 GONE=1 EARLY=1" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-cleanup.before" &&
+   grep -q '^LEFT' "$TMP/sig-cleanup.join" && grep -q '^REJOINING' "$TMP/sig-cleanup.join" &&
+   ! grep -q 'REJOIN_FAILED' "$TMP/sig-cleanup.out"; then
+    pass "SIGINT during the timeout cleanup cannot abort it: the claude group dies and settings are restored"
+else
+    fail "SIGINT during the timeout cleanup cannot abort it: the claude group dies and settings are restored ($sig_res)"
+fi
+# The group cannot be emptied (the helper stays out), so the sweep reports the
+# survivors and leaves settings alone before dying by the signal.
+sig_case INT 0 60 stuck group latejoin 30
+if printf '%s' "$sig_res" | grep -q '^RC=-2 CONTINUED=0 ' &&
+   grep -qF 'left processes running in group' "$TMP/sig-stuck.out" &&
+   grep -q '^LEFT' "$TMP/sig-stuck.join" && [ ! -s "$SGCFG/settings.json" ]; then
+    pass "SIGINT while the claude group outlives the deadline reports the survivors before the sweep dies by the signal"
+else
+    fail "SIGINT while the claude group outlives the deadline reports the survivors before the sweep dies by the signal ($sig_res)"
 fi
 # With HUP ignored in the parent (nohup), SIGHUP must not end the sweep: the
 # 2 s timeout fires instead and the script carries on.
 sig_case HUP 1 2 hup
-if [ "$sig_res" = "RC=0 CONTINUED=1 GONE=1" ] && grep -q 'timed out after 2s' "$TMP/sig-hup.out" &&
+if [ "$sig_res" = "RC=0 CONTINUED=1 GONE=1 EARLY=0" ] && grep -q 'timed out after 2s' "$TMP/sig-hup.out" &&
    cmp -s "$SGCFG/settings.json" "$TMP/sig-hup.before"; then
     pass "an inherited ignored SIGHUP is not overridden by the sweep"
 else
     fail "an inherited ignored SIGHUP is not overridden by the sweep ($sig_res)"
+fi
+
+# A late group member: the helper leaves the group, then rejoins after the
+# leader dies. The sweep must keep killing the group until it is empty.
+LJCFG="$TMP/sweep-latejoin"
+mkdir -p "$LJCFG/plugins"
+printf '{"ecc": {}}\n' >"$LJCFG/plugins/known_marketplaces.json"
+printf '{"a": 1}\n' >"$LJCFG/settings.json"
+cp "$LJCFG/settings.json" "$TMP/latejoin.before"
+rm -f "$TMP/latejoin.join"
+(export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=latejoin \
+    SWEEP_JOINFILE="$TMP/latejoin.join" SWEEP_REJOIN_DELAY=0 SWEEP_TEST_CLAUDE_TIMEOUT=1 \
+    HOME="$TMP/sweep-home"
+    sweep_retired_claude_plugins "$LJCFG" "[test]") >"$TMP/latejoin.out" 2>&1
+lj_rc=$?
+helper=$(sed -n 's/^LEFT //p' "$TMP/latejoin.join" 2>/dev/null | head -1)
+[ -n "$helper" ] && kill -9 "$helper" 2>/dev/null
+if [ "$lj_rc" -eq 1 ] &&
+   grep -qxF "[test] [X] claude plugin marketplace remove ecc timed out after 1s for $LJCFG; skipping the rest of the sweep here (the next run retries); run by hand: CLAUDE_CONFIG_DIR=$LJCFG claude plugin marketplace remove ecc" "$TMP/latejoin.out" &&
+   ! grep -qF 'left processes running' "$TMP/latejoin.out" &&
+   grep -q '^LEFT' "$TMP/latejoin.join" && grep -q '^REJOINING' "$TMP/latejoin.join" &&
+   ! grep -q 'REJOIN_FAILED' "$TMP/latejoin.out" &&
+   cmp -s "$LJCFG/settings.json" "$TMP/latejoin.before"; then
+    pass "sweep keeps killing the claude group until a late joiner is gone"
+else
+    fail "sweep keeps killing the claude group until a late joiner is gone (rc=$lj_rc: $(cat "$TMP/latejoin.out"))"
+fi
+
+# A guarded file that cannot be restored is reported; the others still are.
+TBCFG="$TMP/sweep-tearboth"
+mkdir -p "$TBCFG/plugins"
+printf '{"ecc": {}}\n' >"$TBCFG/plugins/known_marketplaces.json"
+printf '{"version": 2, "plugins": {}}\n' >"$TBCFG/plugins/installed_plugins.json"
+printf '{"a": 1}\n' >"$TBCFG/settings.json"
+cp "$TBCFG/plugins/installed_plugins.json" "$TMP/tearboth.registry"
+chmod 555 "$TBCFG"
+(export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=tearboth HOME="$TMP/sweep-home"
+    sweep_retired_claude_plugins "$TBCFG" "[test]") >"$TMP/tearboth.out" 2>&1
+tb_rc=$?
+chmod 755 "$TBCFG"
+if [ "$tb_rc" -eq 1 ] &&
+   grep -qF "left $TBCFG/settings.json unreadable; could not restore it:" "$TMP/tearboth.out" &&
+   cmp -s "$TBCFG/plugins/installed_plugins.json" "$TMP/tearboth.registry"; then
+    pass "a guarded file that cannot be restored is reported and the others are still restored"
+else
+    fail "a guarded file that cannot be restored is reported and the others are still restored (rc=$tb_rc: $(cat "$TMP/tearboth.out"))"
+fi
+
+# Malformed test overrides are refused before the CLI starts.
+OVCFG="$TMP/sweep-override"
+mkdir -p "$OVCFG/plugins"
+printf '{"ecc": {}}\n' >"$OVCFG/plugins/known_marketplaces.json"
+ov_ok=1
+for bad in BOGUS KILL; do
+    : >"$TMP/ov-trace"
+    (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/ov-trace" SWEEP_STUB=lie HOME="$TMP/sweep-home" \
+        SWEEP_TEST_SIGNAL_AT_LAUNCH="$bad"
+        sweep_retired_claude_plugins "$OVCFG" "[test]") >"$TMP/ov.out" 2>&1
+    ov_rc=$?
+    if [ "$ov_rc" -ne 2 ] || [ -s "$TMP/ov-trace" ] ||
+       ! grep -qxF "[test] [X] invalid SWEEP_TEST_SIGNAL_AT_LAUNCH '$bad': want INT, TERM or HUP" "$TMP/ov.out"; then
+        ov_ok=0
+        ov_why="$bad rc=$ov_rc: $(cat "$TMP/ov.out")"
+    fi
+done
+if [ "$ov_ok" = 1 ]; then
+    pass "sweep refuses a malformed SWEEP_TEST_SIGNAL_AT_LAUNCH before starting claude"
+else
+    fail "sweep refuses a malformed SWEEP_TEST_SIGNAL_AT_LAUNCH before starting claude ($ov_why)"
+fi
+ov_ok=1
+for bad in abc 0 -1 nan inf; do
+    : >"$TMP/ov-trace"
+    (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/ov-trace" SWEEP_STUB=lie HOME="$TMP/sweep-home" \
+        SWEEP_TEST_CLAUDE_TIMEOUT="$bad"
+        sweep_retired_claude_plugins "$OVCFG" "[test]") >"$TMP/ov.out" 2>&1
+    ov_rc=$?
+    if [ "$ov_rc" -ne 2 ] || [ -s "$TMP/ov-trace" ] ||
+       ! grep -qxF "[test] [X] invalid SWEEP_TEST_CLAUDE_TIMEOUT '$bad': want a positive number of seconds" "$TMP/ov.out"; then
+        ov_ok=0
+        ov_why="$bad rc=$ov_rc: $(cat "$TMP/ov.out")"
+    fi
+done
+if [ "$ov_ok" = 1 ]; then
+    pass "sweep refuses a malformed SWEEP_TEST_CLAUDE_TIMEOUT before starting claude"
+else
+    fail "sweep refuses a malformed SWEEP_TEST_CLAUDE_TIMEOUT before starting claude ($ov_why)"
 fi
 
 # --- link_claude_config_dir integration (real repo template) ---
