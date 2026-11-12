@@ -12,9 +12,22 @@ merge, runs the contract at HEAD, and records the proof in
 `artifacts/<task>/review-carry/`. Exit 0: re-pinned at HEAD with
 `review_carry`; the next check-in reports `ship`. Exit 3: the task is reset as
 the stale-verdict reset (SKILL.md section 4) does and the next check-in reports `dispatch-review`.
-Exit 4: nothing written; for a held lock wait for the earlier run, else the
-next check-in offers it again, and repeated exit 4 goes to the user. Exit 2:
-integrity halt; surface it.
+Exit 2: integrity halt; surface it.
+
+A ship gate CHANGES verdict at the review pin blocks the carry.
+`carry-review` reads the ship gates' `ship.json` files at its start and
+again just before it writes; a CHANGES at the pin seen either time makes
+it exit 4 with nothing written. INCOMPLETE does not block. A CHANGES
+published after that last check does not stop a carry that finishes its
+write: the pin has moved, so the handoff is `stale` and section 6 rule
+(b) gates the carried head again. A carry interrupted before its write
+keeps the old pin, so the CHANGES blocks the next run.
+
+Exit 4: nothing written. For a held lock, wait for the earlier run.
+After a ship CHANGES block, the next check-in reports
+`stale-review-reset`, not `carry-review`, unless a higher-precedence rule
+(such as `blocked`) fires first. Otherwise the next check-in offers it
+again, and repeated exit 4 goes to the user.
 
 ## Carry-forward and delta tier (section 6)
 
