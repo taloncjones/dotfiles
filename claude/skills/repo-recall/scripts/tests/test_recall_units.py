@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -389,6 +390,45 @@ class TodosLink(unittest.TestCase):
             os.chmod(self.store / "completed", 0o755)
         recall.refresh(conn, self.ctx(), quiet=True)
         self.assertIn(".todos/completed/c.md", displays())
+
+
+    def test_todos_link_refused_by_identity_not_spelling(self):
+        firmlink = Path("/System/Volumes/Data" + str(self.tmp))
+        refused, accepted = [], []
+        if (self.tmp / "REPO").exists():
+            refused += [self.tmp / "REPO" / ".GIT", self.tmp / "REPO"]
+            accepted.append(self.tmp / "STORE")
+        if firmlink.is_dir():
+            refused += [firmlink / "repo" / ".git", firmlink / "repo"]
+            accepted.append(firmlink / "store")
+        if not refused:
+            self.skipTest("no case-insensitive or firmlink spelling on this host")
+        for target in refused + accepted:
+            with self.subTest(target=str(target)):
+                link = self.top / ".todos"
+                if link.is_symlink():
+                    link.unlink()
+                self.link(target)
+                want = [".todos/pending/t.md"] if target in accepted else []
+                self.assertEqual(list(self.todos()), want)
+
+    def test_symlinked_todos_subdir_never_listed(self):
+        (self.store / "pending" / "t.md").unlink()
+        (self.store / "pending").rmdir()
+        os.symlink(self.top / ".git" / "pending", self.store / "pending")
+        (self.store / "completed" / "c.md").write_text("# C\nbody")
+        self.link(self.store)
+        listed = []
+        real_iterdir = recall.Path.iterdir
+
+        def spy(path):
+            listed.append(path)
+            return real_iterdir(path)
+
+        with mock.patch.object(recall.Path, "iterdir", spy):
+            got = list(self.todos())
+        self.assertEqual(got, [".todos/completed/c.md"])
+        self.assertNotIn(self.store / "pending", listed)
 
 
 if __name__ == "__main__":

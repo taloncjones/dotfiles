@@ -103,8 +103,13 @@ locked or missing, 8 bad eval input, 64 usage.
   (shared across worktrees or linked to a private store): its `pending/` and
   `completed/` files are indexed as `.todos/<sub>/<name>`. The link is
   refused, with one `recall: .todos symlink refused` warning, when it does not
-  resolve, is not a directory, has a `.git` component, lies inside the repo, or
-  is the repo or an ancestor of it. Symlinks inside the target stay skipped.
+  resolve, is not a directory, is or lies inside a `.git` directory, is or lies
+  inside the repo, or is the main checkout or an ancestor of the repo or the
+  main checkout. The checks compare directories by identity, so another
+  spelling of the same directory (letter case, a `/System/Volumes/Data`
+  firmlink) is refused too, and so is a link whose directory identity cannot
+  be read. Symlinks inside the target stay skipped, including a `pending/` or
+  `completed/` that is itself a symlink, which is never listed.
 
 ## Golden set and the embeddings decision
 
