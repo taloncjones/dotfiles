@@ -4313,13 +4313,8 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
                             and is_reviewed(task, review, task["review_head_sha"], rev_ws))
     # A ship gate that returned CHANGES at the pin must be handled
     # before the approval is carried past it.
-    for row in task.get("workers") or []:
-        if isinstance(row, dict) and row.get("phase") == "ship":
-            ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
-            sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
-            if sh and sh.get("head_sha") == task.get("review_head_sha") \
-                    and sh.get("verdict") == "CHANGES":
-                review_carry_due = False
+    if ship_changes_at_pin(rd, tid, task):
+        review_carry_due = False
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
     # Section 5 writes review-dispatched only once a launch is accepted, so a
@@ -4569,6 +4564,23 @@ def ship_handoff_launches(rd, task_id, task):
         if launch_dir is not None and read_ship_handoff(launch_dir, launch) is not None:
             found.add(launch)
     return frozenset(found)
+
+
+def ship_changes_at_pin(rd, task_id, task):
+    """True when a ship gate's ship.json at the task's review pin says CHANGES."""
+    pin = task.get("review_head_sha")
+    if not pin:
+        return False
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    for row in workers:
+        if not isinstance(row, dict) or row.get("phase") != "ship":
+            continue
+        launch = row.get("launch_id")
+        launch_dir = ship_launch_dir(rd, task_id, launch)
+        handoff = read_ship_handoff(launch_dir, launch) if launch_dir is not None else None
+        if handoff and handoff.get("head_sha") == pin and handoff.get("verdict") == "CHANGES":
+            return True
+    return False
 
 
 LABEL_MAX = 25
@@ -5341,6 +5353,7 @@ def _fenced_scoped(ns):
         yield rd, base
 
 
+CARRY_CHANGES_REASON = "a ship gate returned a CHANGES verdict at the pin"
 CARRY_EXIT = {"carried": 0, "refused": 3, "inconclusive": 4}
 
 
@@ -5429,13 +5442,8 @@ def _carry_review(ns) -> int:
                  and is_reviewed(task, review, pin, rev_ws)
                  and isinstance(base_ref, str) and re.fullmatch(r"origin/[A-Za-z0-9._/-]+", base_ref),
                  "task is not an approved review with a moved head and an origin/<branch> base_ref")
-        for row in task.get("workers") or []:
-            if isinstance(row, dict) and row.get("phase") == "ship":
-                ldir = ship_launch_dir(rd, tid, row.get("launch_id"))
-                sh = read_ship_handoff(ldir, row["launch_id"]) if ldir is not None else None
-                if sh and sh.get("head_sha") == pin and sh.get("verdict") == "CHANGES":
-                    return _carry_report("inconclusive", tid, head,
-                                         ["a ship gate returned a CHANGES verdict at the pin"])
+        if ship_changes_at_pin(rd, tid, task):
+            return _carry_report("inconclusive", tid, head, [CARRY_CHANGES_REASON])
         status = ("--no-optional-locks", "status", "--porcelain")
         if _git(wt, *status) != "":
             return _carry_report("inconclusive", tid, head, ["worktree is dirty or unreadable"])
@@ -5470,6 +5478,9 @@ def _carry_review(ns) -> int:
             if not unchanged:
                 return _carry_report("inconclusive", tid, head,
                                      ["head, worktree or records changed during the run"])
+            # A ship gate can publish CHANGES during the fetch, proof and contract.
+            if ship_changes_at_pin(rd, tid, task):
+                return _carry_report("inconclusive", tid, head, [CARRY_CHANGES_REASON])
             rec = dict(task)
             if outcome == "carried":
                 rec["review_head_sha"] = head

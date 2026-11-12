@@ -14939,6 +14939,77 @@ r = carry(fx)
 assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
 PY
 
+check "carry-review: a ship CHANGES published during the run blocks the carry" <<PY
+$LOAD
+$CARRY
+fx = build(contract_run='cp {TMP}/changes.json '
+           '"\$(dirname "\$(dirname {TASK})")/artifacts/PROJ-1/ship-S1/ship.json"')
+ship = {"phase": "ship", "workspace_id": "w4", "runtime": "claude", "launch_id": "S1",
+        "pane_id": "pane2", "source_head_sha": fx["H"]}
+task = dict(fx["task"], workers=fx["task"]["workers"] + [ship],
+            ship_launch_id="S1", ship_parked_head=fx["H"])
+r = cli(fx, "write-task", "--task-id", "PROJ-1", "--session", "S",
+        "--fence", fx["fence"], "--json", json.dumps(task))
+assert r.returncode == 0, r.stderr
+ld = fx["rd"] + "/artifacts/PROJ-1/ship-S1"
+os.makedirs(ld)
+open(fx["tmp"] + "/changes.json", "w").write(json.dumps(
+    {"task_id": "PROJ-1", "launch_id": "S1", "head_sha": fx["H"], "verdict": "CHANGES"}))
+assert facts(fx)["action"] == "carry-review"
+before = task_file(fx)
+r = carry(fx)
+assert json.load(open(ld + "/ship.json"))["verdict"] == "CHANGES"
+assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+assert task_file(fx) == before
+assert not os.path.exists(fx["rd"] + "/artifacts/PROJ-1/review-carry"), "audit written"
+PY
+
+check "ship_changes_at_pin: only a CHANGES handoff at the review pin counts" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+def row(launch):
+    return {"phase": "ship", "launch_id": launch}
+def put_ship(launch, head, verdict):
+    d = rd + "/artifacts/PROJ-1/ship-" + launch
+    os.makedirs(d, exist_ok=True)
+    doc = {"task_id": "PROJ-1", "launch_id": launch, "verdict": verdict}
+    if head is not None:
+        doc["head_sha"] = head
+    open(d + "/ship.json", "w").write(json.dumps(doc))
+def at_pin(task):
+    return c.ship_changes_at_pin(c.Path(rd), "PROJ-1", task)
+pin = "a" * 40
+put_ship("S1", pin, "CHANGES"); put_ship("S2", pin, "APPROVE")
+put_ship("S3", pin, "INCOMPLETE"); put_ship("S4", "b" * 40, "CHANGES")
+put_ship("S5", None, "CHANGES")
+assert at_pin({"review_head_sha": pin, "workers": [row("S1")]}) is True
+assert at_pin({"review_head_sha": pin, "workers": [row("S2")]}) is False
+assert at_pin({"review_head_sha": pin, "workers": [row("S3")]}) is False
+assert at_pin({"review_head_sha": pin, "workers": [row("S4")]}) is False
+assert at_pin({"review_head_sha": pin, "workers": []}) is False
+assert at_pin({"review_head_sha": pin}) is False
+assert at_pin({"review_head_sha": pin, "workers": [row("S2"), row("S1")]}) is True
+assert at_pin({"review_head_sha": "", "workers": [row("S5")]}) is False
+assert at_pin({"review_head_sha": None, "workers": [row("S5")]}) is False
+PY
+
+check "docs name the ship CHANGES block on the task review carry" <<PY
+$LOAD
+root = "claude/skills/herdr-orchestration/"
+ref = open(root + "references/ship-carry-forward.md").read()
+sec = " ".join(ref.split("## Task review carry")[1].split("\n## ")[0].split())
+for w in ("A ship gate CHANGES verdict at the review pin blocks the carry",
+          "just before it writes", "INCOMPLETE does not block", "after that last check",
+          "the next check-in reports \`stale-review-reset\`, not \`carry-review\`",
+          "higher-precedence rule"):
+    assert w in sec, w
+skill = open(root + "SKILL.md").read()
+para = " ".join(skill.split("**\`carry-review\`.**")[1].split("\n\n")[0].split())
+for w in ("A ship gate CHANGES verdict at the pin blocks the carry", "exits 4",
+          "reports \`stale-review-reset\` instead"):
+    assert w in para, w
+PY
+
 check "carry-review: an old ship gate's handoff cannot merge the carried head" <<PY
 $LOAD
 $CARRY

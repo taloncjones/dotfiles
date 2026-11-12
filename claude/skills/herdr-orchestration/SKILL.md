@@ -323,7 +323,9 @@ launch (`retired_review_launch_ids`), and the next check-in reports
 still verifies at its pin, reports `carry-review` ahead of
 `stale-review-reset`. Run it without asking, as a long background run; the
 command, exit codes and artifacts are in
-`references/ship-carry-forward.md` (Task review carry).
+`references/ship-carry-forward.md` (Task review carry). A ship gate CHANGES
+verdict at the pin blocks the carry: `carry-review` exits 4 and the check-in
+reports `stale-review-reset` instead.
 
 **`close-idle`.** A `reviewed` task parked at its reviewed head whose workspace holds
 no agent reports `close-idle` (ranked last). Run the printed line: it closes the
