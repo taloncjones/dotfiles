@@ -139,10 +139,17 @@ The ignored-content check gates the removal: the removal runs only when the
 check exits 0.
 
 ```bash
-~/.claude/skills/post-merge/scripts/worktree_ignored_check.py <path> && \
-  git worktree remove <path>
+if [ ! -d "<path>" ]; then
+  git worktree prune
+else
+  ~/.claude/skills/post-merge/scripts/worktree_ignored_check.py "<path>" && \
+    git worktree remove "<path>"
+fi
 git branch -d <branch>  # if branch should also be deleted, after the removal
 ```
+
+When the directory is gone, `git worktree prune` drops the stale registration
+and deletes no files.
 
 On exit 1, nothing was removed: show the listed paths and ask whether to keep
 the worktree (Recommended) or remove it and discard them. On the discard

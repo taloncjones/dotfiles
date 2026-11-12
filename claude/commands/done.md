@@ -67,10 +67,18 @@ Tell user: "Changed directory to main worktree"
 # Get worktree path for this branch
 WORKTREE_PATH=$(git worktree list | grep "$BRANCH_NAME" | awk '{print $1}')
 
-# Remove the worktree only when the check exits 0 (nothing at risk)
-~/.claude/skills/post-merge/scripts/worktree_ignored_check.py "$WORKTREE_PATH" && \
-  git worktree remove "$WORKTREE_PATH"
+# Directory already gone: prune drops stale registrations, never files.
+# Otherwise remove it only when the check exits 0 (nothing at risk).
+if [ ! -d "$WORKTREE_PATH" ]; then
+  git worktree prune
+else
+  ~/.claude/skills/post-merge/scripts/worktree_ignored_check.py "$WORKTREE_PATH" && \
+    git worktree remove "$WORKTREE_PATH"
+fi
 ```
+
+When the directory is gone, `git worktree prune` drops the stale registration
+and deletes no files.
 
 If the check exits 1, nothing was removed. Show the listed paths and ask: "Keep
 the worktree (Recommended)" or "Remove the worktree and discard them". On the
