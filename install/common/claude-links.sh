@@ -327,7 +327,7 @@ sweep_retired_claude_plugins() {
   fi
   RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" \
     CLAUDE_REGISTRY_RULE_PY="$CLAUDE_REGISTRY_RULE_PY" python3 - "$cfg" "$label" "$@" <<'PY'
-import atexit, datetime, json, os, shutil, signal, subprocess, sys, tempfile, time
+import atexit, datetime, json, math, os, shutil, signal, subprocess, sys, tempfile, time
 
 exec(os.environ["CLAUDE_REGISTRY_RULE_PY"])
 cfg, label, wanted = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:]
@@ -343,9 +343,25 @@ markets_path = os.path.join(plugins_dir, "known_marketplaces.json")
 settings_path = os.path.join(cfg, "settings.json")
 personal_cfg = os.path.abspath(os.path.join(os.path.expanduser("~"), ".claude"))
 git_missing_noted = False
-# Seconds before a hung claude call is killed; the override is test-only.
-CLAUDE_TIMEOUT = float(os.environ.get("SWEEP_TEST_CLAUDE_TIMEOUT") or 60)
-launching, received = False, []
+# Both overrides are test-only; a bad value is refused before any CLI call.
+CLAUDE_TIMEOUT = 60.0  # seconds before a hung claude call is killed
+_raw = os.environ.get("SWEEP_TEST_CLAUDE_TIMEOUT")
+if _raw:
+    try:
+        CLAUDE_TIMEOUT = float(_raw)
+    except ValueError:
+        CLAUDE_TIMEOUT = 0.0
+    if not (math.isfinite(CLAUDE_TIMEOUT) and CLAUDE_TIMEOUT > 0):
+        print(f"{label} [X] invalid SWEEP_TEST_CLAUDE_TIMEOUT {_raw!r}: want a positive number of seconds")
+        sys.exit(2)
+TEST_SIGNAL = None
+_raw = os.environ.get("SWEEP_TEST_SIGNAL_AT_LAUNCH")
+if _raw:
+    if _raw not in ("INT", "TERM", "HUP"):
+        print(f"{label} [X] invalid SWEEP_TEST_SIGNAL_AT_LAUNCH {_raw!r}: want INT, TERM or HUP")
+        sys.exit(2)
+    TEST_SIGNAL = getattr(signal, "SIG" + _raw)
+deferring, received = False, []
 
 
 class Unreadable(Exception):
@@ -357,12 +373,12 @@ class ClaudeTimeout(Exception):
 
 
 def on_signal(signum, _frame):
-    # The CLI runs in its own session, so a terminal signal no longer reaches
-    # it; exit through SystemExit so run_claude's finally kills its group.
+    # Inside run_claude only record: it kills the CLI group, restores torn files,
+    # then exits by the first signal. Elsewhere exit on the first signal only, so
+    # a later one cannot cut short the cleanup the first one started.
     received.append(signum)
-    if launching:
-        return
-    sys.exit(128 + signum)
+    if not deferring and len(received) == 1:
+        sys.exit(128 + signum)
 
 
 def die_by_signal():
@@ -469,12 +485,15 @@ def restore_torn(snap, args):
             continue
         if not os.path.lexists(path) or file_ok(path, valid, refuse):
             continue
-        if before is not None:
-            write_atomically(path, before)
-            outcome = "restored it"
-        else:
-            os.unlink(path)
-            outcome = "removed it"
+        try:
+            if before is not None:
+                write_atomically(path, before)
+                outcome = "restored it"
+            else:
+                os.unlink(path)
+                outcome = "removed it"
+        except OSError as exc:
+            outcome = f"could not restore it: {exc}"
         print(f"{label} [X] claude {' '.join(args)} left {path} unreadable; {outcome}")
         torn = True
     return torn
@@ -482,9 +501,8 @@ def restore_torn(snap, args):
 
 def launch(argv, **kw):
     proc = subprocess.Popen(argv, **kw)
-    test_sig = os.environ.get("SWEEP_TEST_SIGNAL_AT_LAUNCH")  # test-only
-    if test_sig:
-        os.kill(os.getpid(), getattr(signal, "SIG" + test_sig))
+    if TEST_SIGNAL:
+        os.kill(os.getpid(), TEST_SIGNAL)
     return proc
 
 
@@ -502,7 +520,9 @@ def kill_group(proc):
         return False
     while True:
         try:
-            os.killpg(proc.pid, 0)
+            # Resend: a member forked or joined after the first SIGKILL would
+            # otherwise outlive it.
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             return True
         except PermissionError:
@@ -526,27 +546,37 @@ def run_claude(plugin, *args):
     else:
         env["CLAUDE_CONFIG_DIR"] = cfg
         prefix = f"CLAUDE_CONFIG_DIR={cfg} "
-    global launching
+    global deferring
     snap = snapshot()
-    proc, rc, timed_out = None, None, False
-    with tempfile.TemporaryDirectory() as cwd:
-        try:
-            launching = True
-            proc = launch([claude, *args], cwd=cwd, env=env,
-                          stdin=subprocess.DEVNULL, start_new_session=True)
-            launching = False
-            if received:
-                sys.exit(128 + received[0])
-            rc = proc.wait(timeout=CLAUDE_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            launching = False
-            group_gone = True
-            if proc is not None:
-                # Always: a leader that exited may leave descendants behind.
-                group_gone = kill_group(proc)
-            torn = restore_torn(snap, args) if group_gone else None
+    proc, rc, timed_out, group_gone = None, None, False, True
+    deferring = True
+    try:
+        with tempfile.TemporaryDirectory() as cwd:
+            try:
+                proc = launch([claude, *args], cwd=cwd, env=env,
+                              stdin=subprocess.DEVNULL, start_new_session=True)
+                deadline = time.monotonic() + CLAUDE_TIMEOUT
+                while rc is None and not received:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    try:
+                        rc = proc.wait(timeout=min(remaining, 0.1))
+                    except subprocess.TimeoutExpired:
+                        pass
+            finally:
+                if proc is not None:
+                    # Always: a leader that exited may leave descendants behind.
+                    group_gone = kill_group(proc)
+                torn = restore_torn(snap, args) if group_gone else None
+    finally:
+        deferring = False
+        if received:
+            if not group_gone:
+                print(f"{label} [X] claude {' '.join(args)} left processes running in group "
+                      f"{proc.pid} for {cfg}; guarded files not restored")
+            sys.exit(128 + received[0])
     if not group_gone:
         print(f"{label} [X] claude {' '.join(args)} left processes running in group {proc.pid} "
               f"for {cfg}; guarded files not restored")
