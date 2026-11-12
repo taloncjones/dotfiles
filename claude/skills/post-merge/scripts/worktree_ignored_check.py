@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 CACHE_DIRS = {
-    "node_modules", "__pycache__", ".superpowers", ".ruff_cache",
+    "node_modules", "__pycache__", ".ruff_cache",
     ".pytest_cache", ".mypy_cache", ".venv", ".tox",
 }
 
@@ -22,9 +22,11 @@ class Incomplete(Exception):
     pass
 
 
-def git(cwd, *args):
+def git(cwd, *args, work_tree=None):
+    # --work-tree overrides a submodule's core.worktree, which can name another checkout.
+    prefix = ["--work-tree", work_tree] if work_tree else []
     proc = subprocess.run(
-        ["git", "-C", cwd, *args], capture_output=True, check=False
+        ["git", "-C", cwd, *prefix, *args], capture_output=True, check=False
     )
     if proc.returncode != 0 or proc.stderr:
         detail = proc.stderr.decode(errors="replace").strip().splitlines()
@@ -38,7 +40,9 @@ def under(path, root):
 
 def is_regenerable(root, rel):
     parts = rel.rstrip("/").split("/")
-    if any(p in CACHE_DIRS for p in parts):
+    if parts[0] == "docs":
+        return False
+    if parts[0] in CACHE_DIRS:
         return True
     for i, p in enumerate(parts):
         if p == "target" and os.path.isfile(os.path.join(root, *parts[:i], "Cargo.toml")):
@@ -65,7 +69,7 @@ def is_preserved(main, root_real, rel):
 
 def gitlinks(root):
     """Relative paths of submodule gitlinks (mode 160000) in the index."""
-    raw = git(root, "ls-files", "-s", "-z").decode(errors="surrogateescape")
+    raw = git(root, "ls-files", "-s", "-z", work_tree=root).decode(errors="surrogateescape")
     links = []
     for entry in raw.split("\0"):
         meta, _, path = entry.partition("\t")
@@ -76,8 +80,14 @@ def gitlinks(root):
 
 def ignored_files(root, prefix=""):
     """Ignored paths under root, recursing into initialized submodules."""
-    raw = git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
-    found = [prefix + p for p in raw.decode(errors="surrogateescape").split("\0") if p]
+    raw = git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", work_tree=root)
+    # Filter on the path relative to the repository that owns it, so a submodule's
+    # own root-level node_modules stays regenerable.
+    found = [
+        prefix + p
+        for p in raw.decode(errors="surrogateescape").split("\0")
+        if p and not is_regenerable(root, p)
+    ]
     for link in gitlinks(root):
         sub = os.path.join(root, link)
         if os.path.exists(os.path.join(sub, ".git")):
@@ -91,7 +101,7 @@ def check(worktree):
     """Return (at_risk, differing) path lists; differing is a subset of at_risk."""
     if not os.path.isdir(worktree):
         raise Incomplete("not a directory: %s" % worktree)
-    root = git(worktree, "rev-parse", "--show-toplevel").decode(errors="surrogateescape").strip()
+    root = git(worktree, "rev-parse", "--show-toplevel").decode(errors="surrogateescape").removesuffix("\n")
     listing = git(root, "worktree", "list", "--porcelain").decode(errors="surrogateescape")
     first = listing.splitlines()[0] if listing else ""
     if not first.startswith("worktree "):
@@ -104,8 +114,6 @@ def check(worktree):
     at_risk = []
     differing = []
     for rel in ignored_files(root):
-        if is_regenerable(root, rel):
-            continue
         if rel.endswith("/"):
             at_risk.append(rel)
             continue

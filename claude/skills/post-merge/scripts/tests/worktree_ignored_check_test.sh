@@ -32,7 +32,7 @@ fixture() {
     mkdir -p "$ROOT/$1"
     git init -q -b main "$ROOT/$1/m"
     printf '%s\n' /docs/superpowers/ /docs/plans/ /.worktrees/ /locked/ node_modules/ \
-        __pycache__/ /claude/contracts/ .DS_Store /.superpowers/ /.todos target/ > "$ROOT/$1/m/.gitignore"
+        __pycache__/ /claude/contracts/ .DS_Store /.superpowers/ /.todos target/ .venv/ > "$ROOT/$1/m/.gitignore"
     git -C "$ROOT/$1/m" add .gitignore
     git -C "$ROOT/$1/m" commit -qm init
     git -C "$ROOT/$1/m" worktree add -q "$ROOT/$1/w" -b feat
@@ -48,12 +48,11 @@ expect "spec only in worktree: stdout" "$out" "docs/superpowers/specs/a.md"
 
 # 2. Only regenerable files
 fixture c2
-mkdir -p "$ROOT/c2/w/sub/node_modules/x" "$ROOT/c2/w/pkg/__pycache__" "$ROOT/c2/w/claude/contracts" \
-    "$ROOT/c2/w/.superpowers/sdd" "$ROOT/c2/w/docs/superpowers"
-echo m > "$ROOT/c2/w/sub/node_modules/x/i.js"
+mkdir -p "$ROOT/c2/w/node_modules/x" "$ROOT/c2/w/pkg/__pycache__" "$ROOT/c2/w/claude/contracts" \
+    "$ROOT/c2/w/docs/superpowers"
+echo m > "$ROOT/c2/w/node_modules/x/i.js"
 echo p > "$ROOT/c2/w/pkg/__pycache__/a.pyc"
 echo c > "$ROOT/c2/w/claude/contracts/t-contract.json"
-echo s > "$ROOT/c2/w/.superpowers/sdd/n.md"
 touch "$ROOT/c2/w/.DS_Store"
 ln -s "$ROOT/c2/m" "$ROOT/c2/w/.todos"
 ln -s /etc "$ROOT/c2/w/docs/superpowers/link"
@@ -236,17 +235,85 @@ expect "callers gate removal on the check" "$bad" ""
 printf '```bash\n~/x/worktree_ignored_check.py "$P"\ngit worktree remove "$P"\n```\n' > "$ROOT/bad.md"
 expect "wiring assertion catches a bare check line" "$([ -n "$(wiring_bad "$ROOT/bad.md")" ] && echo caught || echo missed)" caught
 
-# 18. Step 3 of post-merge: a missing worktree directory skips the check and
-# prunes; an existing one stays gated on the check.
-step3=$(awk '/^## Step 3/ {on=1} on' "$REPO/claude/skills/post-merge/SKILL.md")
-case "$step3" in *'[ ! -d "<wt>" ]'*'git worktree prune'*) s=present ;; *) s=missing ;; esac
-expect "Step 3 prunes when the worktree directory is gone" "$s" present
+# 18. V1: cache names count only as the leading path segment, never under docs/
+at_risk_case() {
+    # $1 label, $2 fixture, $3 relative path to create in the worktree
+    fixture "$2"
+    mkdir -p "$ROOT/$2/w/$(dirname "$3")"
+    echo x > "$ROOT/$2/w/$3"
+    out=$("$CHECK" "$ROOT/$2/w" 2>/dev/null); rc=$?
+    expect "$1: exit 1" "$rc" 1
+    expect "$1: stdout" "$out" "$3"
+}
+at_risk_case "mid-path node_modules under docs" v1a docs/superpowers/node_modules/design.md
+at_risk_case "mid-path .venv under docs" v1b docs/superpowers/specs/.venv/x.md
+at_risk_case ".superpowers file" v1c .superpowers/plan.md
+at_risk_case "mid-path node_modules outside docs" v1d notes/node_modules/design.md
+at_risk_case "mid-path .venv outside docs" v1e tools/.venv/x.md
 
-# 19. Summary line reads "exist only in, or differ from, the main checkout: <wt>".
-mkdir -p "$ROOT/s1"
-err=$("$CHECK" "$ROOT/s1/none" 2>&1 >/dev/null)
-grep -q 'differ from the main checkout, ' "$REPO/claude/skills/post-merge/scripts/worktree_ignored_check.py" && s=comma || s=colon
-expect "summary line uses a colon" "$s" colon
+# 19. V2: a worktree path ending in a space is not confused with its sibling
+fixture v2
+git -C "$ROOT/v2/m" worktree add -q "$ROOT/v2/w " -b feat2
+mkdir -p "$ROOT/v2/w /docs/superpowers"
+echo spec > "$ROOT/v2/w /docs/superpowers/spec.md"
+out=$("$CHECK" "$ROOT/v2/w " 2>/dev/null); rc=$?
+expect "trailing-space worktree beside its sibling: exit 1" "$rc" 1
+expect "trailing-space worktree beside its sibling: stdout" "$out" "docs/superpowers/spec.md"
+
+# 20. V3: a submodule whose core.worktree names the main copy is read at its gitlink path
+sub_fixture v3
+git -C "$ROOT/v3/w" -c protocol.file.allow=always submodule update -q --init
+mkdir -p "$ROOT/v3/w/sub/notes"
+echo n > "$ROOT/v3/w/sub/notes/unique.md"
+git config --file "$(git -C "$ROOT/v3/w/sub" rev-parse --absolute-git-dir)/config" core.worktree "$ROOT/v3/m/sub"
+out=$("$CHECK" "$ROOT/v3/w" 2>/dev/null); rc=$?
+expect "submodule core.worktree aimed at main copy: exit 1" "$rc" 1
+expect "submodule core.worktree aimed at main copy: stdout" "$out" "sub/notes/unique.md"
+
+# 21. Callers run the block that starts at "if [ ! -d" on a missing directory.
+# macOS mktemp returns /var/..., git prints /private/var/...
+CROOT=$(cd "$ROOT" && pwd -P)
+for caller in "Step 3|claude/skills/post-merge/SKILL.md" "/done|claude/commands/done.md" "/worktree|claude/commands/worktree.md"; do
+    label=${caller%%|*}
+    src=${caller#*|}
+    tag=$(basename "$src" .md | tr 'A-Z' 'a-z')
+    fixture "pb-$tag"
+    D="$CROOT/pb-$tag"
+    mkdir -p "$D/home/.claude/skills"
+    ln -s "$SKILL" "$D/home/.claude/skills/post-merge"
+    awk '/^if \[ ! -d /{on=1} on{print} on&&/^fi$/{exit}' "$REPO/$src" > "$D/block.tmpl"
+
+    run_block() {
+        sed "s|<wt>|$1|g; s|<path>|$1|g; s|<skill dir>|$SKILL|g" "$D/block.tmpl" > "$D/block.sh"
+        (cd "$D/m" && HOME="$D/home" WORKTREE_PATH="$1" sh "$D/block.sh" >/dev/null 2>&1)
+    }
+
+    git -C "$D/m" worktree add -q "$D/gone" -b gone
+    rm -rf "$D/gone"
+    if [ "$label" != "Step 3" ]; then
+        git -C "$D/m" worktree add -q "$D/lk" -b lk
+        git -C "$D/m" worktree lock "$D/lk"
+        rm -rf "$D/lk"
+    fi
+    run_block "$D/gone"
+    list=$(git -C "$D/m" worktree list --porcelain)
+    case "$list" in *"worktree $D/gone"*) s=registered ;; *) s=pruned ;; esac
+    expect "$label: missing directory prunes the registration" "$s" pruned
+    if [ "$label" != "Step 3" ]; then
+        case "$list" in *"worktree $D/lk"*) s=listed ;; *) s=dropped ;; esac
+        expect "$label: locked missing registration is kept" "$s" listed
+    fi
+
+    mkdir -p "$D/w/docs/superpowers"
+    echo spec > "$D/w/docs/superpowers/spec.md"
+    run_block "$D/w"
+    expect "$label: at-risk worktree is kept" "$([ -f "$D/w/docs/superpowers/spec.md" ] && echo kept || echo gone)" kept
+done
+
+# 22. Summary line on stderr names the count and the worktree
+err=$("$CHECK" "$ROOT/c1/w" 2>&1 >/dev/null)
+expect "summary line on stderr names count and worktree" "$err" \
+    "worktree_ignored_check: 1 ignored path(s) exist only in, or differ from, the main checkout: $ROOT/c1/w"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
