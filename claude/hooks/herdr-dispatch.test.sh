@@ -169,7 +169,14 @@ elif args[:2] == ["pane", "process-info"]:
         cpath = Path(os.environ["FAKE_PROCESS_INFO_COUNT"])
         seen = int(cpath.read_text()) if cpath.exists() else 0
         cpath.write_text(str(seen + 1))
-        foreground = ([{"pid": 202, "name": "claude", "cwd": cwd}] if seen < 1
+        foreground = ([{"pid": 202, "name": "2.1.321", "argv0": "claude",
+                        "cmdline": "claude --model opus", "cwd": cwd}] if seen < 1
+                      else [{"pid": 101, "name": "zsh", "cwd": cwd}])
+    elif mode == "process-info-runtime-after-start":
+        started = any(json.loads(line)[:2] == ["agent", "start"]
+                      for line in log.read_text().splitlines())
+        foreground = ([{"pid": 202, "name": "2.1.321", "argv0": "claude",
+                        "cmdline": "claude --model opus", "cwd": cwd}] if started
                       else [{"pid": 101, "name": "zsh", "cwd": cwd}])
     elif mode == "shell-starting":
         # A fresh split pane: the first two reads show a not-yet-ready shell.
@@ -2453,6 +2460,100 @@ def test_settle_refuses_an_unproven_occupant():
         assert mutating == [], mutating
         assert all("exit_requested" not in w for w in fx.worker_records()), fx.worker_records()
     finally:
+        fx.close()
+
+
+def test_launch_records_the_runtime_process_identity():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_RUNTIME"] = "claude"
+        fx.env["FAKE_HERDR_MODE"] = "process-info-runtime-after-start"
+        original = herdr_dispatch._process_started_ns
+        herdr_dispatch._process_started_ns = lambda pid, cmdline: 12345 if (pid, cmdline) == (202, "claude --model opus") else None
+        try:
+            result = fx.launch(route=claude_route())
+        finally:
+            herdr_dispatch._process_started_ns = original
+        row = [w for w in fx.worker_records() if w["launch_id"] == result["launch_id"]][0]
+        assert row["status"] == "launched", row
+        assert row["runtime_pid"] == 202 and row["runtime_started_ns"] == 12345, row
+    finally:
+        fx.close()
+    # no runtime entry in the foreground: the launch still succeeds with no identity
+    fx = Fixture()
+    try:
+        fx.env["FAKE_RUNTIME"] = "claude"
+        result = fx.launch(route=claude_route())
+        row = [w for w in fx.worker_records() if w["launch_id"] == result["launch_id"]][0]
+        assert row["status"] == "launched", row
+        assert row.get("runtime_pid") is None and row.get("runtime_started_ns") is None, row
+    finally:
+        fx.close()
+
+
+def test_settle_exits_an_idle_reviewer_whose_launch_token_expired():
+    fx = Fixture()
+    original = herdr_dispatch._process_started_ns
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        started = 1_800_000_000 * 10**9
+        rev.update(runtime_pid=202, runtime_started_ns=started)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-claude-then-shell"
+        herdr_dispatch._process_started_ns = lambda pid, cmdline: started + 10**9
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["reason"] == "verdict-recorded", result
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+        assert ["pane", "close", "w1:p2"] in fx.calls(), fx.calls()
+        assert len([c for c in fx.calls() if c[:3] == ["agent", "prompt", "R"]]) == 1, fx.calls()
+        assert not [c for c in fx.calls() if "send-keys" in c], fx.calls()
+        assert [w for w in fx.worker_records() if w["launch_id"] == "R"][0]["exit_requested"] == "verdict-recorded"
+    finally:
+        herdr_dispatch._process_started_ns = original
+        fx.close()
+
+
+def test_settle_refuses_an_absent_token_without_launch_proof():
+    fx = Fixture()
+    original = herdr_dispatch._process_started_ns
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        started = 1_800_000_000 * 10**9
+        idle_r = [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}]
+        panes = [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle")]
+        herdr_dispatch._process_started_ns = lambda pid, cmdline: started + 10**9
+        fx.env["FAKE_HERDR_MODE"] = "process-info-claude-then-shell"
+
+        def case(rev, extra_rows=(), start_at=None, mode=None):
+            impl = settle_row("implement", "I", "w1:p1", head)
+            fx.settle_state([impl, rev, *extra_rows], "changes-requested", idle_r, panes,
+                            review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+            Path(fx.env["FAKE_PROCESS_INFO_COUNT"]).unlink(missing_ok=True)
+            fx.env["FAKE_HERDR_MODE"] = mode or "process-info-claude-then-shell"
+            herdr_dispatch._process_started_ns = lambda pid, cmdline: start_at or started + 10**9
+            assert fx.settle("R")["status"] == "occupant-unverified"
+
+        def row(**fields):
+            r = settle_row("review", "R", "w1:p2", head)
+            r.update(runtime_pid=202, runtime_started_ns=started)
+            r.update(fields)
+            return r
+
+        case(row(status="launch_failed"))
+        case(row(), extra_rows=[settle_row("review", "R2", "w1:p2", head)])
+        case(row(runtime_pid=999))
+        case(row(), start_at=started + 60 * 10**9)
+        case(row(runtime_pid=None, runtime_started_ns=None))
+        case(row(), mode="ok")
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"], ["pane", "send-keys"])]
+        assert mutating == [], mutating
+        assert all("exit_requested" not in w for w in fx.worker_records()), fx.worker_records()
+    finally:
+        herdr_dispatch._process_started_ns = original
         fx.close()
 
 
@@ -7206,6 +7307,9 @@ for name, test in (
     ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
     ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),
     ("settle refuses an occupant it cannot prove is this attempt", test_settle_refuses_an_unproven_occupant),
+    ("launch records the runtime process identity", test_launch_records_the_runtime_process_identity),
+    ("settle exits an idle reviewer whose launch token expired", test_settle_exits_an_idle_reviewer_whose_launch_token_expired),
+    ("settle refuses an absent token without launch proof", test_settle_refuses_an_absent_token_without_launch_proof),
     ("reprompt refuses a launch whose exit was requested", test_reprompt_refuses_a_row_whose_exit_was_requested),
     ("settle leaves an unsettled implementer untouched and answers the exit menu", test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu),
     ("settle never sends keys when exit is blocked by an unrelated prompt", test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt),
