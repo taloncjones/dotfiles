@@ -736,9 +736,14 @@ BRIEF_TEMPLATE_PATH = (Path(__file__).resolve().parents[1] / "skills" / "herdr-o
                        / "references" / "brief-template.md")
 BRIEF_BLOCK_RE = re.compile(r"^```brief:([a-z0-9-]+)\n(.*?)\n```$", re.M | re.S)
 BRIEF_TOKEN_RE = re.compile(r"<[A-Za-z][^<>\s]{0,40}>")
-# Left for the worker; the adapter's attempt context supplies the first three.
+# Left for the briefed agent; the adapter's attempt context supplies the first three.
 BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>",
-                                 "<outcome>", "<n>", "<artifact-list-json>"})
+                                 "<outcome>", "<n>", "<artifact-list-json>", "<binding_id>",
+                                 "<lead_fence>"})
+# Only the lead brief may leave these; the unfilled-token guard exempts them for that phase alone.
+BRIEF_LEAD_FIELDS = frozenset({"<binding_id>", "<lead_fence>"})
+# The lead renders its own routing and ground rules in place of the worker's.
+BRIEF_LEAD_BLOCKS = {"routing": "routing-lead", "ground-rules": "ground-rules-lead"}
 BRIEF_OPTIONS = ("focus_file", "findings", "artifact_class", "prd_cap", "no_workflow", "tier",
                  "prior_handoff")
 _BRIEF_WORK_BLOCKS = ("workspace", "routing", "ground-rules")
@@ -749,6 +754,9 @@ BRIEF_PHASES = {
     "implement": {"prefix": "impl", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
                   "requires": (), "allows": ("focus_file", "no_workflow"),
                   "blocks": ("intro-work", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "close-implement")},
+    "lead": {"prefix": "lead", "emit": "implement", "lessons": "lessons-open-worker", "todo": True,
+             "requires": (), "allows": ("focus_file", "no_workflow"),
+             "blocks": ("intro-lead", "task", "artifacts", *_BRIEF_WORK_BLOCKS, "lead", "close-lead")},
     "repair": {"prefix": "repair", "emit": "implement", "lessons": "lessons-open-worker", "todo": False,
                "requires": ("focus_file", "findings"), "allows": ("no_workflow",),
                "blocks": ("intro-repair", "task", "repair-findings", "artifacts", *_BRIEF_WORK_BLOCKS,
@@ -789,10 +797,25 @@ def _brief_git(worktree, *args):
         _require(False, f"git {' '.join(args[:2])} failed in the task worktree: {exc}")
 
 
-def _brief_routing(runtime, config):
+def _bound_worker_agents(rd, task_id):
+    """Agent names a task lead's bound records already hold for task_id."""
+    names = set()
+    for rec in payload_files(rd / "leads", "*"):
+        try:
+            task = json.loads(read_payload_text(rec / "tasks" / f"{task_id}.json"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        workers = task.get("workers") if isinstance(task, dict) else None
+        names |= {w.get("agent") for w in workers or [] if isinstance(w, dict)}
+    return names
+
+
+def _brief_routing(runtime, config, skip=()):
     routes = config.get("routes", {})
     lines = []
     for label, role in BRIEF_ROUTES:
+        if label in skip:
+            continue
         try:
             route = agent_runtime.resolve_route(runtime, role,
                                                 config={"routes": routes, "provisional": True})
@@ -906,6 +929,7 @@ def render_brief(rd, record, ns, repo_root):
     worktree, task_id = record["worktree"], record["task_id"]
     head = _brief_git(worktree, "rev-parse", "HEAD")
     existing = {w.get("agent") for w in record.get("workers") or [] if isinstance(w, dict)}
+    existing |= _bound_worker_agents(rd, task_id)
     agent = agent_name(spec["prefix"], record["branch"].rsplit("/", 1)[-1], existing)
     _require(AGENT_NAME_RE.fullmatch(agent), f"agent name {agent!r} is not a valid herdr name")
     focus = Path(ns.focus_file).read_text(encoding="utf-8").strip() if ns.focus_file else ""
@@ -922,10 +946,15 @@ def render_brief(rd, record, ns, repo_root):
         "base_ref": record["base_ref"], "base_sha": record["base_sha"], "head_sha": head,
         "phase": ns.phase, "emit_phase": spec["emit"], "workspace_id": record["workspace_id"],
         "core-command": f'python3 "{Path(__file__).resolve()}"',
+        "dispatch-command": f'python3 "{Path(__file__).resolve().parent / "herdr_dispatch.py"}"',
+        "hooks-dir": str(Path(__file__).resolve().parent),
+        "references-dir": str(BRIEF_TEMPLATE_PATH.parent),
         "core-context": (f'--repo-path "{repo_root}" --runtime {ns.runtime}'
                          + (" --personal" if ns.personal else "")),
-        "routing-lines": _brief_routing(ns.runtime, config),
-        "workflow-opt-in-line": blocks["opt-in-withheld" if ns.no_workflow else "opt-in-granted"],
+        "routing-lines": _brief_routing(ns.runtime, config, ("impl",) if ns.phase == "lead" else ()),
+        "workflow-opt-in-line": (blocks["opt-in-withheld"] if ns.no_workflow
+                                 else "" if ns.phase == "lead" else blocks["opt-in-granted"]),
+        "no-workflow-flag": " --no-workflow" if ns.no_workflow else "",
         "artifact-lines": "\n".join(f"- {a.get('kind')}: {a.get('path')} (sha256 {a.get('sha256')})"
                                     for a in artifacts) or "- none recorded",
         "contract_path": record.get("contract_path") or "none pinned",
@@ -943,9 +972,15 @@ def render_brief(rd, record, ns, repo_root):
         values["findings_ref"] = ns.findings
     if ns.phase == "ship":
         values.update(_brief_ship_values(rd, record, ns, head, blocks, config))
-    values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"], values)
-    text = "\n\n".join(_brief_fill(blocks[name], values) for name in spec["blocks"])
-    left = set(BRIEF_TOKEN_RE.findall(text)) - BRIEF_WORKER_FIELDS - {"<task-body>"}
+    # The lead's done record is phase implement, and the harvester has no lead phase.
+    tag_phase = spec["emit"] if ns.phase == "lead" else ns.phase
+    values["lessons-step"] = _brief_fill(blocks[spec["lessons"]] + " " + blocks["lessons"],
+                                         dict(values, phase=tag_phase))
+    names = [BRIEF_LEAD_BLOCKS.get(n, n) if ns.phase == "lead" else n for n in spec["blocks"]]
+    text = "\n\n".join(_brief_fill(blocks[name], values).rstrip("\n") if ns.phase == "lead"
+                        else _brief_fill(blocks[name], values) for name in names)
+    exempt = BRIEF_WORKER_FIELDS if ns.phase == "lead" else BRIEF_WORKER_FIELDS - BRIEF_LEAD_FIELDS
+    left = set(BRIEF_TOKEN_RE.findall(text)) - exempt - {"<task-body>"}
     _require(not left, f"brief template left unfilled tokens: {', '.join(sorted(left))}")
     body = "\n\n".join(part for part in (focus, todo) if part)
     return agent, text.replace("<task-body>", body, 1) + "\n"

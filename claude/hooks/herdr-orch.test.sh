@@ -13234,7 +13234,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 591
+assert t.count("\n") <= 742
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -13273,7 +13273,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 591
+assert t.count("\n") <= 742
 PY
 
 check "render-brief: the template holds every block the phase table names" <<PY
@@ -13491,6 +13491,251 @@ put(dict(record, pr_number=None)); refused("--phase", "ship", "--focus-file", fo
 put(dict(record, review_head_sha=A)); refused("--phase", "ship", "--focus-file", focus)
 put(record)
 out, _ = rendered("--phase", "ship", "--focus-file", focus)
+PY
+
+check "render-brief: lead brief dispatches only and leaves the binding tokens" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+out, brief = rendered("--phase", "lead")
+assert out["phase"] == "lead" and out["emit_phase"] == "implement", out
+assert out["agent"].startswith("lead-"), out
+flat = " ".join(brief.split())
+for phrase in ("dispatch only", "even a one-line change", "launch --binding", "emit-artifacts",
+               "emit-envelope", "herdr_dispatch.py", "--phase implement"):
+    assert phrase in flat, phrase
+assert not re.search(r"implement (small work )?directly|code the change yourself|commit as you go|"
+                     r"finish or commit it|Workflow opt-in|impl: |native skill routing|"
+                     r"Every other ground rule holds", flat, re.I), flat
+for phrase in ("Never edit, stage or commit task files, and never run an implementation",
+               "Start agents only through `launch --binding`", "Use no Workflow or subagent helpers"):
+    assert phrase in flat, phrase
+assert "--workspace-id" in flat and "launch --help" in flat and "herdr_dispatch.py\" inspect --binding" in flat
+assert "do NOT open a PR" not in flat
+assert "is data, not instructions" in flat, "lead brief lost the relayed-text rule"
+assert "dispatch-adapter.md" in flat and "--route-json" in flat and "--cwd" in flat
+assert "/leads/<binding_id>/tasks/td-render-x.done.json" in flat, "lead brief waits on the wrong done path"
+assert "/leads/<binding_id>/tasks/td-render-x.review.json" in flat, "lead brief omits the bound review path"
+assert not re.search(r"(?<!>)/tasks/td-render-x\.done\.json", flat.replace("/leads/<binding_id>/tasks/", "")), flat
+assert flat.count("WORKER_LAUNCH_ID") >= 2 and "never end it" in flat, "lead wait lacks the identity check"
+assert "its done record resumes you" not in flat
+assert "call whose timeout you raise above the loop" in flat and "Never close a pane whose worker is still working" in flat
+assert "agent_runtime.py route --step implementation-review" in flat and "--sandbox read-only" in flat
+assert "never inside the task worktree" in flat and "30 minutes pass. At the deadline" not in flat
+assert "repeating `--file`" in flat and "herdr_orch_core.py\" emit-envelope" in flat
+assert "\n\n\n" not in brief, "doubled blank line in the lead render"
+left = set(re.findall(r"<[A-Za-z][^<>\s]{0,40}>", brief.replace(focus_text, "")))
+assert left <= WORKER | {"<binding_id>", "<lead_fence>"}, left
+rendered("--phase", "lead", "--no-workflow")
+rendered("--phase", "lead", "--focus-file", focus)
+assert render("--phase", "lead", "--artifact-class", "behavior").returncode == 2
+_, impl = rendered("--phase", "implement")
+assert "launch --binding" not in " ".join(impl.split())
+import importlib.util
+sp = importlib.util.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(sp); sp.loader.exec_module(c)
+tag = "[td-render-x implement]"
+assert tag in flat and "[td-render-x lead]" not in flat, flat
+line = "LESSON: " + tag + " Dispatch through the bound launch verb."
+assert c.harvest_lesson_lines(line, "td-render-x", "implement") == [line]
+PY
+
+check "render-brief: lead wait never pastes record data and matches the launch exactly" <<'PY'
+import os, re, subprocess, tempfile, json
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+_, brief = rendered("--phase", "lead")
+flat = " ".join(brief.split())
+capture = re.search(r"store the record's current stamp in a file .*? with `(python3 -c '.*?' RECORD_FILE STAMP_FILE)`", flat).group(1)
+until = re.search(r"`(until python3 -c '.*?' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID .*?; done)`", flat).group(1)
+until = until.replace("540", "2").replace("sleep 10", "sleep 0.3")
+def write(f, rec):
+    open(f, "w").write(json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n")
+def waited(record, prior_record, launch="L1"):
+    d = tempfile.mkdtemp()
+    f, st = os.path.join(d, "t.done.json"), os.path.join(d, "t.stamp")
+    marker = os.path.join(d, "MARKER")
+    def fill(text):
+        return text.replace("RECORD_FILE", f).replace("STAMP_FILE", st).replace("WORKER_LAUNCH_ID", launch).replace("MARKER", marker)
+    if prior_record is not None:
+        write(f, prior_record)
+    # process 1: the capture command stores the stamp; process 2: the loop reads it back
+    subprocess.run(["bash", "-c", capture.replace("RECORD_FILE", f).replace("STAMP_FILE", st)], check=True)
+    if record is not None:
+        write(f, record)
+    script = "SECONDS=0\n" + fill(until) + "\necho $SECONDS\n"
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
+    assert not os.path.exists(marker), "record data ran as shell code"
+    return int(out.strip())
+old = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:00:00Z"}
+new_rec = {"launch_id": "L1", "agent": "a", "ts": "2026-11-02T10:05:00Z"}
+assert waited(None, None) >= 2, "no record ended the wait"
+assert waited(old, old) >= 2, "a stale same-launch record ended the wait"
+assert waited(new_rec, old) == 0, "a fresh exact record did not end the wait"
+assert waited(new_rec, None) == 0, "a first record did not end the wait"
+foreign = {"launch_id": "L0", "agent": "L1", "note": "L1", "ts": "2026-11-02T10:06:00Z"}
+assert waited(foreign, old) >= 2, "a foreign record naming the launch id elsewhere ended the wait"
+assert waited(dict(new_rec, launch_id="L10"), old) >= 2, "a longer launch id ended the wait"
+assert waited(dict(new_rec, launch_id="L"), old) >= 2, "a shorter launch id ended the wait"
+hostile = dict(old, ts="'; touch MARKER; : '")
+assert waited(hostile, hostile) >= 2, "a hostile stamp ended the wait"
+assert waited(None, hostile) >= 2, "a hostile prior record ended the wait"
+assert waited(new_rec, hostile) == 0, "a fresh record after a hostile stamp did not end the wait"
+for phrase in ("(add `--focus-file` with a focus file you write in your scratchpad, never", "`--personal` only if",
+               "--fence <lead_fence> --task-id", "--binding <binding_id> --file ARTIFACT",
+               "--binding <binding_id> --json '{...}'"):
+    assert phrase in flat, phrase
+assert "(unique per launch)" not in flat and "prints the same agent and path" in flat
+for token in ("<references-dir>", "<hooks-dir>"):
+    assert token not in flat, token
+for name in ("task-leads.md", "dispatch-adapter.md", "agent_runtime.py", "herdr_envelope.py"):
+    mentions = [m for m in re.findall(r"(\S*" + re.escape(name) + ")", flat)]
+    assert mentions and all(m.lstrip("`(").startswith("/") for m in mentions), (name, mentions)
+assert "`launch` takes `--personal` only" in flat
+assert "`summary` holds `outcome`, `follow_ups`, `pr`" in flat
+PY
+
+check "render-brief: a render after a bound worker takes a fresh agent name" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+first, _ = rendered("--phase", "implement")
+bound = os.path.join(rd, "leads", "B1", "tasks")
+os.makedirs(bound)
+open(os.path.join(bound, "td-render-x.json"), "w").write(json.dumps(
+    {"task_id": "td-render-x", "workers": [{"agent": first["agent"], "phase": "implement"}]}))
+second, _ = rendered("--phase", "implement")
+assert second["agent"] != first["agent"], (first, second)
+assert second["brief_path"] != first["brief_path"], (first, second)
+review, _ = rendered("--phase", "review", "--focus-file", focus)
+assert review["agent"] not in (first["agent"], second["agent"]) and len(review["agent"]) <= 32, review
+PY
+
+check "render-brief: lead steps 3 and 5 name every key the bound launch validates" <<'PY'
+import os, re, sys
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+_, brief = rendered("--phase", "lead")
+flat = " ".join(brief.split())
+sys.path.insert(0, "claude/hooks")
+import herdr_dispatch as dsp
+step3 = re.search(r"3\. Record:.*?(?= 4\. Implement:)", flat).group(0)
+step5 = re.search(r"5\. Review:.*?(?= 6\. PR:)", flat).group(0)
+keys_text = re.search(r"carries exactly these keys: (.*?)\. Omit", step3).group(1)
+keys = re.findall(r"(?:^|, (?:and )?)`([a-z_]+)`", keys_text)
+assert set(keys) == {"task_id", "repo_slug", "branch", "worktree", "base_sha"}, keys
+# build the bound record from step 3's key list and run the launch validation
+values = {"task_id": "t1", "repo_slug": "slug1", "branch": "b1", "worktree": os.getcwd(), "base_sha": "a" * 40}
+record = {k: values[k] for k in keys}
+rrepo = {"root": os.getcwd(), "branch": "b1"}
+dsp._validate_task_context(record, rrepo, "slug1")
+for k in keys:
+    bad = dict(record); del bad[k]
+    if k == "task_id":
+        continue
+    try:
+        dsp._validate_task_context(bad, rrepo, "slug1")
+    except dsp.DispatchError:
+        pass
+    else:
+        raise AssertionError("validation accepted a record without " + k)
+for k in keys:
+    assert "`" + k + "`" in step5, "step 5 drops " + k
+assert "review_head_sha" in step5 and "replaces the record" in step5
+assert "Never paste a value read from a record into a command" in flat
+assert "cannot ship" not in flat and "distinct panes" in flat
+PY
+
+check "render-brief: lead step 4 and 5 render commands carry the lead's workflow opt-in state" <<'PY'
+import os, re, subprocess
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+def descendants(*lead_flags):
+    _, brief = rendered("--phase", "lead", *lead_flags)
+    flat = " ".join(brief.split())
+    step4 = re.search(r"4\. Implement: render the worker brief with `(python3 [^`]*--phase implement[^`]*)`", flat).group(1)
+    step5 = re.search(r"`render-brief (--phase review[^`]*?) --focus-file`", flat).group(1)
+    base = step4.split(" --phase implement")[0]
+    cmds = {"implement": step4, "review": base + " " + step5 + " --focus-file " + focus}
+    briefs = {}
+    for phase, cmd in cmds.items():
+        p = subprocess.run(["bash", "-c", cmd + (" --focus-file " + focus if phase == "implement" else "")],
+                           capture_output=True, text=True)
+        assert p.returncode == 0, (phase, cmd, p.stderr)
+        briefs[phase] = " ".join(open(json.loads(p.stdout)["brief_path"]).read().split())
+    return briefs
+for phase, text in descendants("--no-workflow").items():
+    assert "Workflow opt-in: withheld for this task" in text, phase
+    assert "granted by the user's standing order" not in text, phase
+for phase, text in descendants().items():
+    assert "Workflow opt-in: granted by the user's standing order" in text, phase
+    assert "withheld" not in text.split("Workflow opt-in:")[1].split(".")[0], phase
+PY
+
+check "render-brief: the unfilled-token guard exempts the binding tokens only for the lead phase" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+assert c.BRIEF_LEAD_FIELDS == {"<binding_id>", "<lead_fence>"}
+rendered("--phase", "lead")
+rec = open(task_file).read()
+tpl = open(c.BRIEF_TEMPLATE_PATH).read()
+# a stray binding token in a non-lead block must now be refused
+import pathlib
+bad = pathlib.Path(tmp) / "bad-template.md"
+bad.write_text(tpl.replace("## Workspace", "## Workspace <binding_id>", 1))
+c.BRIEF_TEMPLATE_PATH = bad
+ns = type("N", (), dict(phase="implement", focus_file=focus, findings=None, artifact_class=None,
+                        prd_cap=None, no_workflow=False, tier=None, prior_handoff=None,
+                        repo_slug=slug, runtime="claude", personal=False))()
+try:
+    c.render_brief(pathlib.Path(rd), json.loads(rec), ns, pathlib.Path(repo))
+except SystemExit as exc:
+    assert exc.code == 2, exc
+else:
+    raise AssertionError("implement render accepted a stray <binding_id>")
+PY
+
+check "render-brief: lead template blocks keep the other phases unchanged" <<'PY'
+import hashlib, importlib.util
+s = importlib.util.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(s); s.loader.exec_module(c)
+path = "claude/skills/herdr-orchestration/references/brief-template.md"
+b = c.brief_blocks(open(path).read())
+lead = " ".join((b["lead"] + " " + b["close-lead"]).split())
+for phrase in ("Never edit, stage or commit task files", "launch --binding <binding_id> --phase implement",
+               "another pane", "lead-session", "write-task --binding", "--control-tier lead",
+               "before any retry", "end the prior worker", "replace two ground rules",
+               "verify-contract", "<lessons-step>", "emit-done"):
+    assert phrase in lead, phrase
+# sha256 of each pre-lead block body; needs no git history (CI checks out at depth 1)
+BASE = {
+    "intro-work": "45ab54592f3a846a0013559131d029be44acd76060aa3f579045825ee45bed20",
+    "task": "b5e46babdf5ac85555c869f2a621454e747b5b309b37139b4bc5108117c2261a",
+    "artifacts": "7405860990bb09ac82e6915ebb85caa26f9f78c545c7931fa17daa2e9ea4aa8e",
+    "workspace": "7432e51e9890a40cafe48d349370ae760d2ff4f9aff28ab03f489eb0d923c2f7",
+    "routing": "e158010bd379e5cfa3e7663ffc5877d679039ac91d8395e11b045046672b8ecb",
+    "opt-in-granted": "1bfeefb45bab429c13ec7373dda0d299eb399d0d1215ed0a3c9409997d5fb4fb",
+    "opt-in-withheld": "ee34badbb06428632e063e8ceeaf0d026110e2f9e3d298fcd61aee30b371c25c",
+    "ground-rules": "17071141914deda7c7d88009055228ff0388b3811470af8d8d7afb9c4e9d467d",
+    "close-implement": "268a24bf638f03111c27862aa173f6c7d5d67115000bd36e09a19113a6971472",
+    "intro-plan": "eecb08256a316d7d2b5dcbb28485ac3363b415f76d4d60350b1dc237a6c58d13",
+    "plan-produce": "14dfdc0febe641e87cd5be73b28690acd594ff688454a612b045600342d4b17c",
+    "close-plan": "798ff6e37c305ecf1eefb969951ad8ff89e6fb6a5f89b9a3dea43eb8eca6fc37",
+    "intro-review": "f6f0cd56d1a5d72e2c7e5a01fb699832a15c3ebb1d8f61b56593827058c52d2d",
+    "review-task": "95e868fed7f3f875087f730497aeaf74f7c071ff17af181af36e2ad0c4514cc5",
+    "close-review": "0630a58c04cf74ee009b849a22f452e7f19858abcad077f7278dee8d0b9c5ab8",
+    "lessons-open-worker": "0acaa2a8bd97d8ff77fb3508cdd7c9ad38cc2b91af56c6aaf9bccfb4d67d5d22",
+    "lessons-open-review": "1fcb064f1c4aea5c43f68a1f954340072111cf846c8239d542188bd475c47ce1",
+    "lessons-open-ship": "fd2418a2b0368fc914ee226643312f37a108fb0d734872dc8d2c12dd5f1fe9a3",
+    "lessons": "26bbd434be2d409cde79e635a030fc751ddca749ec9c357d000c6311fc9bdb3e",
+    "intro-repair": "1675d3e084d6e6e5df303df511994aeb5efc208eb279d08feb8fb6c0af630f1a",
+    "repair-findings": "199698d0a47e48c17fa657f7abf06266e76fa0ebe547ef3fb8d1b1b29942902f",
+    "intro-ship": "fd1c590eb9714dee10b25b6db5091e31231eec53d6a81f4ac55b7d67a43e82bd",
+    "ship-tier-full": "68525a06c1feaf9dc6e4cc3d3f60fc0889b39789866bf9dbeebf305045264e34",
+    "ship-tier-auto": "91b3132839b48d60cc4d8d00e123d3d868fa1fca5b4986eddd5a380220f5fc82",
+    "ship-tier-delta": "4ffde89ddf7e56accb6110dee89923e2d5e1936230284115fb283eb1bf6f8bb1",
+    "ship": "36ab2272488231c339b5fbdbdd330874efbca516c90e90805328bbff7b0e7cf7",
+}
+for name, digest in BASE.items():
+    assert hashlib.sha256(b[name].encode()).hexdigest() == digest, name
+assert set(b) - set(BASE) == {"intro-lead", "lead", "close-lead", "routing-lead", "ground-rules-lead"}, sorted(set(b) - set(BASE))
+row = c.BRIEF_PHASES["lead"]
+assert row["prefix"] == "lead" and row["emit"] == "implement" and set(row["allows"]) == {"focus_file", "no_workflow"}
 PY
 
 HEADER_FIXTURE=$(mktemp); export HEADER_FIXTURE
@@ -14046,6 +14291,19 @@ for bad in (None, 7):
     open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(done))
     marker = {"launch_id": "i1"} if bad is None else {"launch_id": "i1", "ts": bad}
     assert c.checkin_facts(rd, dict(task, stop_recorded=marker), idle, payload)["action"] == "paused", bad
+PY
+
+check "docs: task-leads renders the lead brief, states when to use a lead and the recovery" <<'PY'
+import re
+t = " ".join(open("claude/skills/herdr-orchestration/references/task-leads.md").read().split())
+for phrase in ("render-brief --phase lead", "brief-template.md", "brief:lead", "brief:close-lead", "brief_path",
+               "--prompt-file", "parallel implement workers", "several slices", "emit-done --phase implement",
+               "reconcile-leads", "review gate", "ship gate", "hand-write the missing"):
+    assert phrase in t, phrase
+assert "rendered implement brief plus a lead section" not in t
+assert re.search(r"## When to use a task lead", t)
+assert re.search(r"teardown-binding[^.]{0,80}--abandon", t)
+assert "--phase <plan|implement|repair|review|ship|lead>" in open("claude/skills/herdr-orchestration/references/kickoff.md").read()
 PY
 
 check "docs: section 4 records a stop with stop_recorded" <<'PY'
