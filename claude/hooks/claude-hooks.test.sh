@@ -837,6 +837,29 @@ rmg_silent "silent for path inside quoted text" "$(rmg_json_payload 'git commit 
 rmg_silent "silent stored prefix inside bash -c" "$(rmg_json_payload "bash -c 'E=\"env -u A\"; \$E true'")"
 rmg_silent 'silent $HOME:/x' "$(rmg_json_payload 'echo $HOME:/x')"
 
+rmg_wk() { printf '[WARNING] rm_guard: zsh does not word-split $%s, so kill gets every PID in it as one argument, refuses it, and the processes keep running; write kill ${=%s}, or collect the PIDs in an array (%s+=($!)) and write kill "${%s[@]}".' "$1" "$1" "$1" "$1"; }
+
+rmg_warns "kill unquoted accumulated string" "$(rmg_json_payload 'for i in 1 2; do sleep 9 & pids="$pids $!"; done; kill $pids 2>/dev/null')" "$(rmg_wk pids)"
+rmg_warns "kill -9 of a command substitution" "$(rmg_json_payload 'pids=$(pgrep -f busy); kill -9 $pids')" "$(rmg_wk pids)"
+rmg_warns "kill -- of a braced quoted substitution" "$(rmg_json_payload 'pids="$(jobs -p)"; kill -- ${pids}')" "$(rmg_wk pids)"
+rmg_warns "kill quoted scalar via sudo /bin/kill -s TERM" "$(rmg_json_payload 'p="1 2"; sudo /bin/kill -s TERM "$p"')" "$(rmg_wk p)"
+rmg_warns "kill via Codex payload shape" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=\"1 2\"; kill $pids","workdir":"/Users/rmg-test-user/proj"}}' "$(rmg_wk pids)"
+rmg_warns "kill repeated warns once" "$(rmg_json_payload 'pids="1 2"; kill $pids; kill -9 $pids')" "$(rmg_wk pids)"
+rmg_warns "kill line follows the W1 line" "$(rmg_json_payload 'E="env -u A"; $E true; pids="1 2"; kill $pids')" "$(rmg_w1 E)
+$(rmg_wk pids)"
+
+rmg_silent 'kill ${=pids}' "$(rmg_json_payload 'pids="1 2"; kill ${=pids}')"
+rmg_silent 'kill $=pids' "$(rmg_json_payload 'pids="1 2"; kill $=pids')"
+rmg_silent 'kill "${pids[@]}" of an array' "$(rmg_json_payload 'pids=(); pids+=($!); kill "${pids[@]}"')"
+rmg_silent 'kill $pids of an array' "$(rmg_json_payload 'pids=(1 2); kill $pids')"
+rmg_silent 'kill single PID from $!' "$(rmg_json_payload 'sleep 9 & pid=$!; kill $pid')"
+rmg_silent "kill literal PID" "$(rmg_json_payload 'kill 12345')"
+rmg_silent "kill variable not assigned in the command" "$(rmg_json_payload 'kill $pids')"
+rmg_silent "kill check skips pkill" "$(rmg_json_payload 'pat="busy loop"; pkill -f "$pat"')"
+rmg_silent "kill check skips a multi-word variable outside kill" "$(rmg_json_payload 'pids="1 2"; echo $pids')"
+rmg_silent "kill inside bash -c" "$(rmg_json_payload "bash -c 'p=\"1 2\"; kill \$p'")"
+
 # shell_hint.py: warn-only advisory for a bare background `&`.
 SHH=claude/hooks/shell_hint.py
 SHH_W='[WARNING] shell_hint: a bare & leaves a background job running after this tool call returns, so a later call can start a duplicate; use run_in_background on the Bash tool (in Codex, keep a running exec_command session) instead.'

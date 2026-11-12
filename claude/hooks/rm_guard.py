@@ -23,7 +23,8 @@ inside `sh -c`/`bash -c`/`zsh -c` wrappers). Other deleters (`find -delete`,
 substitution are not inspected; that residual is left to the classifier.
 
 The hook also runs warn-only checks for recurring zsh pitfalls (a stored
-multi-word command prefix, a `$var:X` modifier, a loop variable named `path`).
+multi-word command prefix, a `$var:X` modifier, a loop variable named `path`,
+`kill` of a multi-PID scalar that zsh does not word-split).
 A warning is printed as PreToolUse `additionalContext` JSON on stdout with exit
 0; it never blocks, and a denial never prints to stdout.
 
@@ -74,6 +75,7 @@ BRACE_GROUP = re.compile(r"^(.*)\{([^{}]+)\}(.*)$")
 LEADING_KEYWORDS = ("do", "then", "else", "elif", "if", "while", "until", "!", "{")
 
 ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+KILL_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=(.*)$", re.S)
 VAR_REF = re.compile(r"^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$")
 # zsh history-style modifier letters; `$sha:path` stays literal (`p` is not one).
 MODIFIER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*):([acehlqrstuAPQ&])")
@@ -451,11 +453,35 @@ def unquoted_text(command: str) -> str:
         i += 1
     return "".join(out)
 
+WARN_KILL = (
+    "[WARNING] rm_guard: zsh does not word-split $%s, so kill gets every PID in "
+    "it as one argument, refuses it, and the processes keep running; write "
+    "kill ${=%s}, or collect the PIDs in an array (%s+=($!)) and write "
+    'kill "${%s[@]}".'
+)
+
+
+def unsplit_scalars(tokens: list[str]) -> set[str]:
+    """Names assigned a scalar that can hold several words (NAME=, NAME+=)."""
+    names = set()
+    for i, tok in enumerate(tokens):
+        m = KILL_ASSIGNMENT.match(tok)
+        if not m:
+            continue
+        value = m.group(2)
+        # The tokenizer splits an unquoted `NAME=$(cmd)` into `NAME=$` and `(`.
+        split_subst = value.endswith("$") and tokens[i + 1 : i + 2] == ["("]
+        if re.search(r"[ \t\n`]|\$\(", value) or split_subst:
+            names.add(m.group(1))
+    return names
+
 
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
-    segments = [strip_keywords(seg) for seg in split_segments(tokenize(command))]
+    all_tokens = tokenize(command)
+    segments = [strip_keywords(seg) for seg in split_segments(all_tokens)]
+    unsplit = unsplit_scalars(all_tokens)
     multiword = set()
     for tokens in segments:
         for tok in tokens:
@@ -463,7 +489,7 @@ def zsh_warnings(command: str) -> list[str]:
             if m and (" " in m.group(2) or "\t" in m.group(2)):
                 multiword.add(m.group(1))
 
-    prefix_lines, path_lines = [], []
+    prefix_lines, path_lines, kill_lines = [], [], []
     for tokens in segments:
         stripped = strip_prefixes(tokens)
         if stripped:
@@ -471,6 +497,12 @@ def zsh_warnings(command: str) -> list[str]:
             name = m and (m.group(1) or m.group(2))
             if name in multiword:
                 prefix_lines.append(WARN_PREFIX % name)
+        if stripped and basename(stripped[0]) == "kill":
+            for arg in stripped[1:]:
+                m = VAR_REF.match(arg)
+                name = m and (m.group(1) or m.group(2))
+                if name in unsplit:
+                    kill_lines.append(WARN_KILL % (name, name, name, name))
         loop_path = len(tokens) > 1 and tokens[0] == "for" and tokens[1] == "path"
         read_path = len(stripped) > 1 and stripped[0] == "read" and "path" in stripped[1:]
         if loop_path or read_path:
@@ -482,7 +514,7 @@ def zsh_warnings(command: str) -> list[str]:
     ]
 
     lines = []
-    for line in prefix_lines + modifier_lines + path_lines:
+    for line in prefix_lines + modifier_lines + path_lines + kill_lines:
         if line not in lines:
             lines.append(line)
     return lines
