@@ -1287,7 +1287,7 @@ else
     fail "a guarded file that cannot be restored is reported and the others are still restored (rc=$tb_rc: $(cat "$TMP/tearboth.out"))"
 fi
 
-# A dead stdout must not stop the restore loop: both torn files come back.
+# A hung-up terminal on stdout must not stop the restore loop.
 DEADCFG="$TMP/sweep-deadout"
 mkdir -p "$DEADCFG/plugins"
 printf '{"ecc": {}}\n' >"$DEADCFG/plugins/known_marketplaces.json"
@@ -1298,17 +1298,17 @@ cp "$DEADCFG/settings.json" "$TMP/deadout.settings"
 DEAD_FUNCS="$(declare -p RETIRED_CLAUDE_PLUGINS_JSON CLAUDE_REGISTRY_RULE_PY; declare -f)"
 PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=tearboth HOME="$TMP/sweep-home" \
     PYTHONUNBUFFERED=1 DEAD_FUNCS="$DEAD_FUNCS" DEADCFG="$DEADCFG" python3 -c '
-import os
-r, w = os.pipe()
-os.close(r)
+import os, pty
+m, w = pty.openpty()
+os.close(m)
 os.dup2(w, 1)
 os.execvp("bash", ["bash", "-c", os.environ["DEAD_FUNCS"] + "\nsweep_retired_claude_plugins \"$DEADCFG\" \"[test]\""])
 ' >/dev/null 2>&1
 if cmp -s "$DEADCFG/plugins/installed_plugins.json" "$TMP/deadout.registry" &&
    cmp -s "$DEADCFG/settings.json" "$TMP/deadout.settings"; then
-    pass "a dead stdout does not stop the sweep restoring every torn guarded file"
+    pass "a dead terminal cannot stop the sweep restoring every torn guarded file"
 else
-    fail "a dead stdout does not stop the sweep restoring every torn guarded file"
+    fail "a dead terminal cannot stop the sweep restoring every torn guarded file"
 fi
 
 # Malformed test overrides are refused before the CLI starts.
