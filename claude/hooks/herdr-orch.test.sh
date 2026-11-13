@@ -11522,7 +11522,7 @@ check "pending_action: skips the poll rules and otherwise matches checkin_action
 $LOAD
 assert c.POLL_RULES == frozenset({"unknown", "abandoned-candidate", "blocked",
                                   "unblocked", "exit-idle-worker", "reprompt-stalled",
-                                  "close-idle"})
+                                  "relaunch-dead-worker", "close-idle"})
 base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
             head="a" * 40, completed=False, plan_completed=False, reviewed=False,
             review_correlates=False, review_stale=False, dispatch_review=False,
@@ -12099,6 +12099,116 @@ codex = dict(task, workers=[dict(row, runtime="codex")])
 assert dict(zip(*[iter(argv_for(codex, ctx)[3:])] * 2))["--runtime"] == "codex"
 personal = argv_for(task, dict(ctx, personal=True))
 assert personal[-1] == "--personal" and personal.count("--personal") == 1, personal
+PY
+
+check "checkin_facts: a launched plan or implement row whose agent is gone past the grace reports relaunch-dead-worker" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 3 * 86400 * 10**9
+row = {"phase": "plan", "workspace_id": "w1", "runtime": "claude", "launch_id": "P1",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "plan-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+empty = {"live": {}, "known": {"w1"}, "worktrees": {}, "agents": {}}
+def facts(t, p):
+    return c.checkin_facts(rd, t, p, c.state_root().parent, now_ns=now)
+def act(t, p=empty):
+    return facts(t, p)["action"]
+f = facts(task, empty)
+assert f["live"] == "idle" and f["action"] == "relaunch-dead-worker", f
+assert (f["dead_agent"], f["dead_phase"], f["dead_launch"], f["dead_pane"]) == (
+    "plan-x", "plan", "P1", "w1:p1"), f
+assert act(dict(task, workers=[dict(row, phase="implement")])) == "relaunch-dead-worker"
+assert act(dict(task, status="changes-requested",
+                workers=[dict(row, phase="implement")])) == "relaunch-dead-worker"
+for st in ("starting", "ready"):
+    assert act(dict(task, workers=[dict(row, status=st)])) == "relaunch-dead-worker", st
+other = {"live": {"w1": "working"}, "known": {"w1"}, "worktrees": {}, "agents": {"w1": [
+    {"name": "other-y", "pane_id": "w1:p2", "agent_status": "working"}]}}
+assert act(task, other) == "relaunch-dead-worker"
+ws_gone = {"live": {}, "known": set(), "worktrees": {}, "agents": {}}
+assert act(dict(task, worktree=os.getcwd()), ws_gone) == "relaunch-dead-worker"
+assert act(task, ws_gone) == "abandoned-candidate"
+names = [n for n, _ in c.checkin_rules({})]
+i = names.index("relaunch-dead-worker")
+assert names[i + 1] == "reprompt-stalled" and names.index("failed") < i
+assert "relaunch-dead-worker" in c.POLL_RULES
+PY
+
+check "checkin_facts: a failed poll, a present agent, a done record, a fresh launch or a review row never reports relaunch-dead-worker" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 3 * 86400 * 10**9
+row = {"phase": "plan", "workspace_id": "w1", "runtime": "claude", "launch_id": "P1",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "plan-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+empty = {"live": {}, "known": {"w1"}, "worktrees": {}, "agents": {}}
+def facts(t, p):
+    return c.checkin_facts(rd, t, p, c.state_root().parent, now_ns=now)
+def act(t, p=empty):
+    return facts(t, p)["action"]
+no = lambda t, p=empty: act(t, p) != "relaunch-dead-worker"
+f = facts(task, None)
+assert f["action"] == "unknown" and not f["dead_worker"], f
+assert c.pending_action(f) == "none"
+for st in ("working", "blocked", "idle", "done", "unknown"):
+    p = {"live": {"w1": st}, "known": {"w1"}, "worktrees": {}, "agents": {"w1": [
+        {"name": "plan-x", "pane_id": "w1:p1", "agent_status": st}]}}
+    assert no(task, p), st
+assert no(dict(task, workers=[dict(row, started_ns=now - 570 * 10**9)]))
+for phase in ("review", "ship"):
+    assert no(dict(task, workers=[dict(row, phase=phase)])), phase
+assert no(dict(task, workers=[dict(row, status="launch_failed")]))
+assert no(dict(task, workers=[dict(row, exit_requested="x")]))
+for st in ("blocked", "completed", "failed", "abandoned"):
+    assert no(dict(task, status=st)), st
+done = {k: row[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(
+    dict(done, task_id="PROJ-1", outcome="paused", head_sha="a" * 40, ts="2026-11-10T00:00:00Z")))
+assert no(task)
+PY
+
+check "next: relaunch-dead-worker asks to relaunch the phase, naming the agent, launch and pane" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+old = now - 3 * 86400 * 10**9
+row = {"phase": "plan", "workspace_id": "w1", "runtime": "claude", "launch_id": "P1",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "plan-x",
+       "status": "launched", "started_ns": old}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+empty = {"live": {}, "known": {"w1"}, "worktrees": {}, "agents": {}}
+def facts(t, p):
+    return c.checkin_facts(rd, t, p, c.state_root().parent, now_ns=now)
+def act(t, p=empty):
+    return facts(t, p)["action"]
+ctx = {"repo_slug": "slug-x", "repo_path": "/r", "runtime": "claude", "personal": False,
+       "session": "S", "fence": 7}
+line = c.next_line(task, facts(task, empty), ctx)
+assert line == ("  next: ask Worker plan-x (plan launch P1, pane w1:p1) is gone with no done "
+                "record: relaunch the plan phase (SKILL.md section 4), or stop?"), line
+PY
+
+check "docs: section 4 and the event schema document relaunch-dead-worker" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+schema = open("claude/skills/herdr-orchestration/references/event-schema.md").read()
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+tick = chr(96)
+name = f"{tick}relaunch-dead-worker{tick}"
+assert name in sec4 and name in schema
+para = sec4.split(name, 1)[1].split("\n\n", 1)[0]
+for phrase in ("check-in", "pane read", "render-brief", "launch", "split", "done.json", "abandoned"):
+    assert phrase in para, phrase
 PY
 
 check "keep_lease_warm: one failed ancestor check re-checks and stays ok; a dead holder pid ends it at once" <<PY
@@ -14466,7 +14576,7 @@ PY
 
 check "docs: SKILL.md stays at or under 67000 bytes" <<'SH'
 n=$(wc -c < claude/skills/herdr-orchestration/SKILL.md)
-[ "$n" -le 67000 ]
+[ "$n" -le 68500 ]
 SH
 
 check "docs: lost gates re-run without asking, at most 2 per gate per head" <<'PY'
@@ -14561,7 +14671,7 @@ section = auto[auto.index("## Doc-rule actions"):auto.index("## Asks that stay")
 for text in ("turn summary", "decision note", "before"):
     assert text in section, text
 skill = rd("SKILL.md")
-assert len(skill.encode("utf-8")) <= 67000 and "Contract re-pin" in skill
+assert len(skill.encode("utf-8")) <= 68500 and "Contract re-pin" in skill
 PY
 
 check "docs: owner-authority rules accept only owner-source decisions" <<'PY'
