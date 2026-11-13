@@ -1313,7 +1313,8 @@ if [ "$dead_rc" = 1 ] &&
    cmp -s "$DEADCFG/settings.json" "$TMP/deadout.settings"; then
     pass "a dead terminal cannot stop the sweep restoring every torn guarded file"
 else
-    fail "a dead terminal cannot stop the sweep restoring every torn guarded file (rc=${dead_rc:-none})"
+    fail "a dead terminal cannot stop the sweep restoring every torn guarded file"
+    printf '      sweep rc=%s\n' "${dead_rc:-none}" >&2
 fi
 
 # Malformed test overrides are refused before the CLI starts.
