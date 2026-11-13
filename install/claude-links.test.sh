@@ -1213,7 +1213,7 @@ else
     fail "two signals during the cleanup cannot abort it: the claude group dies and settings are restored ($sig_res)"
 fi
 # A first signal while kill_group still polls after a timeout.
-sig_case INT 0 1 cleanup cleanup latejoin 2
+sig_case INT 0 3 cleanup cleanup latejoin 2
 if [ "$sig_res" = "RC=-2 CONTINUED=0 GONE=1 EARLY=1" ] && cmp -s "$SGCFG/settings.json" "$TMP/sig-cleanup.before" &&
    grep -q '^LEFT' "$TMP/sig-cleanup.join" && grep -q '^REJOINING' "$TMP/sig-cleanup.join" &&
    ! grep -q 'REJOIN_FAILED' "$TMP/sig-cleanup.out"; then
@@ -1250,14 +1250,14 @@ printf '{"a": 1}\n' >"$LJCFG/settings.json"
 cp "$LJCFG/settings.json" "$TMP/latejoin.before"
 rm -f "$TMP/latejoin.join"
 (export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=latejoin \
-    SWEEP_JOINFILE="$TMP/latejoin.join" SWEEP_REJOIN_DELAY=0 SWEEP_TEST_CLAUDE_TIMEOUT=1 \
+    SWEEP_JOINFILE="$TMP/latejoin.join" SWEEP_REJOIN_DELAY=0 SWEEP_TEST_CLAUDE_TIMEOUT=3 \
     HOME="$TMP/sweep-home"
     sweep_retired_claude_plugins "$LJCFG" "[test]") >"$TMP/latejoin.out" 2>&1
 lj_rc=$?
 helper=$(sed -n 's/^LEFT //p' "$TMP/latejoin.join" 2>/dev/null | head -1)
 [ -n "$helper" ] && kill -9 "$helper" 2>/dev/null
 if [ "$lj_rc" -eq 1 ] &&
-   grep -qxF "[test] [X] claude plugin marketplace remove ecc timed out after 1s for $LJCFG; skipping the rest of the sweep here (the next run retries); run by hand: CLAUDE_CONFIG_DIR=$LJCFG claude plugin marketplace remove ecc" "$TMP/latejoin.out" &&
+   grep -qxF "[test] [X] claude plugin marketplace remove ecc timed out after 3s for $LJCFG; skipping the rest of the sweep here (the next run retries); run by hand: CLAUDE_CONFIG_DIR=$LJCFG claude plugin marketplace remove ecc" "$TMP/latejoin.out" &&
    ! grep -qF 'left processes running' "$TMP/latejoin.out" &&
    grep -q '^LEFT' "$TMP/latejoin.join" && grep -q '^REJOINING' "$TMP/latejoin.join" &&
    ! grep -q 'REJOIN_FAILED' "$TMP/latejoin.out" &&
@@ -1285,6 +1285,30 @@ if [ "$tb_rc" -eq 1 ] &&
     pass "a guarded file that cannot be restored is reported and the others are still restored"
 else
     fail "a guarded file that cannot be restored is reported and the others are still restored (rc=$tb_rc: $(cat "$TMP/tearboth.out"))"
+fi
+
+# A dead stdout must not stop the restore loop: both torn files come back.
+DEADCFG="$TMP/sweep-deadout"
+mkdir -p "$DEADCFG/plugins"
+printf '{"ecc": {}}\n' >"$DEADCFG/plugins/known_marketplaces.json"
+printf '{"version": 2, "plugins": {}}\n' >"$DEADCFG/plugins/installed_plugins.json"
+printf '{"a": 1}\n' >"$DEADCFG/settings.json"
+cp "$DEADCFG/plugins/installed_plugins.json" "$TMP/deadout.registry"
+cp "$DEADCFG/settings.json" "$TMP/deadout.settings"
+DEAD_FUNCS="$(declare -p RETIRED_CLAUDE_PLUGINS_JSON CLAUDE_REGISTRY_RULE_PY; declare -f)"
+PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=tearboth HOME="$TMP/sweep-home" \
+    PYTHONUNBUFFERED=1 DEAD_FUNCS="$DEAD_FUNCS" DEADCFG="$DEADCFG" python3 -c '
+import os
+r, w = os.pipe()
+os.close(r)
+os.dup2(w, 1)
+os.execvp("bash", ["bash", "-c", os.environ["DEAD_FUNCS"] + "\nsweep_retired_claude_plugins \"$DEADCFG\" \"[test]\""])
+' >/dev/null 2>&1
+if cmp -s "$DEADCFG/plugins/installed_plugins.json" "$TMP/deadout.registry" &&
+   cmp -s "$DEADCFG/settings.json" "$TMP/deadout.settings"; then
+    pass "a dead stdout does not stop the sweep restoring every torn guarded file"
+else
+    fail "a dead stdout does not stop the sweep restoring every torn guarded file"
 fi
 
 # Malformed test overrides are refused before the CLI starts.

@@ -480,10 +480,11 @@ def snapshot():
 
 def restore_torn(snap, args):
     torn = False
+    report = []
     for path, valid, refuse in GUARDED:
         before, valid_before = snap[path]
         if not valid_before:
-            print(f"{label} [INFO] {path} was already unreadable before the CLI call; left as is")
+            report.append(f"{label} [INFO] {path} was already unreadable before the CLI call; left as is")
             continue
         if not os.path.lexists(path) or file_ok(path, valid, refuse):
             continue
@@ -496,8 +497,14 @@ def restore_torn(snap, args):
                 outcome = "removed it"
         except OSError as exc:
             outcome = f"could not restore it: {exc}"
-        print(f"{label} [X] claude {' '.join(args)} left {path} unreadable; {outcome}")
+        report.append(f"{label} [X] claude {' '.join(args)} left {path} unreadable; {outcome}")
         torn = True
+    # Restore every file before printing: a dead stdout must not stop the loop.
+    try:
+        for line in report:
+            print(line)
+    except OSError:
+        pass
     return torn
 
 
