@@ -393,24 +393,53 @@ class TodosLink(unittest.TestCase):
 
 
     def test_todos_link_refused_by_identity_not_spelling(self):
-        firmlink = Path("/System/Volumes/Data" + str(self.tmp))
-        refused, accepted = [], []
+        main = self.tmp / "main"
+        for d in (self.top, main, self.tmp):
+            (d / "pending").mkdir(parents=True, exist_ok=True)
+            (d / "pending" / "x.md").write_text("# X\nbody")
+        git_why = "inside a .git directory"
+        repo_why = "inside the repository"
+        root_why = "the repository or an ancestor of it"
+        rows = []
         if (self.tmp / "REPO").exists():
-            refused += [self.tmp / "REPO" / ".GIT", self.tmp / "REPO"]
-            accepted.append(self.tmp / "STORE")
+            upper_root = self.tmp.parent / self.tmp.name.upper()
+            rows += [
+                ("git-case", self.tmp / "REPO" / ".GIT", git_why),
+                ("repo-case", self.tmp / "REPO", repo_why),
+                ("main-case", self.tmp / "MAIN", root_why),
+                ("ancestor-case", upper_root, root_why),
+                ("store-case", self.tmp / "STORE", None),
+            ]
+        firmlink = Path("/System/Volumes/Data" + str(self.tmp))
         if firmlink.is_dir():
-            refused += [firmlink / "repo" / ".git", firmlink / "repo"]
-            accepted.append(firmlink / "store")
-        if not refused:
+            rows += [
+                ("git-firmlink", firmlink / "repo" / ".git", git_why),
+                ("repo-firmlink", firmlink / "repo", repo_why),
+                ("main-firmlink", firmlink / "main", root_why),
+                ("ancestor-firmlink", firmlink, root_why),
+                ("store-firmlink", firmlink / "store", None),
+            ]
+        if not rows:
             self.skipTest("no case-insensitive or firmlink spelling on this host")
-        for target in refused + accepted:
-            with self.subTest(target=str(target)):
+        for case, target, reason in rows:
+            with self.subTest(case=case):
                 link = self.top / ".todos"
                 if link.is_symlink():
                     link.unlink()
                 self.link(target)
-                want = [".todos/pending/t.md"] if target in accepted else []
-                self.assertEqual(list(self.todos()), want)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    sources = recall.collect_sources(
+                        self.top, main, self.cfg, self.env, quiet=False
+                    )
+                got = [s.display for s in sources if s.kind == "todos"]
+                if reason is None:
+                    self.assertEqual(got, [".todos/pending/t.md"])
+                    self.assertEqual(err.getvalue(), "")
+                else:
+                    self.assertEqual(got, [])
+                    self.assertEqual(err.getvalue().count(".todos symlink refused"), 1)
+                    self.assertIn(reason, err.getvalue())
 
     def test_symlinked_todos_subdir_never_listed(self):
         (self.store / "pending" / "t.md").unlink()
