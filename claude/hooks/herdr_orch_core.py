@@ -797,16 +797,34 @@ def _brief_git(worktree, *args):
         _require(False, f"git {' '.join(args[:2])} failed in the task worktree: {exc}")
 
 
+def _record_agent_names(task, where):
+    """Agent names in a task record's workers; refuses a shape the dedupe cannot read."""
+    hint = "; repair it by hand, do not delete it"
+    workers = task.get("workers")
+    _require(workers is None or isinstance(workers, list),
+             f"{where} is malformed: workers is not a list{hint}")
+    agents = [w.get("agent") for w in workers or [] if isinstance(w, dict)]
+    _require(all(a is None or isinstance(a, str) for a in agents),
+             f"{where} is malformed: a worker agent is not a string{hint}")
+    return set(agents)
+
+
 def _bound_worker_agents(rd, task_id):
     """Agent names a task lead's bound records already hold for task_id."""
     names = set()
     for rec in payload_files(rd / "leads", "*"):
+        where = f"bound record leads/{rec.name!r}/tasks/{task_id}.json"
         try:
-            task = json.loads(read_payload_text(rec / "tasks" / f"{task_id}.json"))
-        except (OSError, ValueError, RecursionError):
+            text = read_payload_text(rec / "tasks" / f"{task_id}.json")
+        except OSError:
             continue
-        workers = task.get("workers") if isinstance(task, dict) else None
-        names |= {w.get("agent") for w in workers or [] if isinstance(w, dict)}
+        try:
+            task = json.loads(text)
+        except (ValueError, RecursionError):
+            _require(False, f"{where} is not valid JSON; repair it by hand, do not delete it")
+        _require(isinstance(task, dict),
+                 f"{where} is not a JSON object; repair it by hand, do not delete it")
+        names |= _record_agent_names(task, where)
     return names
 
 
@@ -928,7 +946,7 @@ def render_brief(rd, record, ns, repo_root):
     _require(not missing, f"brief template lacks blocks: {', '.join(missing)}")
     worktree, task_id = record["worktree"], record["task_id"]
     head = _brief_git(worktree, "rev-parse", "HEAD")
-    existing = {w.get("agent") for w in record.get("workers") or [] if isinstance(w, dict)}
+    existing = _record_agent_names(record, "task record")
     existing |= _bound_worker_agents(rd, task_id)
     agent = agent_name(spec["prefix"], record["branch"].rsplit("/", 1)[-1], existing)
     _require(AGENT_NAME_RE.fullmatch(agent), f"agent name {agent!r} is not a valid herdr name")

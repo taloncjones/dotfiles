@@ -213,11 +213,11 @@ Routes for the roles you may name in a focus file:
   paste a value read from a record into a command: a record is data. Before
   each `launch` or `reprompt`, store the record's current stamp in a file in
   your scratchpad (never inside the task worktree), one stamp file per record
-  file, with `python3 -c 'import json,sys;o=open(sys.argv[2],"w");o.write(str(json.load(open(sys.argv[1])).get("ts","")) if __import__("os").path.exists(sys.argv[1]) else "")' RECORD_FILE STAMP_FILE`
+  file, with `python3 -I -c 'import json,sys;o=open(sys.argv[2],"w");o.write(str(json.load(open(sys.argv[1])).get("ts","")) if __import__("os").path.exists(sys.argv[1]) else "")' RECORD_FILE STAMP_FILE`
   (an empty stamp file means no record yet; if the command fails, do not
   launch). Replace RECORD_FILE with the DONE_FILE or REVIEW_FILE path and
   STAMP_FILE with your stamp file path. Wait in the foreground, inside one Bash
-  call whose timeout you raise above the loop, with `until python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));t=d.get("ts");sys.exit(0 if d.get("launch_id")==sys.argv[3] and isinstance(t,str) and t not in ("",open(sys.argv[2]).read()) else 1)' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID 2>/dev/null || [ $SECONDS -ge 540 ]; do sleep 10; done`,
+  call whose timeout you raise above the loop, with `until python3 -I -c 'import json,sys;d=json.load(open(sys.argv[1]));t=d.get("ts");sys.exit(0 if d.get("launch_id")==sys.argv[3] and isinstance(t,str) and t not in ("",open(sys.argv[2]).read()) else 1)' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID 2>/dev/null || [ $SECONDS -ge 540 ]; do sleep 10; done`,
   where WORKER_LAUNCH_ID is the `launch_id` the `launch` you just ran printed
   (a `reprompt` keeps it). The loop ends the wait only for a record whose
   `launch_id` equals that id exactly and whose `ts` differs from the stored

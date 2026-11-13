@@ -13526,6 +13526,89 @@ out, brief = rendered("--phase", "implement", "--focus-file", focus)
 assert focus_text in brief
 PY
 
+check "render-brief: a bound record with a non-list workers or a non-string agent refuses with one [X] line" <<'PY'
+import os, json
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+tasks = os.path.join(rd, "tasks")
+first, _ = rendered("--phase", "implement")
+seeded = first["brief_path"]
+bound = os.path.join(rd, "leads", "B1", "tasks"); os.makedirs(bound)
+bf = os.path.join(bound, "td-render-x.json")
+row = {"agent": first["agent"], "phase": "implement"}
+for label, body in (("workers int", {"task_id": "td-render-x", "workers": 5}),
+                    ("agent list", {"task_id": "td-render-x", "workers": [dict(row, agent=["x"])]}),
+                    ("agent dict", {"task_id": "td-render-x", "workers": [dict(row, agent={"a": 1})]}),
+                    ("agent number", {"task_id": "td-render-x", "workers": [dict(row, agent=7)]})):
+    open(bf, "w").write(json.dumps(body))
+    open(seeded, "w").write("SEEDED-BRIEF\n")
+    before = {n: open(os.path.join(tasks, n), "rb").read() for n in sorted(os.listdir(tasks))}
+    p = render("--phase", "implement")
+    lines = p.stderr.splitlines()
+    assert p.returncode == 2, (label, p.returncode, p.stderr)
+    assert len(lines) == 1 and lines[0].startswith("[X] ") and "B1" in lines[0], (label, p.stderr)
+    assert "Traceback" not in p.stderr and p.stdout == "", (label, p.stdout, p.stderr)
+    assert {n: open(os.path.join(tasks, n), "rb").read() for n in sorted(os.listdir(tasks))} == before, label
+PY
+
+check "render-brief: an unparseable or non-object bound record refuses, and tolerated rows still render" <<'PY'
+import os, json
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+first, _ = rendered("--phase", "implement")
+os.remove(first["brief_path"])
+bound = os.path.join(rd, "leads", "B1", "tasks"); os.makedirs(bound)
+bf = os.path.join(bound, "td-render-x.json")
+for label, text in (("unparseable", "{"), ("not an object", json.dumps([{"agent": "x"}]))):
+    open(bf, "w").write(text)
+    p = render("--phase", "implement")
+    lines = p.stderr.splitlines()
+    assert p.returncode == 2, (label, p.returncode, p.stderr)
+    assert len(lines) == 1 and lines[0].startswith("[X] ") and "B1" in lines[0], (label, p.stderr)
+    assert "Traceback" not in p.stderr, label
+open(bf, "w").write(json.dumps({"task_id": "td-render-x",
+                                "workers": [7, {"phase": "plan"}, {"agent": None}, {"agent": first["agent"]}]}))
+second, _ = rendered("--phase", "implement")
+assert second["agent"] != first["agent"], (first, second)
+PY
+
+check "render-brief: a task record with a non-list workers or a non-string agent refuses" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+for label, bad in (("workers int", dict(record, workers=5)),
+                   ("agent list", dict(record, workers=[{"agent": ["x"], "phase": "implement"}]))):
+    put(bad)
+    p = render("--phase", "implement")
+    lines = p.stderr.splitlines()
+    assert p.returncode == 2, (label, p.returncode, p.stderr)
+    assert len(lines) == 1 and lines[0].startswith("[X] ") and "task record" in lines[0], (label, p.stderr)
+    assert "Traceback" not in p.stderr, label
+PY
+
+check "render-brief: lead stamp and wait snippets ignore a json.py in the cwd" <<'PY'
+import os, re, json, subprocess, tempfile
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+blocks = c.brief_blocks(open("claude/skills/herdr-orchestration/references/brief-template.md").read())
+bare = sorted(n for n, t in blocks.items() if re.search(r"python3\s+-c\b", t))
+assert not bare, bare
+_, brief = rendered("--phase", "lead")
+flat = " ".join(brief.split())
+capture = re.search(r"store the record's current stamp in a file .*? with `(python3 (?:-I )?-c '.*?' RECORD_FILE STAMP_FILE)`", flat).group(1)
+until = re.search(r"`(until python3 (?:-I )?-c '.*?' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID .*?; done)`", flat).group(1)
+until = until.replace("540", "3").replace("sleep 10", "sleep 0.3")
+cwd = tempfile.mkdtemp()
+open(os.path.join(cwd, "json.py"), "w").write("raise SystemExit(7)\n")
+d = tempfile.mkdtemp()
+f, st = os.path.join(d, "t.done.json"), os.path.join(d, "t.stamp")
+def write(rec):
+    open(f, "w").write(json.dumps(rec) + "\n")
+write({"launch_id": "L1", "ts": "2026-11-02T10:00:00Z"})
+subprocess.run(["bash", "-c", capture.replace("RECORD_FILE", f).replace("STAMP_FILE", st)], cwd=cwd, check=True)
+assert open(st).read() == "2026-11-02T10:00:00Z", "stamp not captured"
+write({"launch_id": "L1", "ts": "2026-11-02T10:05:00Z"})
+script = "SECONDS=0\n" + until.replace("RECORD_FILE", f).replace("STAMP_FILE", st).replace("WORKER_LAUNCH_ID", "L1") + "\necho $SECONDS\n"
+out = subprocess.run(["bash", "-c", script], cwd=cwd, capture_output=True, text=True, timeout=30).stdout
+assert int(out.strip()) == 0, "wait did not match under a shadowing json.py"
+PY
+
 check "render-brief: repair and review briefs name the findings, artifacts and emit phase" <<'PY'
 import os
 exec(open(os.environ["BRIEF_FIXTURE"]).read())
@@ -13654,8 +13737,8 @@ import os, re, subprocess, tempfile, json
 exec(open(os.environ["BRIEF_FIXTURE"]).read())
 _, brief = rendered("--phase", "lead")
 flat = " ".join(brief.split())
-capture = re.search(r"store the record's current stamp in a file .*? with `(python3 -c '.*?' RECORD_FILE STAMP_FILE)`", flat).group(1)
-until = re.search(r"`(until python3 -c '.*?' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID .*?; done)`", flat).group(1)
+capture = re.search(r"store the record's current stamp in a file .*? with `(python3 -I -c '.*?' RECORD_FILE STAMP_FILE)`", flat).group(1)
+until = re.search(r"`(until python3 -I -c '.*?' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID .*?; done)`", flat).group(1)
 until = until.replace("540", "2").replace("sleep 10", "sleep 0.3")
 def write(f, rec):
     open(f, "w").write(json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n")
