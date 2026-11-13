@@ -1295,20 +1295,25 @@ printf '{"version": 2, "plugins": {}}\n' >"$DEADCFG/plugins/installed_plugins.js
 printf '{"a": 1}\n' >"$DEADCFG/settings.json"
 cp "$DEADCFG/plugins/installed_plugins.json" "$TMP/deadout.registry"
 cp "$DEADCFG/settings.json" "$TMP/deadout.settings"
-DEAD_FUNCS="$(declare -p RETIRED_CLAUDE_PLUGINS_JSON CLAUDE_REGISTRY_RULE_PY; declare -f)"
+DEAD_RCFILE="$TMP/deadout.rc"
+: >"$TMP/sweep-trace"
 PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=tearboth HOME="$TMP/sweep-home" \
-    PYTHONUNBUFFERED=1 DEAD_FUNCS="$DEAD_FUNCS" DEADCFG="$DEADCFG" python3 -c '
+    PYTHONUNBUFFERED=1 DEADLINKS="$LINKS" DEADCFG="$DEADCFG" DEAD_RCFILE="$DEAD_RCFILE" python3 -c '
 import os, pty
 m, w = pty.openpty()
 os.close(m)
 os.dup2(w, 1)
-os.execvp("bash", ["bash", "-c", os.environ["DEAD_FUNCS"] + "\nsweep_retired_claude_plugins \"$DEADCFG\" \"[test]\""])
+script = ". \"$DEADLINKS\"; sweep_retired_claude_plugins \"$DEADCFG\" \"[test]\"; echo $? >\"$DEAD_RCFILE\""
+os.execvp("bash", ["bash", "-c", script])
 ' >/dev/null 2>&1
-if cmp -s "$DEADCFG/plugins/installed_plugins.json" "$TMP/deadout.registry" &&
+dead_rc=$(cat "$DEAD_RCFILE" 2>/dev/null)
+if [ "$dead_rc" = 1 ] &&
+   grep -q 'marketplace remove' "$TMP/sweep-trace" &&
+   cmp -s "$DEADCFG/plugins/installed_plugins.json" "$TMP/deadout.registry" &&
    cmp -s "$DEADCFG/settings.json" "$TMP/deadout.settings"; then
     pass "a dead terminal cannot stop the sweep restoring every torn guarded file"
 else
-    fail "a dead terminal cannot stop the sweep restoring every torn guarded file"
+    fail "a dead terminal cannot stop the sweep restoring every torn guarded file (rc=${dead_rc:-none})"
 fi
 
 # Malformed test overrides are refused before the CLI starts.
