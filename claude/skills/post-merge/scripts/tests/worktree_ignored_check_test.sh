@@ -282,6 +282,14 @@ for caller in "Step 3|claude/skills/post-merge/SKILL.md" "/done|claude/commands/
     mkdir -p "$D/home/.claude/skills"
     ln -s "$SKILL" "$D/home/.claude/skills/post-merge"
     awk '/^if \[ ! -d /{on=1} on{print} on&&/^fi$/{exit}' "$REPO/$src" > "$D/block.tmpl"
+    if grep -q 'git worktree prune' "$D/block.tmpl" && grep -q 'worktree_ignored_check.py' "$D/block.tmpl"; then
+        block=found
+    else
+        block=missing
+    fi
+    expect "$label: removal block extracted from $src" "$block" found
+    # An empty block deletes nothing, so report the value only when the block was extracted.
+    outcome() { if [ "$block" = found ]; then printf '%s' "$1"; else printf 'no block'; fi; }
 
     run_block() {
         sed "s|<wt>|$1|g; s|<path>|$1|g; s|<skill dir>|$SKILL|g" "$D/block.tmpl" > "$D/block.sh"
@@ -298,16 +306,16 @@ for caller in "Step 3|claude/skills/post-merge/SKILL.md" "/done|claude/commands/
     run_block "$D/gone"
     list=$(git -C "$D/m" worktree list --porcelain)
     case "$list" in *"worktree $D/gone"*) s=registered ;; *) s=pruned ;; esac
-    expect "$label: missing directory prunes the registration" "$s" pruned
+    expect "$label: missing directory prunes the registration" "$(outcome "$s")" pruned
     if [ "$label" != "Step 3" ]; then
         case "$list" in *"worktree $D/lk"*) s=listed ;; *) s=dropped ;; esac
-        expect "$label: locked missing registration is kept" "$s" listed
+        expect "$label: locked missing registration is kept" "$(outcome "$s")" listed
     fi
 
-    mkdir -p "$D/w/docs/superpowers"
-    echo spec > "$D/w/docs/superpowers/spec.md"
+    mkdir -p "$D/w/docs/superpowers/node_modules"
+    echo spec > "$D/w/docs/superpowers/node_modules/design.md"
     run_block "$D/w"
-    expect "$label: at-risk worktree is kept" "$([ -f "$D/w/docs/superpowers/spec.md" ] && echo kept || echo gone)" kept
+    expect "$label: at-risk worktree is kept" "$(outcome "$([ -f "$D/w/docs/superpowers/node_modules/design.md" ] && echo kept || echo gone)")" kept
 done
 
 # 22. Summary line on stderr names the count and the worktree
