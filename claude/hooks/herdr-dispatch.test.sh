@@ -500,6 +500,10 @@ elif args[:2] == ["pane", "report-metadata"]:
         raise SystemExit(1)
     # Mutation success is established by the exit status; no result body is required.
 elif args[:2] == ["agent", "list"]:
+    if mode == "agent-list-fail":
+        print('{"error":{"code":"internal","message":"agent list failed"},"id":"cli:agent:list"}',
+              file=sys.stderr)
+        raise SystemExit(1)
     agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
     # Reported only by `agent list`, so other handlers never parse them.
     agents = agents + json.loads(os.environ.get("FAKE_AGENT_LIST_EXTRA", "[]"))
@@ -1295,6 +1299,211 @@ def pane(pane_id, agent=None, status="unknown", launch_id=None):
     tokens = {"launch_id": launch_id} if launch_id else None
     return {"pane_id": pane_id, "workspace_id": "w1", "agent": agent,
             "agent_status": status, "tokens": tokens}
+
+
+def live_review_state(fx, review_record=None, agents="listed", retired=None):
+    head = core.repository_context(fx.repo)["head"]
+    impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+    fx.settle_state([impl, rev], "in-progress", [], [])
+    fx.env.pop("FAKE_AGENT_GET_FROM_LIST")
+    if agents == "listed":
+        Path(fx.env["FAKE_AGENTS"]).write_text(json.dumps(
+            [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}]))
+    if review_record is not None:
+        (fx.rd / "tasks" / "td-a.review.json").write_text(review_record)
+    if retired is not None:
+        task = json.loads(fx.task_file.read_text())
+        task["retired_review_launch_ids"] = retired
+        fx.task_file.write_text(json.dumps(task))
+    return fx.task_file.read_bytes()
+
+
+def launch_phase(fx, phase, agent):
+    return herdr_dispatch.launch(
+        repo_slug=fx.slug, task_id="td-a", session="S", fence=1, workspace_id="w1",
+        pane_id="w1:p1", phase=phase, agent=agent, route=codex_route(), cwd=fx.repo,
+        sandbox="workspace-write", prompt="brief", herdr_cli=str(fx.bin), env=fx.env,
+        start_timeout_ms=4000, prompt_timeout_ms=1000)
+
+
+def agent_list_calls(fx):
+    return [c for c in fx.calls() if c[:2] == ["agent", "list"]]
+
+
+def test_launch_refuses_implement_while_the_latest_review_is_live_without_a_verdict():
+    fx = Fixture()
+    try:
+        before = live_review_state(fx)
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert "R" in str(exc) and "still live with no verdict" in str(exc), exc
+            assert "retired_review_launch_ids" in str(exc), exc
+        else:
+            raise AssertionError("implement launch superseded a live review")
+        assert fx.task_file.read_bytes() == before
+        assert [c[:2] for c in fx.calls()] == [["agent", "list"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_every_superseding_phase_while_the_latest_review_is_live_without_a_verdict():
+    for phase in ("plan", "think", "read", "mechanical"):
+        fx = Fixture()
+        try:
+            before = live_review_state(fx)
+            expect_dispatch_error(lambda: launch_phase(fx, phase, "impl-td-a"), "still live with no verdict")
+            assert fx.task_file.read_bytes() == before
+            assert [c[:2] for c in fx.calls()] == [["agent", "list"]], (phase, fx.calls())
+        finally:
+            fx.close()
+
+
+def test_launch_proceeds_for_implement_once_the_latest_review_has_a_verdict():
+    fx = Fixture()
+    try:
+        live_review_state(fx, review_record=json.dumps(
+            {"launch_id": "R", "outcome": "changes-requested"}))
+        assert fx.launch()["status"] == "launched"
+        assert agent_list_calls(fx) == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_launch_proceeds_for_implement_when_the_live_review_launch_is_retired():
+    fx = Fixture()
+    try:
+        live_review_state(fx, retired=["R"])
+        assert fx.launch()["status"] == "launched"
+    finally:
+        fx.close()
+
+
+def test_launch_proceeds_for_implement_when_the_reviewer_agent_is_gone():
+    fx = Fixture()
+    try:
+        live_review_state(fx, agents="gone")
+        assert fx.launch()["status"] == "launched"
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_implement_when_herdr_agent_liveness_is_unreadable():
+    fx = Fixture()
+    try:
+        before = live_review_state(fx)
+        fx.env["FAKE_HERDR_MODE"] = "agent-list-fail"
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert "R" in str(exc) and "cannot read herdr agent liveness" in str(exc), exc
+        else:
+            raise AssertionError("launch proceeded with unreadable liveness")
+        assert fx.task_file.read_bytes() == before
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_implement_when_the_agent_list_has_a_malformed_member():
+    fx = Fixture()
+    try:
+        before = live_review_state(fx, agents="gone")
+        fx.env["FAKE_AGENT_LIST_EXTRA"] = '[{"name": "x"}]'
+        expect_dispatch_error(lambda: fx.launch(), "cannot read herdr agent liveness")
+        assert fx.task_file.read_bytes() == before
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_implement_when_the_review_record_is_unreadable():
+    fx = Fixture()
+    try:
+        before = live_review_state(fx, review_record="{not json")
+        expect_dispatch_error(lambda: fx.launch(), "unreadable")
+        assert fx.task_file.read_bytes() == before
+        assert agent_list_calls(fx) == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_launch_proceeds_for_a_retired_review_whose_review_record_is_unreadable():
+    fx = Fixture()
+    try:
+        live_review_state(fx, review_record="{not json", retired=["R"])
+        assert fx.launch()["status"] == "launched"
+    finally:
+        fx.close()
+
+
+def test_launch_proceeds_for_implement_when_a_later_row_already_superseded_the_review():
+    fx = Fixture()
+    try:
+        live_review_state(fx)
+        head = core.repository_context(fx.repo)["head"]
+        task = json.loads(fx.task_file.read_text())
+        task["workers"].append(settle_row("implement", "I2", "w1:p3", head))
+        fx.task_file.write_text(json.dumps(task))
+        assert fx.launch()["status"] == "launched"
+        assert agent_list_calls(fx) == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_launch_proceeds_for_a_review_relaunch_while_the_prior_review_is_live():
+    fx = Fixture()
+    try:
+        live_review_state(fx)
+        fx.env["FAKE_AGENT"] = "rev-td-a"
+        assert launch_phase(fx, "review", "rev-td-a")["status"] == "launched"
+        assert agent_list_calls(fx) == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def bound_live_review(fx):
+    head = fx.lead_context["head"]
+    review = dict(settle_row("review", "R", "w1:p2", head), review_base_sha=head)
+    fx.write_bound_task(bound_task_record(
+        fx, fx.lead_context,
+        workers=[settle_row("implement", "I", "w1:p1", head), review]))
+    Path(fx.env["FAKE_AGENTS"]).write_text(json.dumps(
+        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}]))
+    return fx.bound_task_file.read_bytes()
+
+
+def test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_verdict():
+    fx = LeadFixture()
+    try:
+        before = bound_live_review(fx)
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert "still live with no verdict" in str(exc), exc
+            assert "/exit" in str(exc), exc
+            assert "retired_review_launch_ids" not in str(exc), exc
+        else:
+            raise AssertionError("bound implement launch superseded a live review")
+        assert fx.bound_task_file.read_bytes() == before
+    finally:
+        fx.close()
+
+
+def test_bound_launch_names_list_repair_when_herdr_agent_liveness_is_unreadable():
+    fx = LeadFixture()
+    try:
+        before = bound_live_review(fx)
+        fx.env["FAKE_AGENT_LIST_EXTRA"] = '[{"name": "x"}]'
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            for text in ("cannot read herdr agent liveness", "well-formed", "does not clear"):
+                assert text in str(exc), (text, exc)
+            assert "retired_review_launch_ids" not in str(exc), exc
+        else:
+            raise AssertionError("bound launch proceeded with a malformed agent list")
+        assert fx.bound_task_file.read_bytes() == before
+    finally:
+        fx.close()
 
 
 def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
@@ -7499,6 +7708,19 @@ for name, test in (
     ("close-idle keeps a workspace whose pane list is empty", test_close_idle_keeps_a_workspace_whose_pane_list_is_empty),
     ("close-idle keeps a workspace whose only pane rows belong elsewhere", test_close_idle_keeps_a_workspace_whose_only_pane_rows_belong_elsewhere),
     ("close-idle keeps a workspace with an agent row missing its workspace id", test_close_idle_keeps_a_workspace_with_an_agent_row_missing_its_workspace_id),
+    ("launch refuses implement while the latest review is live without a verdict", test_launch_refuses_implement_while_the_latest_review_is_live_without_a_verdict),
+    ("launch refuses every superseding phase while the latest review is live without a verdict", test_launch_refuses_every_superseding_phase_while_the_latest_review_is_live_without_a_verdict),
+    ("launch proceeds for implement once the latest review has a verdict", test_launch_proceeds_for_implement_once_the_latest_review_has_a_verdict),
+    ("launch proceeds for implement when the live review launch is retired", test_launch_proceeds_for_implement_when_the_live_review_launch_is_retired),
+    ("launch proceeds for implement when the reviewer agent is gone", test_launch_proceeds_for_implement_when_the_reviewer_agent_is_gone),
+    ("launch refuses implement when herdr agent liveness is unreadable", test_launch_refuses_implement_when_herdr_agent_liveness_is_unreadable),
+    ("launch refuses implement when the agent list has a malformed member", test_launch_refuses_implement_when_the_agent_list_has_a_malformed_member),
+    ("launch refuses implement when the review record is unreadable", test_launch_refuses_implement_when_the_review_record_is_unreadable),
+    ("launch proceeds for a retired review whose review record is unreadable", test_launch_proceeds_for_a_retired_review_whose_review_record_is_unreadable),
+    ("launch proceeds for implement when a later row already superseded the review", test_launch_proceeds_for_implement_when_a_later_row_already_superseded_the_review),
+    ("launch proceeds for a review relaunch while the prior review is live", test_launch_proceeds_for_a_review_relaunch_while_the_prior_review_is_live),
+    ("bound launch refuses implement while the lead review is live without a verdict", test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_verdict),
+    ("bound launch names list repair when herdr agent liveness is unreadable", test_bound_launch_names_list_repair_when_herdr_agent_liveness_is_unreadable),
 ):
     check(name, test)
 

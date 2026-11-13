@@ -788,6 +788,44 @@ def _task_label_result(rd, task_id, herdr_cli, env):
                 "reason": (str(exc) or type(exc).__name__)[:200]}
 
 
+def _refuse_superseding_live_review(base, task, task_id, phase, bound, herdr_cli, env):
+    """Refuse a launch whose new row would supersede a live, verdict-less review."""
+    if phase == "review" or phase in core.TRAILING_PHASES["review"]:
+        return
+    row = core.latest_native_attempt(task, "review")
+    if row is None or not isinstance(row.get("agent"), str) or not row["agent"]:
+        return
+    if not core.attempt_matches(task, row, "review", row["workspace_id"]):
+        return
+    launch_id = row["launch_id"]
+    if core.review_retired(task, {"launch_id": launch_id}):
+        return
+    review = _sidecar(base, task_id, ".review.json")
+    if isinstance(review, dict) and review.get("launch_id") == launch_id:
+        return
+    hatch = (
+        f"stop it (herdr agent prompt {row['agent']} /exit, then herdr pane close "
+        f"{row['pane_id']} if it stays listed)" if bound else
+        f"retire it (append {launch_id} to retired_review_launch_ids with write-task)")
+    try:
+        agents = _agents_snapshot(herdr_cli, env)
+        if any(_malformed_agent(a) for a in agents):
+            raise DispatchError("malformed agent list member")
+    except DispatchError as exc:
+        repair = ("Restore a readable, well-formed herdr agent list and launch again; "
+                  "stopping the reviewer does not clear this" if bound else
+                  f"Restore a readable, well-formed herdr agent list and launch again, or {hatch}")
+        raise DispatchError(
+            f"cannot read herdr agent liveness for review {launch_id} "
+            f"({str(exc)[:200]}); a {phase} launch would supersede it. {repair}") from exc
+    if any(a.get("name") == row["agent"] and a.get("pane_id") == row["pane_id"]
+           for a in agents):
+        raise DispatchError(
+            f"review {launch_id} is still live with no verdict; a {phase} launch would "
+            f"supersede it and its emit-review would be refused. Wait for its verdict, "
+            f"or {hatch} and launch again")
+
+
 def launch(
     *,
     repo_slug: str,
@@ -882,6 +920,8 @@ def launch(
         todos_cli = (
             Path(__file__).resolve().parents[1] / "skills/todos/scripts/todos.sh"
         )
+    _refuse_superseding_live_review(
+        base, pending_task, task_id, phase, binding is not None, herdr_cli, child_env)
     _check_todo_ready(pending_task, repository["root"], todos_cli, child_env)
     if binding is None:
         records = _LauncherRecords(

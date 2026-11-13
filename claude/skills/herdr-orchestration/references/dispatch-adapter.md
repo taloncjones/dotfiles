@@ -110,6 +110,15 @@ or chooses a different account for the caller.
   adapter's launch and reprompt calls only. The `/exit` interrupt above wants
   the DEFAULT predicate -- it is waiting for the agent to leave -- so never add
   `--until working` to it.
+- `launch` refuses any phase except `review` and `ship` while the latest
+  review row is current, unretired, has no matching `review.json`, and its
+  agent is listed by `herdr agent list`: the new row would supersede the
+  review and its `emit-review` would be refused. The check fails closed when
+  the agent list or the review record cannot be read. Launcher scope clears
+  it by appending the review launch id to `retired_review_launch_ids` with
+  `write-task`. Lead scope stops the reviewer (`herdr agent prompt <agent>
+  /exit`, then `herdr pane close <pane>` if it stays listed); stopping does
+  not clear an unreadable agent list.
 - A prompt-wait timeout is not itself a launch failure. The adapter re-polls
   `agent get` once before classifying: a `working` or `done` agent records
   `launched` with `prompt_wait: late-ready` and `prompt_wait_cause` holding the
