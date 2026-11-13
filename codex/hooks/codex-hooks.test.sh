@@ -202,6 +202,60 @@ assert_allows "rm guard ignores malformed shell input" \
     claude/hooks/rm_guard.py \
     '{"tool_name":"exec_command","tool_input":{"args":[]}}'
 
+# zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
+# reach Codex through its payload shapes. Warn-only: always exit 0.
+assert_rm_guard_warns() {
+    label="$1"
+    payload="$2"
+    needle="$3"
+    out=$(printf '%s' "$payload" | python3 claude/hooks/rm_guard.py 2>/dev/null)
+    hook_status=$?
+    case "$out" in
+        *"$needle"*) found=1 ;;
+        *) found=0 ;;
+    esac
+    if [ "$hook_status" -eq 0 ] && [ "$found" -eq 1 ]; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (status=%s out=%s)\n' "$label" "$hook_status" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+assert_rm_guard_silent() {
+    label="$1"
+    payload="$2"
+    out=$(printf '%s' "$payload" | python3 claude/hooks/rm_guard.py 2>/dev/null)
+    hook_status=$?
+    if [ "$hook_status" -eq 0 ] && [ -z "$out" ]; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (status=%s out=%s)\n' "$label" "$hook_status" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+assert_rm_guard_warns "rm guard warns on an unquoted for list scalar" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"prs=\"1 2\"; for n in $prs; do gh pr view $n; done"}}' \
+    'zsh does not word-split an unquoted $prs'
+assert_rm_guard_warns "rm guard warns on an unquoted gh argument scalar" \
+    '{"tool_name":"unified_exec","tool_input":{"args":{"cmd":"args=\"--title x\"; gh pr edit 5 $args"}}}' \
+    'zsh does not word-split an unquoted $args'
+assert_rm_guard_warns "rm guard warns on a stored command prefix" \
+    '{"toolName":"shell_command","toolInput":{"command":"CMD=\"git -C /tmp\"; $CMD --flag"}}' \
+    '$CMD holds several words'
+assert_rm_guard_warns "rm guard warns on a stored env flag list" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"ENVU=\"-u A -u B\"; env $ENVU python3 x.py"}}' \
+    '$ENVU holds several words'
+assert_rm_guard_silent "rm guard stays silent on literal env flags" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"env -u A python3 x.py"}}'
+assert_rm_guard_silent "rm guard stays silent on a quoted scalar" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"VAR=\"a b\"; gh pr edit 5 \"$VAR\""}}'
+assert_rm_guard_silent "rm guard stays silent on an explicit split scalar" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"var=\"a b\"; git log ${=var}"}}'
+assert_rm_guard_silent "rm guard stays silent on an array expansion" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"arr=(a b); gh pr edit 5 \"${arr[@]}\""}}'
+
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must
 # never be a real checkout, or the temp-root exemption could flip the deny);

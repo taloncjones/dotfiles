@@ -860,6 +860,55 @@ rmg_silent "kill check skips pkill" "$(rmg_json_payload 'pat="busy loop"; pkill 
 rmg_silent "kill check skips a multi-word variable outside kill" "$(rmg_json_payload 'pids="1 2"; echo $pids')"
 rmg_silent "kill inside bash -c" "$(rmg_json_payload "bash -c 'p=\"1 2\"; kill \$p'")"
 
+rmg_wu() { printf '[WARNING] rm_guard: zsh does not word-split an unquoted $%s, so it reaches the command as one word and a for loop over it runs once; write "$%s" if one word is meant, or split it with an array (%s=(a b), then "${%s[@]}"), ${=%s}, literal words, or a bash heredoc.' "$1" "$1" "$1" "$1" "$1"; }
+NL='
+'
+
+rmg_warns "unsplit for list" "$(rmg_json_payload 'prs="1 2"; for n in $prs; do gh pr view $n; done')" "$(rmg_wu prs)"
+rmg_warns "unsplit gh argument" "$(rmg_json_payload 'args="--title x --body y"; gh pr edit 5 $args')" "$(rmg_wu args)"
+rmg_warns "unsplit git, uv and python3 arguments warn once" "$(rmg_json_payload 'F="-v -x"; git log $F; uv run $F; python3 $F x.py')" "$(rmg_wu F)"
+rmg_warns "unsplit for list over a command substitution" "$(rmg_json_payload 'prs=$(gh pr list -q .[].number); for n in $prs; do echo $n; done')" "$(rmg_wu prs)"
+rmg_warns "unsplit for list over a multiline command substitution" "$(rmg_json_payload "prs=\$(${NL}gh pr list -q .[].number${NL})${NL}for n in \$prs; do echo \$n; done")" "$(rmg_wu prs)"
+rmg_warns "unsplit braced reference to a += value" "$(rmg_json_payload 'prs+=" 3"; gh pr view ${prs}')" "$(rmg_wu prs)"
+rmg_warns "unsplit argument after a line continuation" "$(rmg_json_payload "v=\"a b\"; gh pr edit 5 \\${NL}  \$v")" "$(rmg_wu v)"
+rmg_warns "unsplit argument behind sudo" "$(rmg_json_payload 'files="a.py b.py"; sudo ruff check $files')" "$(rmg_wu files)"
+rmg_warns "unsplit line follows the kill line" "$(rmg_json_payload 'pids="1 2"; kill $pids; v="a b"; git log $v')" "$(rmg_wk pids)
+$(rmg_wu v)"
+rmg_warns "unsplit via Codex payload shape" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"prs=\"1 2\"; for n in $prs; do :; done","workdir":"/Users/rmg-test-user/proj"}}' "$(rmg_wu prs)"
+rmg_warns 'unsplit $CMD --flag keeps the W1 text' "$(rmg_json_payload 'CMD="git -C /tmp"; $CMD --flag')" "$(rmg_w1 CMD)"
+rmg_warns "unsplit name reported by kill warns once" "$(rmg_json_payload 'pids="1 2"; kill $pids; wait $pids')" "$(rmg_wk pids)"
+rmg_warns "unsplit name reported by W1 warns once" "$(rmg_json_payload 'E="env -u A"; $E true; printf %s $E')" "$(rmg_w1 E)"
+
+rmg_warns "kill of a multiline command substitution" "$(rmg_json_payload "pids=\$(${NL}pgrep -f worker${NL})${NL}kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "kill of a += accumulation" "$(rmg_json_payload 'for i in 1 2; do sleep 9 & pids+=" $!"; done; kill $pids')" "$(rmg_wk pids)"
+
+rmg_warns "heredoc marker inside quotes keeps later lines" "$(rmg_json_payload "printf \"%s\" \"<<EOF\"${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "heredoc marker inside a comment keeps later lines" "$(rmg_json_payload "# <<EOF${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "heredoc here-string keeps later lines" "$(rmg_json_payload "cat <<< \"x\"${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "heredoc partial delimiter <<EOF-X keeps later lines" "$(rmg_json_payload "cat <<EOF-X${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "heredoc quoted delimiter with a suffix keeps later lines" "$(rmg_json_payload "cat <<'EOF'X${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "heredoc lines after the terminator are scanned" "$(rmg_json_payload "cat <<'EOF'${NL}body${NL}EOF${NL}v=\"a b\"; git log \$v")" "$(rmg_wu v)"
+
+rmg_silent 'unsplit quoted "$v"' "$(rmg_json_payload 'v="a b"; gh pr edit 5 "$v"')"
+rmg_silent 'unsplit ${=v}' "$(rmg_json_payload 'v="a b"; git log ${=v}')"
+rmg_silent 'unsplit "${arr[@]}" of an array' "$(rmg_json_payload 'arr=(a b); gh pr edit 5 "${arr[@]}"')"
+rmg_silent 'unsplit $arr of an array' "$(rmg_json_payload 'arr=(a b); gh pr edit 5 $arr')"
+rmg_silent "unsplit single-word value" "$(rmg_json_payload 'v=one; gh pr view $v')"
+rmg_silent "unsplit command substitution argument" "$(rmg_json_payload 'sha=$(git rev-parse HEAD); git show $sha')"
+rmg_silent "unsplit quoted substitution with inner spaces" "$(rmg_json_payload 'sha="$(git log -1 --format=%s)"; git show $sha')"
+rmg_silent "unsplit echo, test, [, [[ and case" "$(rmg_json_payload 'v="a b"; echo $v; [[ -n $v ]]; [ -n $v ]; test -n $v; case $v in a) :;; esac')"
+rmg_silent "unsplit variable not assigned in the command" "$(rmg_json_payload 'gh pr view $prs')"
+rmg_silent "unsplit inside bash -c" "$(rmg_json_payload "bash -c 'v=\"a b\"; git log \$v'")"
+rmg_silent "unsplit bash heredoc body" "$(rmg_json_payload "bash <<'EOF'${NL}prs=\"1 2\"${NL}for n in \$prs; do gh pr view \$n; done${NL}EOF")"
+rmg_silent "unsplit quoted for list" "$(rmg_json_payload 'prs="1 2"; for n in "$prs"; do echo $n; done')"
+rmg_silent "unsplit assignment copies" "$(rmg_json_payload 'x="a b"; y=$x; export Z=$x')"
+rmg_silent "W1 skips a heredoc body" "$(rmg_json_payload "bash <<'EOF'${NL}E=\"env -u A\"${NL}\$E true${NL}EOF")"
+rmg_silent "W1 skips whitespace inside a substitution" "$(rmg_json_payload 'E="$(command -v git)"; $E status')"
+rmg_silent "heredoc second body on one line is skipped" "$(rmg_json_payload "cat <<A <<B${NL}x${NL}A${NL}E=\"env -u A\"${NL}\$E true${NL}B")"
+TAB=$(printf '\t')
+rmg_silent "heredoc <<- body with a tab-indented terminator is skipped" "$(rmg_json_payload "bash <<-EOF${NL}${TAB}E=\"env -u A\"${NL}${TAB}\$E true${NL}${TAB}EOF${NL}echo done")"
+
 # shell_hint.py: warn-only advisory for a bare background `&`.
 SHH=claude/hooks/shell_hint.py
 SHH_W='[WARNING] shell_hint: a bare & leaves a background job running after this tool call returns, so a later call can start a duplicate; use run_in_background on the Bash tool (in Codex, keep a running exec_command session) instead.'

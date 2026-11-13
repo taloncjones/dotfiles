@@ -24,7 +24,8 @@ substitution are not inspected; that residual is left to the classifier.
 
 The hook also runs warn-only checks for recurring zsh pitfalls (a stored
 multi-word command prefix, a `$var:X` modifier, a loop variable named `path`,
-`kill` of a multi-PID scalar that zsh does not word-split).
+`kill` of a multi-PID scalar that zsh does not word-split, a multi-word scalar
+expanded unquoted as an argument or `for` list).
 A warning is printed as PreToolUse `additionalContext` JSON on stdout with exit
 0; it never blocks, and a denial never prints to stdout.
 
@@ -74,8 +75,7 @@ BRACE_GROUP = re.compile(r"^(.*)\{([^{}]+)\}(.*)$")
 
 LEADING_KEYWORDS = ("do", "then", "else", "elif", "if", "while", "until", "!", "{")
 
-ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
-KILL_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=(.*)$", re.S)
+SCALAR_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=(.*)$", re.S)
 VAR_REF = re.compile(r"^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$")
 # zsh history-style modifier letters; `$sha:path` stays literal (`p` is not one).
 MODIFIER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*):([acehlqrstuAPQ&])")
@@ -160,6 +160,95 @@ def strip_line_comments(command: str) -> str:
         else:
             out.append(ch)
         i += 1
+    return "".join(out)
+
+
+# The lookahead keeps `<<EOF-X` from reading as `<<EOF`.
+HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;&|()<>]|$)")
+
+
+def skip_heredoc_bodies(command: str, i: int, pending: list[tuple[str, bool]]) -> int:
+    """Index just past the terminator line of each pending (word, dash) heredoc."""
+    n = len(command)
+    for word, dash in pending:
+        while i < n:
+            end = command.find("\n", i)
+            end = n if end == -1 else end
+            line = command[i:end]
+            i = min(end + 1, n)
+            if (line.lstrip("\t") if dash else line) == word:
+                break
+    return i
+
+
+def drop_heredocs_and_continuations(command: str) -> str:
+    """Drop heredoc bodies and unquoted backslash-newline pairs, so a body is
+    not read as commands and a continued line stays one command. Quote- and
+    comment-aware like strip_line_comments."""
+    out = []
+    pending = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 1
+                out.append(command[i])
+            elif ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        elif ch == "\\" and i + 1 < n:
+            if command[i + 1] != "\n":
+                out.append(ch)
+                out.append(command[i + 1])
+            i += 1
+        elif ch == "#" and (not out or out[-1] in " \t\n;&|()"):
+            while i < n and command[i] != "\n":
+                out.append(command[i])
+                i += 1
+            continue
+        elif ch == "\n" and pending:
+            out.append(ch)
+            i = skip_heredoc_bodies(command, i + 1, pending)
+            pending = []
+            continue
+        elif ch == "<" and command.startswith("<<", i) and command[i - 1 : i] != "<":
+            m = HEREDOC_OP.match(command, i) if command[i + 2 : i + 3] != "<" else None
+            if m:
+                pending.append((m.group(3), m.group(1) == "-"))
+                out.extend(m.group(0))
+                i = m.end()
+                continue
+            out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def mask_quotes(command: str) -> str:
+    """Replace each quoted span and each backslash-escaped character with `_`,
+    so a token pass can tell `"$v"` from `$v`."""
+    out = []
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if ch in ("'", '"'):
+            j = i + 1
+            while j < n and command[j] != ch:
+                j += 2 if ch == '"' and command[j] == "\\" else 1
+            out.append("_")
+            i = j + 1
+        elif ch == "\\" and i + 1 < n and command[i + 1] != "\n":
+            out.append("_")
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
     return "".join(out)
 
 
@@ -461,52 +550,139 @@ WARN_KILL = (
 )
 
 
+WARN_UNSPLIT = (
+    "[WARNING] rm_guard: zsh does not word-split an unquoted $%s, so it reaches "
+    "the command as one word and a for loop over it runs once; write \"$%s\" if "
+    "one word is meant, or split it with an array (%s=(a b), then "
+    '"${%s[@]}"), ${=%s}, literal words, or a bash heredoc.'
+)
+
+# One unsplit word behaves the same as several words for these.
+UNSPLIT_HARMLESS = ("echo", "print", "[", "[[", "test", "case", "kill", "for")
+
+
 def unsplit_scalars(tokens: list[str]) -> set[str]:
     """Names assigned a scalar that can hold several words (NAME=, NAME+=)."""
     names = set()
     for i, tok in enumerate(tokens):
-        m = KILL_ASSIGNMENT.match(tok)
+        m = SCALAR_ASSIGNMENT.match(tok)
         if not m:
             continue
         value = m.group(2)
-        # The tokenizer splits an unquoted `NAME=$(cmd)` into `NAME=$` and `(`.
-        split_subst = value.endswith("$") and tokens[i + 1 : i + 2] == ["("]
+        # The tokenizer splits an unquoted `NAME=$(cmd)` into `NAME=$` and `(`
+        # (or `(\n` for a multiline body).
+        split_subst = value.endswith("$") and tokens[i + 1 : i + 2] and tokens[i + 1].startswith("(")
         if re.search(r"[ \t\n`]|\$\(", value) or split_subst:
             names.add(m.group(1))
     return names
 
 
+def outside_substitutions(value: str) -> str:
+    """The value without `$(...)` (nesting counted) and backtick spans."""
+    out = []
+    depth = 0
+    tick = False
+    i, n = 0, len(value)
+    while i < n:
+        ch = value[i]
+        if ch == "`":
+            tick = not tick
+        elif depth == 0 and not tick and value.startswith("$(", i):
+            depth = 1
+            i += 1
+        elif depth and ch == "(":
+            depth += 1
+        elif depth and ch == ")":
+            depth -= 1
+        elif depth == 0 and not tick:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def multiword_scalars(tokens: list[str]) -> set[str]:
+    """Names assigned a value with literal whitespace outside substitutions."""
+    names = set()
+    for tok in tokens:
+        m = SCALAR_ASSIGNMENT.match(tok)
+        if m and re.search(r"[ \t\n]", outside_substitutions(m.group(2))):
+            names.add(m.group(1))
+    return names
+
+
+def var_name(tok: str) -> str | None:
+    m = VAR_REF.match(tok)
+    return (m.group(1) or m.group(2)) if m else None
+
+
+def masked_segments(all_tokens: list[str], masked_tokens: list[str]) -> list[list[str]]:
+    """Segments of the quote-masked tokens, cut where the POSIX token is an operator."""
+    segments, current = [], []
+    for tok, masked in zip(all_tokens, masked_tokens):
+        if tok and all(c in SEGMENT_OPERATORS for c in tok):
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append(masked)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def unsplit_lines(segments, masked, unsplit, multiword, reported) -> list[str]:
+    """WARN_UNSPLIT lines for unquoted multi-word scalars in a `for` list or
+    in the arguments of a command."""
+    lines = []
+    for tokens, mtokens in zip(segments, masked):
+        if tokens[:1] == ["for"] and tokens[2:3] == ["in"]:
+            words, known = mtokens[3:], unsplit
+        else:
+            stripped = strip_prefixes(tokens)
+            if not stripped or basename(stripped[0]) in UNSPLIT_HARMLESS:
+                continue
+            words, known = mtokens[len(tokens) - len(stripped) + 1:], multiword
+        for word in words:
+            name = var_name(word)
+            if name in known and name not in reported:
+                lines.append(WARN_UNSPLIT % ((name,) * 5))
+    return lines
+
+
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
+    command = drop_heredocs_and_continuations(command)
     all_tokens = tokenize(command)
     segments = [strip_keywords(seg) for seg in split_segments(all_tokens)]
     unsplit = unsplit_scalars(all_tokens)
-    multiword = set()
-    for tokens in segments:
-        for tok in tokens:
-            m = ASSIGNMENT.match(tok)
-            if m and (" " in m.group(2) or "\t" in m.group(2)):
-                multiword.add(m.group(1))
+    multiword = multiword_scalars(all_tokens)
 
+    reported = set()
     prefix_lines, path_lines, kill_lines = [], [], []
     for tokens in segments:
         stripped = strip_prefixes(tokens)
         if stripped:
-            m = VAR_REF.match(stripped[0])
-            name = m and (m.group(1) or m.group(2))
+            name = var_name(stripped[0])
             if name in multiword:
                 prefix_lines.append(WARN_PREFIX % name)
+                reported.add(name)
         if stripped and basename(stripped[0]) == "kill":
             for arg in stripped[1:]:
-                m = VAR_REF.match(arg)
-                name = m and (m.group(1) or m.group(2))
+                name = var_name(arg)
                 if name in unsplit:
                     kill_lines.append(WARN_KILL % (name, name, name, name))
+                    reported.add(name)
         loop_path = len(tokens) > 1 and tokens[0] == "for" and tokens[1] == "path"
         read_path = len(stripped) > 1 and stripped[0] == "read" and "path" in stripped[1:]
         if loop_path or read_path:
             path_lines.append(WARN_PATH)
+
+    unsplit_out = []
+    masked_tokens = tokenize(mask_quotes(strip_line_comments(command)))
+    if len(masked_tokens) == len(all_tokens):
+        masked = [strip_keywords(seg) for seg in masked_segments(all_tokens, masked_tokens)]
+        unsplit_out = unsplit_lines(segments, masked, unsplit, multiword, reported)
 
     modifier_lines = [
         WARN_MODIFIER % (name, letter, letter, name, name, letter)
@@ -514,7 +690,7 @@ def zsh_warnings(command: str) -> list[str]:
     ]
 
     lines = []
-    for line in prefix_lines + modifier_lines + path_lines + kill_lines:
+    for line in prefix_lines + modifier_lines + path_lines + kill_lines + unsplit_out:
         if line not in lines:
             lines.append(line)
     return lines
