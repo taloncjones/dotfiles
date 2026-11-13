@@ -24,6 +24,7 @@ DOTFILES="$(cd -P "$(dirname "$src")/.." && pwd)"
 HTTPS_GITCONFIG="$DOTFILES/git/agent-https.gitconfig"
 SIGN_PROGRAM="$DOTFILES/bin/op-env-sign"
 SIGNING_SOCK="${OP_ENV_SIGNING_SOCK:-$HOME/.local/state/dotfiles/op-env-signing.sock}"
+SIGNING_LOCK="${SIGNING_SOCK%.sock}.lock"
 OP_TIMEOUT="${OP_ENV_OP_TIMEOUT:-20}"
 # Set at command scope after an empty reset: command scope is read last, so
 # no global or repo-local credential helper ever receives GH_TOKEN.
@@ -314,12 +315,12 @@ load_key() {
 }
 
 # Dedup only: every guarded step re-checks state, so a lost race costs one
-# extra op read or agent start, never a wrong key.
+# extra op read or agent start, never a wrong key. The lock is an O_EXCL
+# (noclobber) file: uutils mkdir 0.8.0 can exit 0 for a directory a racer made.
 take_lock() {
-    local lock="$SIGNING_SOCK.lock" tries=0
-    while ! mkdir "$lock" 2>/dev/null; do
-        if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-            rmdir "$lock" 2>/dev/null
+    local tries=0
+    until (set -o noclobber; : >"$SIGNING_LOCK") 2>/dev/null; do
+        if [ -n "$(find "$SIGNING_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rm -f "$SIGNING_LOCK" 2>/dev/null; then
             continue
         fi
         tries=$((tries + 1))
@@ -340,7 +341,7 @@ ensure_signing_key() {
     if [ "$rc" = 0 ] && ! key_loaded; then
         load_key || { err "[X] op-env sign: could not load the signing key from 1Password"; rc=1; }
     fi
-    [ "$locked" = 1 ] && rmdir "$SIGNING_SOCK.lock" 2>/dev/null
+    [ "$locked" = 1 ] && rm -f "$SIGNING_LOCK"
     return "$rc"
 }
 

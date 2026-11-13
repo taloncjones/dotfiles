@@ -346,8 +346,23 @@ write_op_env "OP_SIGNING_KEY=op://V/sign" "OP_SIGNING_PUBKEY=$PUB"
 # payload and stdin is closed.
 for i in 1 2 3; do printf 'payload\n' >"$TMP/payload$i"; done
 : >"$OP_LOG"
+# uutils mkdir 0.8.0 (Ubuntu 26.04) exits 0 for a directory a racer created.
+# This shim holds both callers past the exists check, then reproduces that.
+mkdir -p "$TMP/racy-mkdir" "$TMP/mkdir-arrivals"
+cat >"$TMP/racy-mkdir/mkdir" <<EOF
+#!/bin/sh
+case "\$1" in -*) exec "$(command -v mkdir)" "\$@" ;; esac
+[ -e "\$1" ] && exit 1
+: >"$TMP/mkdir-arrivals/\$\$"
+n=0
+while [ "\$(ls "$TMP/mkdir-arrivals" | wc -l)" -lt 2 ] && [ "\$n" -lt 50 ]; do
+    sleep 0.1; n=\$((n + 1))
+done
+"$(command -v mkdir)" "\$@" 2>/dev/null || [ -d "\$1" ]
+EOF
+chmod +x "$TMP/racy-mkdir/mkdir"
 for i in 1 2; do
-    ( OP_ENV_FILE="$REPO/op.env" FAKE_OP_DELAY=1 "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signkey.pub" "$TMP/payload$i" </dev/null >/dev/null 2>&1; echo $? >"$TMP/rc$i" ) &
+    ( PATH="$TMP/racy-mkdir:$PATH" OP_ENV_FILE="$REPO/op.env" FAKE_OP_DELAY=1 "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signkey.pub" "$TMP/payload$i" </dev/null >/dev/null 2>&1; echo $? >"$TMP/rc$i" ) &
 done
 wait
 check "concurrent first signatures both succeed" '[ "$(cat "$TMP/rc1")" = 0 ] && [ "$(cat "$TMP/rc2")" = 0 ]'
@@ -355,12 +370,13 @@ check "concurrent first signatures read the key once" '[ "$(grep -c "^read " "$O
 check "concurrent first signatures start one agent" '[ "$(pgrep -f "ssh-agent -a $OP_ENV_SIGNING_SOCK" | wc -l | tr -d " ")" = 1 ]'
 
 export OP_ENV_SIGNING_SOCK="$TMP/s3/op-env-signing.sock"
-mkdir -p "$TMP/s3" "$OP_ENV_SIGNING_SOCK.lock"
-touch -t 202001010000 "$OP_ENV_SIGNING_SOCK.lock"
+mkdir -p "$TMP/s3"
+: >"$TMP/s3/op-env-signing.lock"
+touch -t 202001010000 "$TMP/s3/op-env-signing.lock"
 start=$SECONDS
 OP_ENV_FILE="$REPO/op.env" "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signkey.pub" "$TMP/payload3" </dev/null >/dev/null 2>&1
 rc=$?
-check "a stale lock does not block signing" '[ "$rc" = 0 ] && [ $((SECONDS - start)) -lt 5 ]'
+check "a stale lock does not block signing" '[ "$rc" = 0 ] && [ $((SECONDS - start)) -lt 5 ] && [ ! -e "$TMP/s3/op-env-signing.lock" ]'
 
 # --- 8b. the signing agent never inherits the session's credentials ---
 export OP_ENV_SIGNING_SOCK="$TMP/s4/op-env-signing.sock"
