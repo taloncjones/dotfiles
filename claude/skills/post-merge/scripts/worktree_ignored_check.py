@@ -101,7 +101,9 @@ def check(worktree):
     """Return (at_risk, differing) path lists; differing is a subset of at_risk."""
     if not os.path.isdir(worktree):
         raise Incomplete("not a directory: %s" % worktree)
-    root = git(worktree, "rev-parse", "--show-toplevel").decode(errors="surrogateescape").removesuffix("\n")
+    root = git(worktree, "rev-parse", "--show-toplevel").decode(errors="surrogateescape")
+    if root.endswith("\n"):  # strip only the newline; a path may end in a space
+        root = root[:-1]
     listing = git(root, "worktree", "list", "--porcelain").decode(errors="surrogateescape")
     first = listing.splitlines()[0] if listing else ""
     if not first.startswith("worktree "):
