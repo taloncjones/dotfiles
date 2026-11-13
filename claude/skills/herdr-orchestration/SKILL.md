@@ -270,6 +270,23 @@ its own subagents, write a resume prompt to a file and run the printed
 `reprompt` line with `--prompt-file` set to it. If the line refuses an
 unresolved prior reprompt, reconcile that first (dispatch-mechanism.md).
 
+`relaunch-dead-worker` means the current plan or implement worker's agent
+left herdr's agent list 10 minutes ago with no done record for its launch
+(host stopped, process died, launch interrupted); a reprompt cannot reach it,
+so `next` asks the owner. On "relaunch": (1) re-run the check-in and go on only
+while it reports this action for the same launch. (2) Run `herdr pane read` on
+the named pane; a live agent there means herdr's list missed it, so report it
+and do not relaunch. (3) Pane at a shell: `render-brief --phase plan` or
+`implement` (a `changes-requested` task renders `--phase repair` with the same
+`--focus-file` and `--findings`), then `launch` into the same pane
+(`references/kickoff.md` step 7). (4) Pane gone: `herdr pane split` and launch
+into the pane it prints; never reuse a pane no worker row names. Workspace
+gone: recreate it as kickoff does, or ask the owner to stop. (5) After
+`launch`, read `tasks/<task_id>.done.json`; if it names the dead launch, the
+old worker's `emit-done` landed late and the new row superseded it: report it
+and stop the new worker (best effort; the new worker may already be working).
+On "stop", `write-task` the status the owner names (`failed` or `abandoned`).
+
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
 recorded or retired; ship handoff recorded (`handoff-recorded`);

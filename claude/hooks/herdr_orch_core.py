@@ -3869,7 +3869,7 @@ _REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"
 
 # Rules that read a live herdr poll. `pending` runs without one, so it skips them.
 POLL_RULES = frozenset({"unknown", "abandoned-candidate", "blocked", "unblocked",
-                        "reprompt-stalled", "exit-idle-worker", "close-idle"})
+                        "relaunch-dead-worker", "reprompt-stalled", "exit-idle-worker", "close-idle"})
 
 # Idle time before a worker with no done record counts as stalled; keeps a
 # fresh launch, reprompt or subagent wait quiet.
@@ -3905,6 +3905,7 @@ def checkin_rules(f):
         # Section 9 has no `paused` status, so there is no status gate to add.
         ("paused", f.get("done_outcome") == "paused"),
         ("failed", f.get("done_outcome") == "failed"),
+        ("relaunch-dead-worker", f.get("dead_worker")),
         ("reprompt-stalled", f.get("stalled")),
         ("exit-idle-worker", f.get("idle_settled")),
         ("ship", f.get("ship_pending")),
@@ -3941,7 +3942,7 @@ def pending_action(f) -> str:
 
 
 # One entry per checkin_rules name: (kind, template). A run entry's template
-# is the adapter verb; ask and read templates take {head7} and {ws}.
+# is the adapter verb; ask and read templates take {head7}, {ws} and the dead_* facts.
 NEXT_ACTIONS = {
     "confirm-plan": ("run", "advance"),
     "confirm-review": ("run", "accept-review"),
@@ -3965,6 +3966,9 @@ NEXT_ACTIONS = {
                                    "record abandoned?"),
     "paused": ("ask", "Attempt paused at {head7}: relaunch, re-brief, or stop?"),
     "failed": ("ask", "Attempt failed at {head7}: repair, relaunch, or record failed?"),
+    "relaunch-dead-worker": ("ask", "Worker {agent} ({phase} launch {launch}, pane {pane}) is "
+                                    "gone with no done record: relaunch the {phase} phase "
+                                    "(SKILL.md section 4), or stop?"),
 }
 ADAPTER_PATH = Path(__file__).resolve().parent / "herdr_dispatch.py"
 
@@ -3981,7 +3985,10 @@ def next_line(task, facts, ctx):
     kind, template = NEXT_ACTIONS[action]
     if kind != "run":
         head7 = (facts.get("head") or "unknown")[:7]
-        return f"  next: {kind} {template.format(head7=head7, ws=facts.get('ws'))}"
+        text = template.format(head7=head7, ws=facts.get("ws"),
+                               agent=facts.get("dead_agent"), phase=facts.get("dead_phase"),
+                               launch=facts.get("dead_launch"), pane=facts.get("dead_pane"))
+        return f"  next: {kind} {text}"
     account = ["--runtime", ctx["runtime"]] + (["--personal"] if ctx["personal"] else [])
     fenced = ["--session", ctx["session"], "--fence", str(ctx["fence"])]
     if template == "settle":
@@ -4190,24 +4197,20 @@ def _git_ancestor(worktree, base, head) -> str:
     return "no" if proc.returncode == 1 else "unknown"
 
 
-def _stalled_row(task, row, poll_agents, done, events, now_ns):
-    """True when the latest plan or implement row sits idle with no done
-    record, and nothing has touched it for STALL_GRACE_SECS (an API error
-    stops a worker without a done record). None otherwise."""
+def _quiet_unsettled_row(task, row, done, events, now_ns, statuses):
+    """True when the latest plan or implement row has a status in `statuses`,
+    full identity, no done record, and nothing touched it for STALL_GRACE_SECS.
+    Shared gate of _stalled_row and _dead_row."""
     if task.get("status") not in ("in-progress", "changes-requested"):
-        return None
-    if row.get("phase") not in ("plan", "implement") or row.get("status") != "launched":
-        return None
+        return False
+    if row.get("phase") not in ("plan", "implement") or row.get("status") not in statuses:
+        return False
     if row.get("exit_requested") or not all(
             _nonempty_str(row.get(k))
             for k in ("agent", "pane_id", "workspace_id", "launch_id", "runtime")):
-        return None
-    if not any(a.get("name") == row["agent"] and a.get("pane_id") == row["pane_id"]
-               and a.get("agent_status") in IDLE_AGENT_STATES
-               for a in poll_agents.get(row["workspace_id"], [])):
-        return None
+        return False
     if _attempt_settled(row, done):
-        return None
+        return False
     stamps = [row.get("started_ns")]
     stamps += [r.get("started_ns") for r in row.get("reprompts") or []
                if isinstance(r, dict) and r.get("status") != "failed"]
@@ -4218,6 +4221,36 @@ def _stalled_row(task, row, poll_agents, done, events, now_ns):
         if parsed is not None and ev.get("task_id") == task.get("task_id"):
             secs.append(parsed.timestamp())
     if secs and now_ns / 10**9 - max(secs) < STALL_GRACE_SECS:
+        return False
+    return True
+
+
+def _row_agents(row, poll_agents):
+    """Agents in the poll with the row's name and pane."""
+    return [a for a in poll_agents.get(row.get("workspace_id"), [])
+            if a.get("name") == row.get("agent") and a.get("pane_id") == row.get("pane_id")]
+
+
+def _stalled_row(task, row, poll_agents, done, events, now_ns):
+    """True when the latest plan or implement row sits idle with no done
+    record, and nothing has touched it for STALL_GRACE_SECS (an API error
+    stops a worker without a done record). None otherwise."""
+    if not _quiet_unsettled_row(task, row, done, events, now_ns, ("launched",)):
+        return None
+    if not any(a.get("agent_status") in IDLE_AGENT_STATES
+               for a in _row_agents(row, poll_agents)):
+        return None
+    return True
+
+
+def _dead_row(task, row, poll, done, events, now_ns):
+    """True when the latest plan or implement row's agent is gone from a
+    good herdr poll, with no done record, past STALL_GRACE_SECS. A starting or
+    ready row counts: an interrupted launch leaves one."""
+    if poll is None or _row_agents(row, poll.get("agents", {})):
+        return None
+    if not _quiet_unsettled_row(task, row, done, events, now_ns,
+                                ("launched", "starting", "ready")):
         return None
     return True
 
@@ -4357,8 +4390,9 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
                 continue
     hint = fold_status(events).get("last_hint") or "none"
 
-    stalled = _stalled_row(task, latest, poll_agents, done, events,
-                           time.time_ns() if now_ns is None else now_ns)
+    check_ns = time.time_ns() if now_ns is None else now_ns
+    stalled = _stalled_row(task, latest, poll_agents, done, events, check_ns)
+    dead = _dead_row(task, latest, poll, done, events, check_ns)
 
     # A parked reviewed task whose workspace holds no agent: the director
     # closes it (close-idle) and reopens it before any step that needs a pane.
@@ -4407,6 +4441,9 @@ def checkin_facts(rd, task, poll, payload_root, now_ns=None) -> dict:
         "stalled": stalled is not None,
         "stall_launch": stalled and latest["launch_id"], "stall_ws": stalled and latest["workspace_id"],
         "stall_phase": stalled and latest["phase"], "stall_runtime": stalled and latest["runtime"],
+        "dead_worker": dead is not None,
+        "dead_agent": dead and latest["agent"], "dead_phase": dead and latest["phase"],
+        "dead_launch": dead and latest["launch_id"], "dead_pane": dead and latest["pane_id"],
         "ship_pending": ship_pending(task),
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES

@@ -45,7 +45,7 @@ and refreshes the owner heartbeat while a task is active; without
 `confirm-completion`, `confirm-plan`, `dispatch-review`, `confirm-review`,
 `changes-requested`, `carry-review`, `stale-review-reset`, `blocked`, `unblocked`,
 `abandoned-candidate`, `mech-ledger`, `paused`, `failed`,
-`reprompt-stalled`, `exit-idle-worker`, `close-idle`, `unknown`, `none`.
+`relaunch-dead-worker`, `reprompt-stalled`, `exit-idle-worker`, `close-idle`, `unknown`, `none`.
 `exit-idle-worker` ranks before `ship`; `close-idle` ranks last of all. Both
 name housekeeping, not a status transition; neither appends an event or
 changes the watch vocabulary.
