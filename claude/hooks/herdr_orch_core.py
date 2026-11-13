@@ -815,11 +815,11 @@ def _bound_worker_agents(rd, task_id):
     for rec in payload_files(rd / "leads", "*"):
         where = f"bound record leads/{rec.name!r}/tasks/{task_id}.json"
         try:
-            text = read_payload_text(rec / "tasks" / f"{task_id}.json")
-        except OSError:
+            raw = read_payload_bytes(rec / "tasks" / f"{task_id}.json")
+        except (OSError, ValueError):
             continue
         try:
-            task = json.loads(text)
+            task = json.loads(raw.decode("utf-8"))
         except (ValueError, RecursionError):
             _require(False, f"{where} is not valid JSON; repair it by hand, do not delete it")
         _require(isinstance(task, dict),

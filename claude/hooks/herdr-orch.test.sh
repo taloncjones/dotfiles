@@ -13570,6 +13570,22 @@ second, _ = rendered("--phase", "implement")
 assert second["agent"] != first["agent"], (first, second)
 PY
 
+check "render-brief: a stray file, symlinked binding or symlinked tasks dir in leads is skipped" <<'PY'
+import os, tempfile
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+first, _ = rendered("--phase", "implement")
+os.remove(first["brief_path"])
+leads = os.path.join(rd, "leads"); os.makedirs(leads)
+elsewhere = tempfile.mkdtemp()
+os.makedirs(os.path.join(elsewhere, "tasks"))
+open(os.path.join(leads, ".DS_Store"), "w").write("x")
+os.symlink(elsewhere, os.path.join(leads, "B3"))
+os.makedirs(os.path.join(leads, "B4"))
+os.symlink(os.path.join(elsewhere, "tasks"), os.path.join(leads, "B4", "tasks"))
+p = render("--phase", "implement")
+assert p.returncode == 0, (p.returncode, p.stderr)
+PY
+
 check "render-brief: a task record with a non-list workers or a non-string agent refuses" <<'PY'
 import os
 exec(open(os.environ["BRIEF_FIXTURE"]).read())
