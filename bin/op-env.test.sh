@@ -396,6 +396,16 @@ rc=$?
 check "signing through the scrubbed agent succeeds" '[ "$rc" = 0 ] && [ -s "$TMP/payload4.sig" ]'
 check "the signing ssh-agent starts without session tokens" '[ -s "$TMP/agent-env" ] && ! grep -qF "$SESSION_VALUE" "$TMP/agent-env"'
 
+# --- 8c. a leftover pre-file-lock directory at a non-.sock socket's lock path ---
+export OP_ENV_SIGNING_SOCK="$TMP/s5/op-env-signing"
+mkdir -p "$TMP/s5/op-env-signing.lock"
+touch -t 202001010000 "$TMP/s5/op-env-signing.lock"
+printf 'payload\n' >"$TMP/payload5"
+start=$SECONDS
+OP_ENV_FILE="$REPO/op.env" "$ROOT/bin/op-env-sign" -Y sign -n git -f "$TMP/signkey.pub" "$TMP/payload5" </dev/null >/dev/null 2>&1
+rc=$?
+check "a leftover lock directory does not delay signing" '[ "$rc" = 0 ] && [ -s "$TMP/payload5.sig" ] && [ $((SECONDS - start)) -lt 5 ] && [ ! -e "$TMP/s5/op-env-signing.lock" ]'
+
 # --- 9. status ---
 rm -f "$REPO/op.env"
 out="$("$OP_ENV" status --cwd "$REPO")"; rc=$?
