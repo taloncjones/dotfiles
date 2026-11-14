@@ -3044,6 +3044,66 @@ def test_claude_prompt_receives_reserved_attempt_context_without_approval_wordin
         fixture.close()
 
 
+def start_argv(fixture):
+    start = next(call for call in fixture.calls() if call[:2] == ["agent", "start"])
+    return start[start.index("--") + 1 :]
+
+
+def test_claude_writable_launch_adds_resolved_todos_target():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        target = Path(fixture.temp.name) / "main-todos"
+        target.mkdir()
+        (fixture.repo / ".todos").symlink_to(target)
+        fixture.launch(route=claude_route())
+        argv = start_argv(fixture)
+        assert argv.count("--add-dir") == 1, argv
+        assert argv[argv.index("--add-dir") + 1] == str(target.resolve()), argv
+        assert argv.index("--add-dir") < argv.index("--permission-mode"), argv
+    finally:
+        fixture.close()
+
+
+def test_claude_launch_skips_todos_add_dir_when_read_only_or_absent():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        target = Path(fixture.temp.name) / "main-todos"
+        target.mkdir()
+        (fixture.repo / ".todos").symlink_to(target)
+        fixture.launch(sandbox="read-only", route=claude_route())
+        assert "--add-dir" not in start_argv(fixture)
+    finally:
+        fixture.close()
+
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.launch(route=claude_route())
+        assert "--add-dir" not in start_argv(fixture)
+    finally:
+        fixture.close()
+
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        (fixture.repo / ".todos").mkdir()
+        fixture.launch(route=claude_route())
+        assert "--add-dir" not in start_argv(fixture)
+    finally:
+        fixture.close()
+
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        (fixture.repo / ".todos").symlink_to(Path(fixture.temp.name) / "never-created")
+        fixture.launch(route=claude_route())
+        assert "--add-dir" not in start_argv(fixture)
+    finally:
+        fixture.close()
+
+
 def test_claude_reviewer_pane_launch_passes_strict_mcp_config():
     fixture = Fixture()
     try:
@@ -7546,6 +7606,8 @@ for name, test in (
     ("a pane whose gh is not the shim blocks before launch", test_unarmed_gh_refuses_before_start_and_records_the_failed_prep),
     ("real shells bypass stale runtime wrappers and hashes", test_runtime_binding_bypasses_aliases_functions_and_stale_hashes),
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
+    ("Claude writable launch adds the resolved todos target", test_claude_writable_launch_adds_resolved_todos_target),
+    ("Claude launch skips the todos add-dir when read-only or absent", test_claude_launch_skips_todos_add_dir_when_read_only_or_absent),
     ("Claude reviewer pane launch passes strict MCP config", test_claude_reviewer_pane_launch_passes_strict_mcp_config),
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
