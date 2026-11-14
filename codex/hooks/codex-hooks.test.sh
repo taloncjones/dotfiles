@@ -255,6 +255,9 @@ assert_rm_guard_silent "rm guard stays silent on an explicit split scalar" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"var=\"a b\"; git log ${=var}"}}'
 assert_rm_guard_silent "rm guard stays silent on an array expansion" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"arr=(a b); gh pr edit 5 \"${arr[@]}\""}}'
+assert_rm_guard_warns "rm guard keeps later lines after a shift inside arithmetic (R1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"x=$((1 << N))\npids=\"1 2\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
 
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must

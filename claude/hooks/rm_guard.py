@@ -181,6 +181,12 @@ def skip_heredoc_bodies(command: str, i: int, pending: list[tuple[str, bool]]) -
     return i
 
 
+def in_arith_or_cond(text: str) -> bool:
+    """True when the last line of text leaves a `((` or `[[` unclosed."""
+    line = text.rsplit("\n", 1)[-1]
+    return line.count("((") > line.count("))") or line.count("[[") > line.count("]]")
+
+
 def drop_heredocs_and_continuations(command: str) -> str:
     """Drop heredoc bodies and unquoted backslash-newline pairs, so a body is
     not read as commands and a continued line stays one command. Quote- and
@@ -217,7 +223,8 @@ def drop_heredocs_and_continuations(command: str) -> str:
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i) and command[i - 1 : i] != "<":
-            m = HEREDOC_OP.match(command, i) if command[i + 2 : i + 3] != "<" else None
+            not_heredoc = command[i + 2 : i + 3] == "<" or in_arith_or_cond("".join(out))
+            m = None if not_heredoc else HEREDOC_OP.match(command, i)
             if m:
                 pending.append((m.group(3), m.group(1) == "-"))
                 out.extend(m.group(0))

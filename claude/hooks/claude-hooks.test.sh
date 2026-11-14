@@ -908,6 +908,7 @@ rmg_silent "W1 skips whitespace inside a substitution" "$(rmg_json_payload 'E="$
 rmg_silent "heredoc second body on one line is skipped" "$(rmg_json_payload "cat <<A <<B${NL}x${NL}A${NL}E=\"env -u A\"${NL}\$E true${NL}B")"
 TAB=$(printf '\t')
 rmg_silent "heredoc <<- body with a tab-indented terminator is skipped" "$(rmg_json_payload "bash <<-EOF${NL}${TAB}E=\"env -u A\"${NL}${TAB}\$E true${NL}${TAB}EOF${NL}echo done")"
+rmg_warns "unsplit kill survives a shift inside arithmetic and [[ (R1)" "$(rmg_json_payload "x=\$((1 << N))${NL}[[ a << b ]]${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
 
 # shell_hint.py: warn-only advisory for a bare background `&`.
 SHH=claude/hooks/shell_hint.py
