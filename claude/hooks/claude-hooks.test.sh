@@ -910,6 +910,20 @@ TAB=$(printf '\t')
 rmg_silent "heredoc <<- body with a tab-indented terminator is skipped" "$(rmg_json_payload "bash <<-EOF${NL}${TAB}E=\"env -u A\"${NL}${TAB}\$E true${NL}${TAB}EOF${NL}echo done")"
 rmg_warns "unsplit kill survives a shift inside arithmetic and [[ (R1)" "$(rmg_json_payload "x=\$((1 << N))${NL}[[ a << b ]]${NL}pids=\"1 2\"; kill \$pids")" "$(rmg_wk pids)"
 
+rmg_silent "unsplit redirect and here-string operands take one word (R2)" "$(rmg_json_payload 'v="a b"; gh pr view 5 > $v; git log 2> $v; wc -l < $v; cat <<< $v')"
+rmg_silent "unsplit arithmetic expansion is not a command substitution (R3)" "$(rmg_json_payload 'n=$((1+2)); for i in $n; do :; done; kill $n; m="$((1 + 2))"; for i in $m; do :; done')"
+rmg_silent "unsplit quoted variable inside a quoted substitution (R4)" "$(rmg_json_payload 'v="a b"; gh pr view "$(foo "bar $v baz")"')"
+rmg_warns "unsplit quoted substitution still feeds kill (R4)" "$(rmg_json_payload 'pids="$(jobs -p)"; kill -- ${pids}')" "$(rmg_wk pids)"
+rmg_silent "unsplit eval and declaration arguments (R5)" "$(rmg_json_payload 'v="a b"; eval $v; export $v; local $v; typeset $v; declare $v; readonly $v')"
+rmg_warns "unsplit declaration assignment still counts (R5)" "$(rmg_json_payload 'local v="a b"; git log $v')" "$(rmg_wu v)"
+rmg_silent "unsplit one-shot prefix assignment (R6)" "$(rmg_json_payload 'FOO="a b" git log $FOO; env BAR="a b" git log $BAR')"
+rmg_warns "unsplit assignment with a redirect still counts (R6)" "$(rmg_json_payload 'v="a b" > /dev/null; git log $v')" "$(rmg_wu v)"
+rmg_silent "unsplit single-word reassignment (R7)" "$(rmg_json_payload 'v="a b"; v=one; git log $v')"
+rmg_warns "unsplit reassignment before the use is order-aware (R7)" "$(rmg_json_payload 'v="a b"; git log $v; v=one')" "$(rmg_wu v)"
+rmg_warns "unsplit subshell assignment stays in its subshell (R7)" "$(rmg_json_payload 'pids="1 2"; (pids=one); kill $pids')" "$(rmg_wk pids)"
+rmg_silent "unsplit malformed input with an unmatched quote (R8)" "$(rmg_json_payload 'v=`ls` ; for i in $v ; do : ; done ; echo "oops')"
+rmg_warns "kill warning survives malformed input (R8)" "$(rmg_json_payload 'pids=$(x) ; kill $pids ; echo "oops')" "$(rmg_wk pids)"
+
 # shell_hint.py: warn-only advisory for a bare background `&`.
 SHH=claude/hooks/shell_hint.py
 SHH_W='[WARNING] shell_hint: a bare & leaves a background job running after this tool call returns, so a later call can start a duplicate; use run_in_background on the Bash tool (in Codex, keep a running exec_command session) instead.'

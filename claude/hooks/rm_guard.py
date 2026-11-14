@@ -564,24 +564,65 @@ WARN_UNSPLIT = (
     '"${%s[@]}"), ${=%s}, literal words, or a bash heredoc.'
 )
 
-# One unsplit word behaves the same as several words for these.
-UNSPLIT_HARMLESS = ("echo", "print", "[", "[[", "test", "case", "kill", "for")
+# One word behaves the same as several for these, or the argument is a name
+# or an assignment, never a word list.
+UNSPLIT_HARMLESS = (
+    "echo", "print", "[", "[[", "test", "case", "kill", "for",
+    "eval", "export", "local", "typeset", "declare", "readonly",
+)
+DECLARATIONS = ("export", "local", "typeset", "declare", "readonly")
+REDIRECT_OP = re.compile(r"\d*[<>]+")
 
 
-def unsplit_scalars(tokens: list[str]) -> set[str]:
-    """Names assigned a scalar that can hold several words (NAME=, NAME+=)."""
-    names = set()
-    for i, tok in enumerate(tokens):
-        m = SCALAR_ASSIGNMENT.match(tok)
-        if not m:
+def substitution_end(command: str, i: int) -> int:
+    """Index just past the `)` closing a `$(` whose body starts at i, or -1."""
+    depth, n = 1, len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "\\":
+            i += 1
+        elif ch in ("'", '"'):
+            j = i + 1
+            while j < n and command[j] != ch:
+                j += 2 if ch == '"' and command[j] == "\\" else 1
+            i = j
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def collapse_quoted_substitutions(command: str) -> str:
+    """Replace each `$(...)` inside double quotes with `$(_)`, so a quote
+    inside it does not pair with the quote around it."""
+    out = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            quote = None if ch == "'" else quote
+        elif ch == "\\" and i + 1 < n:
+            out.append(command[i : i + 2])
+            i += 2
             continue
-        value = m.group(2)
-        # The tokenizer splits an unquoted `NAME=$(cmd)` into `NAME=$` and `(`
-        # (or `(\n` for a multiline body).
-        split_subst = value.endswith("$") and tokens[i + 1 : i + 2] and tokens[i + 1].startswith("(")
-        if re.search(r"[ \t\n`]|\$\(", value) or split_subst:
-            names.add(m.group(1))
-    return names
+        elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
+            end = substitution_end(command, i + 2)
+            if end == -1:
+                out.append(command[i:])
+                break
+            out.append("$(_)")
+            i = end
+            continue
+        elif ch in ("'", '"'):
+            quote = None if quote == ch else (quote or ch)
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def outside_substitutions(value: str) -> str:
@@ -607,14 +648,80 @@ def outside_substitutions(value: str) -> str:
     return "".join(out)
 
 
-def multiword_scalars(tokens: list[str]) -> set[str]:
-    """Names assigned a value with literal whitespace outside substitutions."""
-    names = set()
-    for tok in tokens:
-        m = SCALAR_ASSIGNMENT.match(tok)
-        if m and re.search(r"[ \t\n]", outside_substitutions(m.group(2))):
-            names.add(m.group(1))
-    return names
+def only_redirects(tokens: list[str]) -> bool:
+    """True when every token is a redirection, with its operand when the
+    operator is a token of its own."""
+    i = 0
+    while i < len(tokens):
+        m = REDIRECT_OP.match(tokens[i])
+        if not m:
+            return False
+        i += 2 if m.end() == len(tokens[i]) else 1
+    return True
+
+
+def assignment_indexes(tokens: list[str]) -> list[int]:
+    """Indexes of the tokens that assign a name: the leading run of a segment
+    that has no command word, or the operands of a declaration command."""
+    if tokens[:1] and tokens[0] in DECLARATIONS:
+        return [i for i, tok in enumerate(tokens) if i and SCALAR_ASSIGNMENT.match(tok)]
+    run = 0
+    while run < len(tokens) and SCALAR_ASSIGNMENT.match(tokens[run]):
+        run += 1
+    return list(range(run)) if only_redirects(tokens[run:]) else []
+
+
+def apply_assignments(frame: dict, tokens: list[str], follower: str) -> None:
+    """Update frame (name -> (unsplit, multiword)) from the segment's assignments.
+    follower is the operator token after the segment, where the tokenizer puts
+    the `(` of an unquoted `NAME=$(cmd)`."""
+    for i in assignment_indexes(tokens):
+        m = SCALAR_ASSIGNMENT.match(tokens[i])
+        name, value = m.group(1), m.group(2)
+        outside = outside_substitutions(value)
+        split_subst = (
+            i == len(tokens) - 1
+            and value.endswith("$")
+            and follower.startswith("(")
+            and not follower.startswith("((")
+        )
+        unsplit = bool(
+            re.search(r"[ \t\n`]", outside) or re.search(r"\$\((?!\()", value) or split_subst
+        )
+        multiword = bool(re.search(r"[ \t\n]", outside))
+        if tokens[i][len(name)] == "+":
+            old = frame.get(name, (False, False))
+            unsplit, multiword = unsplit or old[0], multiword or old[1]
+        frame[name] = (unsplit, multiword)
+
+
+def stated_segments(all_tokens: list[str]) -> list[tuple[list[str], dict]]:
+    """(segment, state) pairs in command order. State maps a name to its
+    (unsplit, multiword) flags as they stand before the segment; each `(`
+    opens a copy of the state and each `)` closes it."""
+    frames = [{}]
+    pairs, current = [], []
+    for tok in all_tokens + [None]:
+        is_operator = tok is None or (tok and all(c in SEGMENT_OPERATORS for c in tok))
+        if not is_operator:
+            current.append(tok)
+            continue
+        if current:
+            tokens = strip_keywords(current)
+            pairs.append((tokens, dict(frames[-1])))
+            apply_assignments(frames[-1], tokens, tok or "")
+            current = []
+        for ch in tok or "":
+            if ch == "(":
+                frames.append(dict(frames[-1]))
+            elif ch == ")" and len(frames) > 1:
+                frames.pop()
+    return pairs
+
+
+def flag(state: dict, name: str | None, which: int) -> bool:
+    """which: 0 for unsplit, 1 for multiword."""
+    return state.get(name, (False, False))[which]
 
 
 def var_name(tok: str) -> str | None:
@@ -637,47 +744,60 @@ def masked_segments(all_tokens: list[str], masked_tokens: list[str]) -> list[lis
     return segments
 
 
-def unsplit_lines(segments, masked, unsplit, multiword, reported) -> list[str]:
+def unsplit_lines(segments, masked, states, reported) -> list[str]:
     """WARN_UNSPLIT lines for unquoted multi-word scalars in a `for` list or
-    in the arguments of a command."""
+    in the arguments of a command. A redirect operand takes one word."""
     lines = []
-    for tokens, mtokens in zip(segments, masked):
+    for tokens, mtokens, state in zip(segments, masked, states):
         if tokens[:1] == ["for"] and tokens[2:3] == ["in"]:
-            words, known = mtokens[3:], unsplit
+            words, which = mtokens[3:], 0
         else:
             stripped = strip_prefixes(tokens)
             if not stripped or basename(stripped[0]) in UNSPLIT_HARMLESS:
                 continue
-            words, known = mtokens[len(tokens) - len(stripped) + 1:], multiword
+            words, which = mtokens[len(tokens) - len(stripped) + 1:], 1
+        previous = ""
         for word in words:
             name = var_name(word)
-            if name in known and name not in reported:
+            after_redirect = REDIRECT_OP.fullmatch(previous)
+            if flag(state, name, which) and name not in reported and not after_redirect:
                 lines.append(WARN_UNSPLIT % ((name,) * 5))
+            previous = word
     return lines
+
+
+def shlex_accepts(command: str) -> bool:
+    """False when shlex rejects the command (unmatched quote, trailing escape)."""
+    try:
+        shlex.split(strip_line_comments(command), comments=False)
+    except ValueError:
+        return False
+    return True
 
 
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
     command = drop_heredocs_and_continuations(command)
-    all_tokens = tokenize(command)
-    segments = [strip_keywords(seg) for seg in split_segments(all_tokens)]
-    unsplit = unsplit_scalars(all_tokens)
-    multiword = multiword_scalars(all_tokens)
+    collapsed = collapse_quoted_substitutions(command)
+    all_tokens = tokenize(collapsed)
+    pairs = stated_segments(all_tokens)
+    segments = [tokens for tokens, _ in pairs]
+    states = [state for _, state in pairs]
 
     reported = set()
     prefix_lines, path_lines, kill_lines = [], [], []
-    for tokens in segments:
+    for tokens, state in pairs:
         stripped = strip_prefixes(tokens)
         if stripped:
             name = var_name(stripped[0])
-            if name in multiword:
+            if flag(state, name, 1):
                 prefix_lines.append(WARN_PREFIX % name)
                 reported.add(name)
         if stripped and basename(stripped[0]) == "kill":
             for arg in stripped[1:]:
                 name = var_name(arg)
-                if name in unsplit:
+                if flag(state, name, 0):
                     kill_lines.append(WARN_KILL % (name, name, name, name))
                     reported.add(name)
         loop_path = len(tokens) > 1 and tokens[0] == "for" and tokens[1] == "path"
@@ -686,10 +806,10 @@ def zsh_warnings(command: str) -> list[str]:
             path_lines.append(WARN_PATH)
 
     unsplit_out = []
-    masked_tokens = tokenize(mask_quotes(strip_line_comments(command)))
-    if len(masked_tokens) == len(all_tokens):
+    masked_tokens = tokenize(mask_quotes(strip_line_comments(collapsed)))
+    if shlex_accepts(command) and len(masked_tokens) == len(all_tokens):
         masked = [strip_keywords(seg) for seg in masked_segments(all_tokens, masked_tokens)]
-        unsplit_out = unsplit_lines(segments, masked, unsplit, multiword, reported)
+        unsplit_out = unsplit_lines(segments, masked, states, reported)
 
     modifier_lines = [
         WARN_MODIFIER % (name, letter, letter, name, name, letter)

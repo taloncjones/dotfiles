@@ -259,6 +259,21 @@ assert_rm_guard_warns "rm guard keeps later lines after a shift inside arithmeti
     '{"tool_name":"exec_command","tool_input":{"cmd":"x=$((1 << N))\npids=\"1 2\"; kill $pids"}}' \
     'zsh does not word-split $pids, so kill gets'
 
+assert_rm_guard_silent "rm guard stays silent on redirect and here-string operands (R2)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; gh pr view 5 > $v; cat <<< $v"}}'
+assert_rm_guard_silent "rm guard stays silent on an arithmetic expansion (R3)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"n=$((1+2)); for i in $n; do :; done; kill $n"}}'
+assert_rm_guard_silent "rm guard stays silent on a quoted variable inside a quoted substitution (R4)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; gh pr view \"$(foo \"bar $v baz\")\""}}'
+assert_rm_guard_silent "rm guard stays silent on eval and declaration arguments (R5)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; eval $v; export $v; local $v"}}'
+assert_rm_guard_silent "rm guard stays silent on a one-shot prefix assignment (R6)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"FOO=\"a b\" git log $FOO"}}'
+assert_rm_guard_silent "rm guard stays silent after a single-word reassignment (R7)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; v=one; git log $v"}}'
+assert_rm_guard_silent "rm guard stays silent on malformed input with an unmatched quote (R8)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls` ; for i in $v ; do : ; done ; echo \"oops"}}'
+
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must
 # never be a real checkout, or the temp-root exemption could flip the deny);
