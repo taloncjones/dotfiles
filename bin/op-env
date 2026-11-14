@@ -320,7 +320,7 @@ load_key() {
 take_lock() {
     local tries=0
     until (set -o noclobber; : >"$SIGNING_LOCK") 2>/dev/null; do
-        if [ -n "$(find "$SIGNING_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rm -f "$SIGNING_LOCK" 2>/dev/null; then
+        if [ -n "$(find "$SIGNING_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { rm -f "$SIGNING_LOCK" || rmdir "$SIGNING_LOCK"; } 2>/dev/null; then
             continue
         fi
         tries=$((tries + 1))
