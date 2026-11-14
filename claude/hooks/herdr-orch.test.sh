@@ -13586,6 +13586,16 @@ p = render("--phase", "implement")
 assert p.returncode == 0, (p.returncode, p.stderr)
 PY
 
+check "render-brief: a lead binding with no task record is skipped" <<'PY'
+import os
+exec(open(os.environ["BRIEF_FIXTURE"]).read())
+first, _ = rendered("--phase", "implement")
+os.remove(first["brief_path"])
+os.makedirs(os.path.join(rd, "leads", "B2", "tasks"))
+p = render("--phase", "implement")
+assert p.returncode == 0, (p.returncode, p.stderr)
+PY
+
 check "render-brief: a task record with a non-list workers or a non-string agent refuses" <<'PY'
 import os
 exec(open(os.environ["BRIEF_FIXTURE"]).read())
@@ -13609,7 +13619,7 @@ _, brief = rendered("--phase", "lead")
 flat = " ".join(brief.split())
 capture = re.search(r"store the record's current stamp in a file .*? with `(python3 (?:-I )?-c '.*?' RECORD_FILE STAMP_FILE)`", flat).group(1)
 until = re.search(r"`(until python3 (?:-I )?-c '.*?' RECORD_FILE STAMP_FILE WORKER_LAUNCH_ID .*?; done)`", flat).group(1)
-until = until.replace("540", "3").replace("sleep 10", "sleep 0.3")
+until = until.replace("540", "3").replace("sleep 10", "echo SLEPT; sleep 0.3")
 cwd = tempfile.mkdtemp()
 open(os.path.join(cwd, "json.py"), "w").write("raise SystemExit(7)\n")
 d = tempfile.mkdtemp()
@@ -13620,9 +13630,9 @@ write({"launch_id": "L1", "ts": "2026-11-02T10:00:00Z"})
 subprocess.run(["bash", "-c", capture.replace("RECORD_FILE", f).replace("STAMP_FILE", st)], cwd=cwd, check=True)
 assert open(st).read() == "2026-11-02T10:00:00Z", "stamp not captured"
 write({"launch_id": "L1", "ts": "2026-11-02T10:05:00Z"})
-script = "SECONDS=0\n" + until.replace("RECORD_FILE", f).replace("STAMP_FILE", st).replace("WORKER_LAUNCH_ID", "L1") + "\necho $SECONDS\n"
+script = until.replace("RECORD_FILE", f).replace("STAMP_FILE", st).replace("WORKER_LAUNCH_ID", "L1") + "\necho DONE\n"
 out = subprocess.run(["bash", "-c", script], cwd=cwd, capture_output=True, text=True, timeout=30).stdout
-assert int(out.strip()) == 0, "wait did not match under a shadowing json.py"
+assert out.strip() == "DONE", ("wait did not match on its first pass under a shadowing json.py", out)
 PY
 
 check "render-brief: repair and review briefs name the findings, artifacts and emit phase" <<'PY'
