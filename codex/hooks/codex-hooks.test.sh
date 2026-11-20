@@ -273,6 +273,17 @@ assert_rm_guard_silent "rm guard stays silent after a single-word reassignment (
     '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; v=one; git log $v"}}'
 assert_rm_guard_silent "rm guard stays silent on malformed input with an unmatched quote (R8)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls` ; for i in $v ; do : ; done ; echo \"oops"}}'
+assert_rm_guard_silent "rm guard stays silent on malformed input without backtick handling (R8)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\" ; for i in $v ; do : ; done ; echo \"oops"}}'
+assert_rm_guard_warns "rm guard warns on a quoted backtick value (V1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=\"`pgrep -f worker`\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard warns on an unquoted backtick value in a for list (V1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls`; for i in $v; do :; done"}}' \
+    'zsh does not word-split an unquoted $v'
+assert_rm_guard_warns "rm guard ignores quoted parentheses as grouping (V2)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"printf \"(\"; pids=\"1 2\"; printf \")\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
 
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must

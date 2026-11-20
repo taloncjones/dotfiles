@@ -923,6 +923,10 @@ rmg_warns "unsplit reassignment before the use is order-aware (R7)" "$(rmg_json_
 rmg_warns "unsplit subshell assignment stays in its subshell (R7)" "$(rmg_json_payload 'pids="1 2"; (pids=one); kill $pids')" "$(rmg_wk pids)"
 rmg_silent "unsplit malformed input with an unmatched quote (R8)" "$(rmg_json_payload 'v=`ls` ; for i in $v ; do : ; done ; echo "oops')"
 rmg_warns "kill warning survives malformed input (R8)" "$(rmg_json_payload 'pids=$(x) ; kill $pids ; echo "oops')" "$(rmg_wk pids)"
+rmg_silent "unsplit malformed input silent without backtick handling (R8)" "$(rmg_json_payload 'v="a b" ; for i in $v ; do : ; done ; echo "oops')"
+rmg_warns "unsplit kill of a backtick value, quoted (V1)" "$(rmg_json_payload 'pids="`pgrep -f worker`"; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "unsplit for list of a backtick value, unquoted (V1)" "$(rmg_json_payload 'v=`ls`; for i in $v; do :; done')" "$(rmg_wu v)"
+rmg_warns "unsplit quoted parentheses do not change the frame (V2)" "$(rmg_json_payload 'printf "("; pids="1 2"; printf ")"; kill $pids')" "$(rmg_wk pids)"
 
 # shell_hint.py: warn-only advisory for a bare background `&`.
 SHH=claude/hooks/shell_hint.py

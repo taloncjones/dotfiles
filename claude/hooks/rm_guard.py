@@ -686,7 +686,7 @@ def apply_assignments(frame: dict, tokens: list[str], follower: str) -> None:
             and not follower.startswith("((")
         )
         unsplit = bool(
-            re.search(r"[ \t\n`]", outside) or re.search(r"\$\((?!\()", value) or split_subst
+            re.search(r"[ \t\n]", outside) or "`" in value or re.search(r"\$\((?!\()", value) or split_subst
         )
         multiword = bool(re.search(r"[ \t\n]", outside))
         if tokens[i][len(name)] == "+":
@@ -695,13 +695,16 @@ def apply_assignments(frame: dict, tokens: list[str], follower: str) -> None:
         frame[name] = (unsplit, multiword)
 
 
-def stated_segments(all_tokens: list[str]) -> list[tuple[list[str], dict]]:
+def stated_segments(all_tokens: list[str], masked_tokens: list[str]) -> list[tuple[list[str], dict]]:
     """(segment, state) pairs in command order. State maps a name to its
     (unsplit, multiword) flags as they stand before the segment; each `(`
-    opens a copy of the state and each `)` closes it."""
+    opens a copy of the state and each `)` closes it. A quoted parenthesis
+    is a `_` in masked_tokens and changes nothing."""
+    if len(masked_tokens) != len(all_tokens):
+        masked_tokens = all_tokens
     frames = [{}]
     pairs, current = [], []
-    for tok in all_tokens + [None]:
+    for tok, masked in zip(all_tokens + [None], masked_tokens + [None]):
         is_operator = tok is None or (tok and all(c in SEGMENT_OPERATORS for c in tok))
         if not is_operator:
             current.append(tok)
@@ -711,7 +714,7 @@ def stated_segments(all_tokens: list[str]) -> list[tuple[list[str], dict]]:
             pairs.append((tokens, dict(frames[-1])))
             apply_assignments(frames[-1], tokens, tok or "")
             current = []
-        for ch in tok or "":
+        for ch in masked or "":
             if ch == "(":
                 frames.append(dict(frames[-1]))
             elif ch == ")" and len(frames) > 1:
@@ -781,7 +784,8 @@ def zsh_warnings(command: str) -> list[str]:
     command = drop_heredocs_and_continuations(command)
     collapsed = collapse_quoted_substitutions(command)
     all_tokens = tokenize(collapsed)
-    pairs = stated_segments(all_tokens)
+    masked_tokens = tokenize(mask_quotes(strip_line_comments(collapsed)))
+    pairs = stated_segments(all_tokens, masked_tokens)
     segments = [tokens for tokens, _ in pairs]
     states = [state for _, state in pairs]
 
@@ -806,7 +810,6 @@ def zsh_warnings(command: str) -> list[str]:
             path_lines.append(WARN_PATH)
 
     unsplit_out = []
-    masked_tokens = tokenize(mask_quotes(strip_line_comments(collapsed)))
     if shlex_accepts(command) and len(masked_tokens) == len(all_tokens):
         masked = [strip_keywords(seg) for seg in masked_segments(all_tokens, masked_tokens)]
         unsplit_out = unsplit_lines(segments, masked, states, reported)
