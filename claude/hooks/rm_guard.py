@@ -597,8 +597,9 @@ def substitution_end(command: str, i: int) -> int:
 
 
 def collapse_quoted_substitutions(command: str) -> str:
-    """Replace each `$(...)` inside double quotes with `$(_)`, so a quote
-    inside it does not pair with the quote around it."""
+    """Replace each `$(...)` inside double quotes with `$(_)` and each backtick
+    span with `_` between backticks, so a quote or space inside it neither
+    pairs with the quote around it nor splits the token."""
     out = []
     quote = None
     i, n = 0, len(command)
@@ -609,6 +610,16 @@ def collapse_quoted_substitutions(command: str) -> str:
         elif ch == "\\" and i + 1 < n:
             out.append(command[i : i + 2])
             i += 2
+            continue
+        elif ch == "`":
+            end = command.find("`", i + 1)
+            while end != -1 and command[end - 1] == "\\":
+                end = command.find("`", end + 1)
+            if end == -1:
+                out.append(command[i:])
+                break
+            out.append("`_`")
+            i = end + 1
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
             end = substitution_end(command, i + 2)

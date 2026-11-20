@@ -281,6 +281,20 @@ assert_rm_guard_warns "rm guard warns on a quoted backtick value (V1)" \
 assert_rm_guard_warns "rm guard warns on an unquoted backtick value in a for list (V1)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls`; for i in $v; do :; done"}}' \
     'zsh does not word-split an unquoted $v'
+assert_rm_guard_warns "rm guard warns on an unquoted backtick value with a space (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=`pgrep -f worker`; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard warns on a spaced backtick value in a for list (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls -a`; for i in $v; do :; done"}}' \
+    'zsh does not word-split an unquoted $v'
+assert_rm_guard_warns "rm guard warns on a spaced backtick value after a prefix pair (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"a=1 pids=`pgrep -f w`; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard warns on a spaced backtick value after an append (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"p=`a b`; p+=x; kill $p"}}' \
+    'zsh does not word-split $p, so kill gets'
+assert_rm_guard_silent "rm guard stays silent on a spaced backtick value with an unmatched quote (R8)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls -a` ; for i in $v ; do : ; done ; echo \"oops"}}'
 assert_rm_guard_warns "rm guard ignores quoted parentheses as grouping (V2)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"printf \"(\"; pids=\"1 2\"; printf \")\"; kill $pids"}}' \
     'zsh does not word-split $pids, so kill gets'

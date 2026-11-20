@@ -926,6 +926,12 @@ rmg_warns "kill warning survives malformed input (R8)" "$(rmg_json_payload 'pids
 rmg_silent "unsplit malformed input silent without backtick handling (R8)" "$(rmg_json_payload 'v="a b" ; for i in $v ; do : ; done ; echo "oops')"
 rmg_warns "unsplit kill of a backtick value, quoted (V1)" "$(rmg_json_payload 'pids="`pgrep -f worker`"; kill $pids')" "$(rmg_wk pids)"
 rmg_warns "unsplit for list of a backtick value, unquoted (V1)" "$(rmg_json_payload 'v=`ls`; for i in $v; do :; done')" "$(rmg_wu v)"
+rmg_warns "unsplit kill of an unquoted backtick value with a space (B1)" "$(rmg_json_payload 'pids=`pgrep -f worker`; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "unsplit for list of an unquoted backtick value with a space (B1)" "$(rmg_json_payload 'v=`ls -a`; for i in $v; do :; done')" "$(rmg_wu v)"
+rmg_warns "unsplit kill of a spaced backtick value on the next line (B1)" "$(rmg_json_payload "pids=\`pgrep -f w\`${NL}kill \$pids")" "$(rmg_wk pids)"
+rmg_warns "unsplit kill of a spaced backtick value after a prefix pair (B1)" "$(rmg_json_payload 'a=1 pids=`pgrep -f w`; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "unsplit kill of a spaced backtick value after an append (B1)" "$(rmg_json_payload 'p=`a b`; p+=x; kill $p')" "$(rmg_wk p)"
+rmg_silent "unsplit malformed input with a spaced backtick value (R8)" "$(rmg_json_payload 'v=`ls -a` ; for i in $v ; do : ; done ; echo "oops')"
 rmg_warns "unsplit quoted parentheses do not change the frame (V2)" "$(rmg_json_payload 'printf "("; pids="1 2"; printf ")"; kill $pids')" "$(rmg_wk pids)"
 
 # shell_hint.py: warn-only advisory for a bare background `&`.
