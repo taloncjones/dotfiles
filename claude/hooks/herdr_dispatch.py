@@ -1005,11 +1005,20 @@ def launch(
         elif runtime == "claude" and sandbox == "workspace-write":
             # A worktree .todos symlink resolves outside the cwd, and auto mode
             # does not answer the resulting write prompt.
+            # Only the main checkout's own .todos is granted: the link itself
+            # is untrusted. Any other target is skipped before _add_dirs runs.
             todos = Path(cwd, ".todos")
             if todos.is_symlink():
                 target = todos.resolve()
-                if target.is_dir():
-                    launch_route = {**route, "add_dirs": [str(target)]}
+                canonical = (Path(repository["common_dir"]).resolve().parent / ".todos").resolve()
+                existing = list(route.get("add_dirs", []))
+                if (
+                    target.is_dir()
+                    and target == canonical
+                    and str(target) not in existing
+                    and len(existing) < 2
+                ):
+                    launch_route = {**route, "add_dirs": [*existing, str(target)]}
         native = agent_runtime.launch_argv(
             launch_route, cwd, sandbox, mode="interactive", scope=scope
         )

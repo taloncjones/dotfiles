@@ -3104,6 +3104,62 @@ def test_claude_launch_skips_todos_add_dir_when_read_only_or_absent():
         fixture.close()
 
 
+def launch_from_worktree(fixture, todos_link, route):
+    """Launch a Claude worker from a linked worktree whose .todos is todos_link."""
+    main_todos = Path(fixture.temp.name) / "main-todos"
+    main_todos.mkdir()
+    (fixture.repo / ".todos").symlink_to(main_todos)
+    worktree = Path(fixture.temp.name) / "wt"
+    subprocess.run(
+        ["git", "-C", str(fixture.repo), "worktree", "add", "-q", "-b", "wt-branch", str(worktree)],
+        check=True,
+    )
+    (worktree / ".todos").symlink_to(todos_link)
+    fixture.env["FAKE_CWD"] = str(worktree.resolve())
+    context = core.repository_context(worktree)
+    task = json.loads(fixture.task_file.read_text())
+    task.update(worktree=str(worktree.resolve()), branch=context["branch"], base_sha=context["head"])
+    fixture.task_file.write_text(json.dumps(task))
+    herdr_dispatch.launch(
+        repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+        workspace_id="w1", pane_id="w1:p1", phase="implement", agent="impl-td-a",
+        route=route, cwd=worktree, sandbox="workspace-write", prompt="brief",
+        herdr_cli=str(fixture.bin), env=fixture.env,
+        start_timeout_ms=4000, prompt_timeout_ms=1000,
+    )
+    return main_todos
+
+
+def test_claude_launch_skips_todos_link_outside_main_todos():
+    for relative in (False, True):
+        fixture = Fixture()
+        try:
+            fixture.env["FAKE_RUNTIME"] = "claude"
+            other = Path(fixture.temp.name) / "other-dir"
+            other.mkdir()
+            link = os.path.relpath(other, Path(fixture.temp.name) / "wt") if relative else other
+            launch_from_worktree(fixture, link, claude_route())
+            assert "--add-dir" not in start_argv(fixture), start_argv(fixture)
+        finally:
+            fixture.close()
+
+
+def test_claude_launch_appends_main_todos_to_route_add_dirs():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        extra = Path(fixture.temp.name) / "extra"
+        extra.mkdir()
+        main_todos = Path(fixture.temp.name) / "main-todos"
+        route = {**claude_route(), "add_dirs": [str(extra)]}
+        launch_from_worktree(fixture, main_todos, route)
+        argv = start_argv(fixture)
+        dirs = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+        assert dirs == [str(extra.resolve()), str(main_todos.resolve())], argv
+    finally:
+        fixture.close()
+
+
 def test_claude_reviewer_pane_launch_passes_strict_mcp_config():
     fixture = Fixture()
     try:
@@ -7608,6 +7664,8 @@ for name, test in (
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
     ("Claude writable launch adds the resolved todos target", test_claude_writable_launch_adds_resolved_todos_target),
     ("Claude launch skips the todos add-dir when read-only or absent", test_claude_launch_skips_todos_add_dir_when_read_only_or_absent),
+    ("Claude launch skips a todos link outside the main todos", test_claude_launch_skips_todos_link_outside_main_todos),
+    ("Claude launch appends main todos to route add_dirs", test_claude_launch_appends_main_todos_to_route_add_dirs),
     ("Claude reviewer pane launch passes strict MCP config", test_claude_reviewer_pane_launch_passes_strict_mcp_config),
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
