@@ -255,6 +255,49 @@ assert_rm_guard_silent "rm guard stays silent on an explicit split scalar" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"var=\"a b\"; git log ${=var}"}}'
 assert_rm_guard_silent "rm guard stays silent on an array expansion" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"arr=(a b); gh pr edit 5 \"${arr[@]}\""}}'
+assert_rm_guard_warns "rm guard keeps later lines after a shift inside arithmetic (R1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"x=$((1 << N))\npids=\"1 2\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+
+assert_rm_guard_silent "rm guard stays silent on redirect and here-string operands (R2)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; gh pr view 5 > $v; cat <<< $v"}}'
+assert_rm_guard_silent "rm guard stays silent on an arithmetic expansion (R3)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"n=$((1+2)); for i in $n; do :; done; kill $n"}}'
+assert_rm_guard_silent "rm guard stays silent on a quoted variable inside a quoted substitution (R4)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; gh pr view \"$(foo \"bar $v baz\")\""}}'
+assert_rm_guard_silent "rm guard stays silent on eval and declaration arguments (R5)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; eval $v; export $v; local $v"}}'
+assert_rm_guard_silent "rm guard stays silent on a one-shot prefix assignment (R6)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"FOO=\"a b\" git log $FOO"}}'
+assert_rm_guard_silent "rm guard stays silent after a single-word reassignment (R7)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\"; v=one; git log $v"}}'
+assert_rm_guard_silent "rm guard stays silent on malformed input with an unmatched quote (R8)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls` ; for i in $v ; do : ; done ; echo \"oops"}}'
+assert_rm_guard_silent "rm guard stays silent on malformed input without backtick handling (R8)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=\"a b\" ; for i in $v ; do : ; done ; echo \"oops"}}'
+assert_rm_guard_warns "rm guard warns on a quoted backtick value (V1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=\"`pgrep -f worker`\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard warns on an unquoted backtick value in a for list (V1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls`; for i in $v; do :; done"}}' \
+    'zsh does not word-split an unquoted $v'
+assert_rm_guard_warns "rm guard warns on an unquoted backtick value with a space (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=`pgrep -f worker`; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard warns on a spaced backtick value in a for list (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls -a`; for i in $v; do :; done"}}' \
+    'zsh does not word-split an unquoted $v'
+assert_rm_guard_warns "rm guard warns on a spaced backtick value after a prefix pair (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"a=1 pids=`pgrep -f w`; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard warns on a spaced backtick value after an append (B1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"p=`a b`; p+=x; kill $p"}}' \
+    'zsh does not word-split $p, so kill gets'
+assert_rm_guard_silent "rm guard stays silent on a spaced backtick value with an unmatched quote (R8)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"v=`ls -a` ; for i in $v ; do : ; done ; echo \"oops"}}'
+assert_rm_guard_warns "rm guard ignores quoted parentheses as grouping (V2)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"printf \"(\"; pids=\"1 2\"; printf \")\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
 
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must
