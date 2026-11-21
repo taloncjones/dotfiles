@@ -1014,7 +1014,7 @@ def worktree_dirname(branch: str) -> str:
 
 
 def valid_workspace_id(ws) -> bool:
-    return bool(ws) and bool(WORKSPACE_ID_RE.match(ws))
+    return isinstance(ws, str) and bool(ws) and bool(WORKSPACE_ID_RE.match(ws))
 
 
 MESSAGING_SOCKET_DIRS = (
@@ -4171,14 +4171,16 @@ def phase_workspace(task, phase):
 
 
 def parse_poll(agents, workspaces):
-    """-> {"live": {ws: state}, "known": {ws}, "worktrees": {ws: path}}, or
-    None when either reply lacks its list. A malformed poll is a tool failure,
-    never an empty queue."""
+    """-> {"live": {ws: state}, "known": {ws}, "worktrees": {ws: path},
+    "agents": {ws: [agent]}, "agents_partial": bool}, or None when either reply
+    lacks its list. A skipped agent entry sets agents_partial. A malformed poll
+    is a tool failure, never an empty queue."""
     a = agents.get("result", {}).get("agents") if isinstance(agents, dict) else None
     w = workspaces.get("result", {}).get("workspaces") if isinstance(workspaces, dict) else None
     if not isinstance(a, list) or not isinstance(w, list):
         return None
     live, known, worktrees, agents = {}, set(), {}, {}
+    partial = False
     for row in w:
         if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
             continue
@@ -4189,6 +4191,7 @@ def parse_poll(agents, workspaces):
             worktrees[ws] = tree["checkout_path"]
     for row in a:
         if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
+            partial = True
             continue
         ws = row["workspace_id"]
         known.add(ws)
@@ -4196,7 +4199,8 @@ def parse_poll(agents, workspaces):
         live[ws] = state if isinstance(state, str) else "unknown"
         agents.setdefault(ws, []).append(
             {"name": row.get("name"), "pane_id": row.get("pane_id"), "agent_status": live[ws]})
-    return {"live": live, "known": known, "worktrees": worktrees, "agents": agents}
+    return {"live": live, "known": known, "worktrees": worktrees, "agents": agents,
+            "agents_partial": partial}
 
 
 def _git_ancestor(worktree, base, head) -> str:
@@ -4264,8 +4268,9 @@ def _stalled_row(task, row, poll_agents, done, events, now_ns):
 def _dead_row(task, row, poll, done, events, now_ns):
     """True when the latest plan or implement row's agent is gone from a
     good herdr poll, with no done record, past STALL_GRACE_SECS. A starting or
-    ready row counts: an interrupted launch leaves one."""
-    if poll is None or _row_agents(row, poll.get("agents", {})):
+    ready row counts: an interrupted launch leaves one. A partial agent list
+    counts as no poll."""
+    if poll is None or poll.get("agents_partial") or _row_agents(row, poll.get("agents", {})):
         return None
     if not _quiet_unsettled_row(task, row, done, events, now_ns,
                                 ("launched", "starting", "ready")):
