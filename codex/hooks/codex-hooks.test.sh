@@ -303,6 +303,20 @@ assert_rm_guard_warns "rm guard keeps the kill warning after an apostrophe comme
     'zsh does not word-split $pids, so kill gets'
 assert_rm_guard_silent "rm guard stays silent on a quoted substitution after an apostrophe comment (C1)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"# don'"'"'t\nv=\"a b\"; gh pr view \"$(foo \"bar $v baz\")\""}}'
+assert_rm_guard_warns "rm guard scans commands inside a backtick body (C2)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"out=`true; pids=\"1 2\"; kill $pids; echo done`"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard keeps the warning after a skipped reassignment (C3)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=\"1 2\"; false && pids=one; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard keeps the warning after a self-copy (C4)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=\"1 2\"; pids=\"$pids\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard counts an assignment after a redirect (C5)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"> /dev/null pids=\"1 2\"; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_silent "rm guard drops a heredoc after a quoted double bracket (C7)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"echo \"[[\"; cat <<EOF\npids=\"1 2\"\nkill $pids\nEOF"}}'
 
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must
