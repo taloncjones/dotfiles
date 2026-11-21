@@ -303,6 +303,9 @@ assert_rm_guard_warns "rm guard keeps the kill warning after an apostrophe comme
     'zsh does not word-split $pids, so kill gets'
 assert_rm_guard_silent "rm guard stays silent on a quoted substitution after an apostrophe comment (C1)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"# don'"'"'t\nv=\"a b\"; gh pr view \"$(foo \"bar $v baz\")\""}}'
+assert_rm_guard_warns "rm guard ends a backtick span after an escaped backslash (C6)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"pids=`printf \"1 2\" \\\\`; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
 assert_rm_guard_warns "rm guard scans commands inside a backtick body (C2)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"out=`true; pids=\"1 2\"; kill $pids; echo done`"}}' \
     'zsh does not word-split $pids, so kill gets'
