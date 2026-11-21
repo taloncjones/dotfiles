@@ -298,6 +298,11 @@ assert_rm_guard_silent "rm guard stays silent on a spaced backtick value with an
 assert_rm_guard_warns "rm guard ignores quoted parentheses as grouping (V2)" \
     '{"tool_name":"exec_command","tool_input":{"cmd":"printf \"(\"; pids=\"1 2\"; printf \")\"; kill $pids"}}' \
     'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_warns "rm guard keeps the kill warning after an apostrophe comment (C1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"# don'"'"'t\npids=`pgrep -f worker`; kill $pids"}}' \
+    'zsh does not word-split $pids, so kill gets'
+assert_rm_guard_silent "rm guard stays silent on a quoted substitution after an apostrophe comment (C1)" \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"# don'"'"'t\nv=\"a b\"; gh pr view \"$(foo \"bar $v baz\")\""}}'
 
 # Planning-artifact guard through the Codex payload shapes. A literal
 # protected pathspec denies without a resolvable repository (the cwd must

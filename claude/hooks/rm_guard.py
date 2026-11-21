@@ -596,11 +596,29 @@ def substitution_end(command: str, i: int) -> int:
     return -1
 
 
-def collapse_quoted_substitutions(command: str) -> str:
-    """Replace each `$(...)` inside double quotes with `$(_)` and each backtick
-    span with `_` between backticks, so a quote or space inside it neither
-    pairs with the quote around it nor splits the token."""
-    out = []
+def backtick_end(command: str, i: int) -> int:
+    """Index of the backtick closing a span whose body starts at i, or -1.
+    A backslash escapes the one character after it."""
+    n = len(command)
+    while i < n:
+        if command[i] == "\\":
+            i += 2
+        elif command[i] == "`":
+            return i
+        else:
+            i += 1
+    return -1
+
+
+def collapse_quoted_substitutions(command: str) -> tuple[str, str, list[str]]:
+    """Drop `#` comments and collapse backtick spans in one quote-aware walk.
+    Returns (plain, collapsed, bodies). plain has each backtick span replaced
+    by `_` between backticks; collapsed also replaces each `$(...)` inside
+    double quotes with `$(_)`, so a quote or space inside it neither pairs
+    with the quote around it nor splits the token. bodies lists the backtick
+    span bodies in text order."""
+    plain, collapsed, bodies = [], [], []
+    last = ""
     quote = None
     i, n = 0, len(command)
     while i < n:
@@ -608,32 +626,45 @@ def collapse_quoted_substitutions(command: str) -> str:
         if quote == "'":
             quote = None if ch == "'" else quote
         elif ch == "\\" and i + 1 < n:
-            out.append(command[i : i + 2])
+            plain.append(command[i : i + 2])
+            collapsed.append(command[i : i + 2])
+            last = command[i + 1]
             i += 2
             continue
+        elif ch == "#" and quote is None and (not last or last in " \t\n;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
         elif ch == "`":
-            end = command.find("`", i + 1)
-            while end != -1 and command[end - 1] == "\\":
-                end = command.find("`", end + 1)
+            end = backtick_end(command, i + 1)
             if end == -1:
-                out.append(command[i:])
+                plain.append(command[i:])
+                collapsed.append(command[i:])
                 break
-            out.append("`_`")
+            bodies.append(command[i + 1 : end])
+            plain.append("`_`")
+            collapsed.append("`_`")
+            last = "`"
             i = end + 1
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
             end = substitution_end(command, i + 2)
             if end == -1:
-                out.append(command[i:])
+                plain.append(command[i:])
+                collapsed.append(command[i:])
                 break
-            out.append("$(_)")
+            plain.append(command[i:end])
+            collapsed.append("$(_)")
+            last = ")"
             i = end
             continue
         elif ch in ("'", '"'):
             quote = None if quote == ch else (quote or ch)
-        out.append(ch)
+        plain.append(ch)
+        collapsed.append(ch)
+        last = ch
         i += 1
-    return "".join(out)
+    return "".join(plain), "".join(collapsed), bodies
 
 
 def outside_substitutions(value: str) -> str:
@@ -792,10 +823,9 @@ def shlex_accepts(command: str) -> bool:
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
-    command = drop_heredocs_and_continuations(command)
-    collapsed = collapse_quoted_substitutions(command)
+    plain, collapsed, _bodies = collapse_quoted_substitutions(drop_heredocs_and_continuations(command))
     all_tokens = tokenize(collapsed)
-    masked_tokens = tokenize(mask_quotes(strip_line_comments(collapsed)))
+    masked_tokens = tokenize(mask_quotes(collapsed))
     pairs = stated_segments(all_tokens, masked_tokens)
     segments = [tokens for tokens, _ in pairs]
     states = [state for _, state in pairs]
@@ -821,13 +851,13 @@ def zsh_warnings(command: str) -> list[str]:
             path_lines.append(WARN_PATH)
 
     unsplit_out = []
-    if shlex_accepts(command) and len(masked_tokens) == len(all_tokens):
+    if shlex_accepts(plain) and len(masked_tokens) == len(all_tokens):
         masked = [strip_keywords(seg) for seg in masked_segments(all_tokens, masked_tokens)]
         unsplit_out = unsplit_lines(segments, masked, states, reported)
 
     modifier_lines = [
         WARN_MODIFIER % (name, letter, letter, name, name, letter)
-        for name, letter in MODIFIER.findall(unquoted_text(command))
+        for name, letter in MODIFIER.findall(unquoted_text(plain))
     ]
 
     lines = []
