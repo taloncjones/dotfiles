@@ -937,6 +937,34 @@ def test_personal_only_env_disables_atlassian_plugin_outside_personal_repo():
     ), argv
 
 
+def test_claude_add_dirs_require_workspace_write():
+    scope = {"personal_repository": False}
+    route = {
+        **runtime.resolve_route(
+            "claude", "implementation", capabilities={"models": {"sonnet": model()}}
+        ),
+        "add_dirs": ["/tmp/shared-todos"],
+    }
+    argv = runtime.launch_argv(route, "/tmp/worktree", "workspace-write", scope=scope)
+    assert argv == [
+        "claude", "--model", route["model"], "--effort", route["effort"],
+        "--add-dir", str(Path("/tmp/shared-todos").resolve()),
+        "--permission-mode", "auto",
+    ], argv
+    raises(
+        runtime.RouteError,
+        lambda: runtime.launch_argv(route, "/tmp/worktree", "read-only", scope=scope),
+        "read-only Claude cannot make extra roots writable",
+    )
+    for bad in (["/"], ["relative"], ["/tmp"]):
+        raises(
+            runtime.RouteError,
+            lambda bad=bad: runtime.launch_argv(
+                {**route, "add_dirs": bad}, "/tmp/worktree/sub", "workspace-write", scope=scope
+            ),
+        )
+
+
 def test_codex_lifecycle_roots_require_workspace_write():
     base_route = runtime.resolve_route(
         "codex", "reviewer", capabilities=codex_capabilities()
@@ -2971,6 +2999,7 @@ for name, test in (
         test_personal_only_env_disables_atlassian_plugin_outside_personal_repo,
     ),
     ("run_bounded arms the gh shim for a herdr child", test_run_bounded_arms_the_gh_shim_for_a_herdr_child),
+    ("Claude add_dirs require workspace-write", test_claude_add_dirs_require_workspace_write),
     ("Codex lifecycle roots require workspace-write", test_codex_lifecycle_roots_require_workspace_write),
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),
     ("Codex JSONL joins multiple agent messages", test_codex_result_joins_multiple_agent_messages),

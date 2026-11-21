@@ -595,7 +595,7 @@ def _checked_cwd(cwd: str | os.PathLike[str]) -> str:
     return path
 
 
-def _codex_add_dirs(route: dict[str, Any], cwd: str) -> list[str]:
+def _add_dirs(route: dict[str, Any], cwd: str) -> list[str]:
     values = route.get("add_dirs", [])
     if not isinstance(values, list) or len(values) > 2:
         raise RouteError("add_dirs must be a list of at most two narrow roots")
@@ -671,7 +671,7 @@ def launch_argv(
     )
 
     if runtime == "codex":
-        add_dirs = _codex_add_dirs(route, selected_cwd)
+        add_dirs = _add_dirs(route, selected_cwd)
         if add_dirs and sandbox == "read-only":
             raise RouteError("read-only Codex cannot make lifecycle roots writable")
         lifecycle_approval = route.get("lifecycle_approval")
@@ -715,8 +715,9 @@ def launch_argv(
             argv.extend(["--json", "-"])
         return argv
 
-    if route.get("add_dirs"):
-        raise RouteError("add_dirs are supported only for Codex routes")
+    add_dirs = _add_dirs(route, selected_cwd)
+    if add_dirs and sandbox == "read-only":
+        raise RouteError("read-only Claude cannot make extra roots writable")
 
     permission_modes = {"read-only": "auto", "workspace-write": "auto"}
     if sandbox not in permission_modes:
@@ -724,6 +725,8 @@ def launch_argv(
             "Claude cannot enforce danger-full-access as a sandbox setting"
         )
     argv = ["claude", "--model", model, "--effort", effort]
+    for directory in add_dirs:
+        argv.extend(["--add-dir", directory])
     if sandbox == "read-only":
         # Plan mode strands an interactive reviewer on approval menus and makes
         # a headless one refuse any command that writes (even a temp-dir test
