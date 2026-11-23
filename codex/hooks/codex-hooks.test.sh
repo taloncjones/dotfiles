@@ -290,13 +290,13 @@ assert_allows "rm guard allows ANSI-C printf before a safe rm (T7)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
 assert_allows "rm guard allows numbered-list commit message with backtick rm example (T8)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
-assert_denies_2 "rm guard denies an rm after a PID dollar and plain quote (S10)" \
-    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')"
 Steps:
 1) deny
 2) `rm -rf /` example
 EOF
 )"')"
+assert_denies_2 "rm guard denies an rm after a PID dollar and plain quote (S10)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.
