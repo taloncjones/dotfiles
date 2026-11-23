@@ -1337,7 +1337,7 @@ def test_launch_refuses_implement_while_the_latest_review_is_live_without_a_verd
         try:
             fx.launch()
         except herdr_dispatch.DispatchError as exc:
-            assert "R" in str(exc) and "still live with no verdict" in str(exc), exc
+            assert "review R " in str(exc) and "still live with no verdict" in str(exc), exc
             assert "retired_review_launch_ids" in str(exc), exc
         else:
             raise AssertionError("implement launch superseded a live review")
@@ -1396,7 +1396,7 @@ def test_launch_refuses_implement_when_herdr_agent_liveness_is_unreadable():
         try:
             fx.launch()
         except herdr_dispatch.DispatchError as exc:
-            assert "R" in str(exc) and "cannot read herdr agent liveness" in str(exc), exc
+            assert "review R " in str(exc) and "cannot read herdr agent liveness" in str(exc), exc
         else:
             raise AssertionError("launch proceeded with unreadable liveness")
         assert fx.task_file.read_bytes() == before
@@ -1419,7 +1419,19 @@ def test_launch_refuses_implement_when_the_review_record_is_unreadable():
     fx = Fixture()
     try:
         before = live_review_state(fx, review_record="{not json")
-        expect_dispatch_error(lambda: fx.launch(), "unreadable")
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            msg = str(exc)
+            for text in ("cannot read the review record for review R (settlement record "
+                         "is unreadable: td-a.review.json)",
+                         "a implement launch would supersede it",
+                         "append R to retired_review_launch_ids with write-task",
+                         f"remove {fx.rd.resolve() / 'tasks' / 'td-a.review.json'} only if the "
+                         "record is still unreadable"):
+                assert text in msg, (text, msg)
+        else:
+            raise AssertionError("launch proceeded with an unreadable review record")
         assert fx.task_file.read_bytes() == before
         assert agent_list_calls(fx) == [], fx.calls()
     finally:
@@ -1484,6 +1496,30 @@ def test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_
         else:
             raise AssertionError("bound implement launch superseded a live review")
         assert fx.bound_task_file.read_bytes() == before
+    finally:
+        fx.close()
+
+
+def test_bound_launch_names_record_removal_when_the_lead_review_record_is_unreadable():
+    fx = LeadFixture()
+    try:
+        before = bound_live_review(fx)
+        record = fx.bound_task_file.with_name("td-a.review.json")
+        record.write_text("{not json")
+        try:
+            fx.launch()
+        except herdr_dispatch.DispatchError as exc:
+            msg = str(exc)
+            for text in ("cannot read the review record for review R (settlement record "
+                         "is unreadable: td-a.review.json)",
+                         "herdr agent prompt R /exit",
+                         f"remove {record.resolve()} only if the record is still unreadable"):
+                assert text in msg, (text, msg)
+            assert "retired_review_launch_ids" not in msg, msg
+        else:
+            raise AssertionError("bound launch proceeded with an unreadable review record")
+        assert fx.bound_task_file.read_bytes() == before
+        assert agent_list_calls(fx) == [], fx.calls()
     finally:
         fx.close()
 
@@ -7840,6 +7876,7 @@ for name, test in (
     ("launch proceeds for implement when a later row already superseded the review", test_launch_proceeds_for_implement_when_a_later_row_already_superseded_the_review),
     ("launch proceeds for a review relaunch while the prior review is live", test_launch_proceeds_for_a_review_relaunch_while_the_prior_review_is_live),
     ("bound launch refuses implement while the lead review is live without a verdict", test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_verdict),
+    ("bound launch names record removal when the lead review record is unreadable", test_bound_launch_names_record_removal_when_the_lead_review_record_is_unreadable),
     ("bound launch names list repair when herdr agent liveness is unreadable", test_bound_launch_names_list_repair_when_herdr_agent_liveness_is_unreadable),
 ):
     check(name, test)
