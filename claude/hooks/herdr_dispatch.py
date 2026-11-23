@@ -421,6 +421,41 @@ def _check_todo_ready(
         raise DispatchError("TODO dependencies are not ready")
 
 
+def _done_bytes(rd: Path, task_id: str) -> bytes | None:
+    """Bytes of the task's done record, or None when missing or unreadable."""
+    try:
+        return core.read_payload_bytes(rd / "tasks" / f"{task_id}.done.json")
+    except (OSError, ValueError):
+        return None
+
+
+def _refuse_superseding_late_done(rd, task, updated, task_id, phase, seen):
+    """Refuse a reserve whose new row would supersede a done record that landed after `seen`."""
+    raw = _done_bytes(rd, task_id)
+    if raw is None or raw == seen:
+        return
+    try:
+        done = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(done, dict) or done.get("phase") not in ("plan", "implement"):
+        return
+    row = core.latest_native_attempt(task, done["phase"])
+    if row is None or row.get("launch_id") != done.get("launch_id"):
+        return
+    workspace = done.get("workspace_id")
+    if not core.attempt_matches(task, done, done["phase"], workspace):
+        return
+    if core.attempt_matches(updated, done, done["phase"], workspace):
+        return
+    path = rd / "tasks" / f"{task_id}.done.json"
+    raise DispatchError(
+        f"{done['phase']} launch {done['launch_id']} recorded outcome {done.get('outcome')} "
+        f"in {path} after this launch read the task; a {phase} launch would supersede "
+        f"that record and the check-in would never act on it. Run the check-in again "
+        f"and launch only if it still asks for one")
+
+
 def _write_attempt(
     rd: Path,
     task_id: str,
@@ -431,6 +466,7 @@ def _write_attempt(
     repo_slug: str,
     attempt: dict[str, Any],
     todo_binding: tuple[bool, Any],
+    done_seen: bytes | None,
 ) -> dict[str, Any]:
     task_path = rd / "tasks" / f"{task_id}.json"
     with core.owner_transaction(
@@ -447,6 +483,8 @@ def _write_attempt(
             raise DispatchError("persisted TODO binding changed before dispatch")
         workers = [*task.get("workers", []), attempt]
         updated = {**task, "workers": workers}
+        _refuse_superseding_late_done(
+            rd, task, updated, task_id, attempt["phase"], done_seen)
         core.write_json_atomic(task_path, updated)
         return updated
 
@@ -510,8 +548,10 @@ def _update_attempt(
 class _LauncherRecords:
     """Launcher-scope attempt writer: the in-process owner-transaction path."""
 
-    def __init__(self, rd, task_id, session, fence, repository, scope, repo_slug, todo_binding):
+    def __init__(self, rd, task_id, session, fence, repository, scope, repo_slug,
+                 todo_binding, done_seen):
         self.rd = rd
+        self.done_seen = done_seen
         self.task_id = task_id
         self.session = session
         self.fence = fence
@@ -524,7 +564,7 @@ class _LauncherRecords:
         try:
             return _write_attempt(
                 self.rd, self.task_id, self.session, self.fence, self.repository,
-                self.scope, self.repo_slug, attempt, self.todo_binding,
+                self.scope, self.repo_slug, attempt, self.todo_binding, self.done_seen,
             )
         except ValueError as exc:
             # owner_transaction refuses a stale or foreign fence with a bare
@@ -907,6 +947,7 @@ def launch(
     if binding is not None:
         _check_bound_launch(_read_binding_record(rd, binding), task_id, repository)
         base = rd / "leads" / binding
+    done_seen = _done_bytes(rd, task_id)
     pending_task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
     _validate_task_context(pending_task, repository, repo_slug)
     closed = pending_task.get(core.WORKSPACE_CLOSED_KEY)
@@ -935,7 +976,8 @@ def launch(
     _check_todo_ready(pending_task, repository["root"], todos_cli, child_env)
     if binding is None:
         records = _LauncherRecords(
-            rd, task_id, session, fence, repository, scope, repo_slug, todo_binding
+            rd, task_id, session, fence, repository, scope, repo_slug, todo_binding,
+            done_seen,
         )
     else:
         records = _BoundRecords(

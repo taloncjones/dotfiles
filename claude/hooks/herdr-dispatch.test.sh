@@ -13,6 +13,7 @@ else
 fi
 
 "${PYTHON[@]}" - <<'PY'
+import contextlib
 import hashlib
 import json
 import os
@@ -7586,6 +7587,287 @@ def test_invalid_timeout_floor_keeps_given_timeout():
 
 
 
+LATE_CORE = str(Path(core.__file__).resolve())
+DONE_NAME = "td-a.done.json"
+WORK_HEAD = "c" * 40  # a worker head one commit past the base, as a completion carries
+
+def row(phase, lid, head, pane="w1:p1"):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": head, "agent": lid, "status": "launched"}
+
+def set_workers(fx, workers, status="in-progress"):
+    task = json.loads(fx.task_file.read_text())
+    task.update(status=status, workers=workers)
+    fx.task_file.write_text(json.dumps(task))
+
+def record(r, head, outcome="completed"):
+    rec = {k: r[k] for k in core.ATTEMPT_FIELDS}
+    rec.update(v=1, task_id="td-a", agent=r["agent"], outcome=outcome, head_sha=WORK_HEAD, base_sha=head, ts=core.now_iso())
+    return rec
+
+def emit(fx, r, head, outcome="completed"):
+    p = subprocess.run([sys.executable, LATE_CORE, "emit-done", "--repo-slug", fx.slug, "--repo-path", str(fx.repo),
+        "--runtime", "claude", "--task-id", "td-a", "--workspace", "w1", "--agent", r["agent"], "--phase", r["phase"],
+        "--outcome", outcome, "--head-sha", WORK_HEAD, "--base-sha", head, "--launch-id", r["launch_id"],
+        "--pane-id", r["pane_id"], "--source-head-sha", r["source_head_sha"]], capture_output=True, text=True, env=fx.env)
+    assert p.returncode == 0, ("emit-done refused", p.stderr)
+
+@contextlib.contextmanager
+def before_reserve(action):
+    """Run action after launch's task read and before its reserve: inside _await_pane_shell."""
+    orig = herdr_dispatch._await_pane_shell
+    def hook(*a, **k):
+        action()
+        return orig(*a, **k)
+    herdr_dispatch._await_pane_shell = hook
+    try:
+        yield
+    finally:
+        herdr_dispatch._await_pane_shell = orig
+
+def refused(fx, call, record_phase, launch_id, outcome, phase):
+    """The launch raises exactly the late-done refusal naming fx's done record."""
+    try:
+        call()
+    except herdr_dispatch.DispatchError as exc:
+        msg = str(exc)
+    else:
+        raise AssertionError("launch proceeded over a late done record")
+    head = f"{record_phase} launch {launch_id} recorded outcome {outcome} in "
+    tail = (" after this launch read the task; a " + phase + " launch would supersede that record"
+            " and the check-in would never act on it. Run the check-in again and launch only if"
+            " it still asks for one")
+    assert msg.startswith(head) and msg.endswith(tail), ("refusal text", msg)
+    path = Path(msg[len(head):len(msg) - len(tail)])
+    assert path.resolve() == (fx.rd / "tasks" / DONE_NAME).resolve(), ("refusal path", path)
+    return msg
+
+def completion_confirmed(fx, head):
+    p = subprocess.run([sys.executable, LATE_CORE, "confirm-completion", "--repo-slug", fx.slug, "--repo-path", str(fx.repo),
+        "--task-id", "td-a", "--workspace", "w1", "--head-sha", WORK_HEAD], capture_output=True, text=True, env=fx.env)
+    return p.returncode == 0
+
+def starts(fx):
+    return [c for c in fx.calls() if c[:2] == ["agent", "start"]]
+
+def done_on_disk(fx):
+    return json.loads((fx.rd / "tasks" / DONE_NAME).read_text())
+
+
+def test_launch_refuses_plan_relaunch_over_late_done_record():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        old = row("plan", "P-old", head)
+        set_workers(fx, [old])
+        with before_reserve(lambda: emit(fx, old, head)):
+            refused(fx, lambda: launch_phase(fx, "plan", "impl-td-a"), "plan", "P-old", "completed", "plan")
+        task = json.loads(fx.task_file.read_text())
+        assert task["workers"] == [old], task["workers"]
+        assert starts(fx) == [], fx.calls()
+        done = done_on_disk(fx)
+        assert done["launch_id"] == "P-old" and core.plan_record_matches(task, done, WORK_HEAD, "w1"), done
+        emit(fx, old, head)  # the old worker's re-emit is still accepted
+    finally:
+        fx.close()
+    # A late paused record also refuses: it is not completion-eligible, and the
+    # guard keeps it matching so the check-in can report the pause.
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        old = row("plan", "P-old", head)
+        set_workers(fx, [old])
+        with before_reserve(lambda: emit(fx, old, head, outcome="paused")):
+            refused(fx, lambda: launch_phase(fx, "plan", "impl-td-a"), "plan", "P-old", "paused", "plan")
+        task = json.loads(fx.task_file.read_text())
+        done = done_on_disk(fx)
+        assert task["workers"] == [old] and core.attempt_matches(task, done, "plan", "w1"), done
+        assert not core.plan_record_matches(task, done, WORK_HEAD, "w1"), "a paused record must stay ineligible"
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_repair_relaunch_over_late_done_record():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev, repair = row("implement", "I", head), row("review", "R", head, "w1:p2"), row("implement", "I2", head)
+        set_workers(fx, [impl, rev, repair], "changes-requested")
+        (fx.rd / "tasks" / DONE_NAME).write_text(json.dumps(record(impl, head)))
+        (fx.rd / "tasks" / "td-a.review.json").write_text(json.dumps({**{k: rev[k] for k in core.ATTEMPT_FIELDS}, "outcome": "changes-requested"}))
+        with before_reserve(lambda: emit(fx, repair, head)):
+            refused(fx, fx.launch, "implement", "I2", "completed", "implement")
+        task = json.loads(fx.task_file.read_text())
+        assert [w["launch_id"] for w in task["workers"]] == ["I", "R", "I2"], task["workers"]
+        assert starts(fx) == [], fx.calls()
+        assert completion_confirmed(fx, head), "the check-in does not confirm the late repair completion"
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_late_done_at_read_or_under_lock():
+    # (a) the emit lands while launch reads the task: the snapshot must predate the task read.
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        old = row("implement", "I-old", head)
+        set_workers(fx, [old])
+        orig_read, fired = herdr_dispatch._read_task, []
+        def read_task(*a, **k):
+            if not fired:
+                fired.append(True)
+                emit(fx, old, head)
+            return orig_read(*a, **k)
+        herdr_dispatch._read_task = read_task
+        try:
+            refused(fx, fx.launch, "implement", "I-old", "completed", "implement")
+        finally:
+            herdr_dispatch._read_task = orig_read
+        assert [w["launch_id"] for w in json.loads(fx.task_file.read_text())["workers"]] == ["I-old"]
+        assert starts(fx) == [], fx.calls()
+        assert completion_confirmed(fx, head), "the check-in does not confirm the late completion"
+    finally:
+        fx.close()
+    # (b) the record appears only once the reserve holds the owner lock.
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        old = row("implement", "I-old", head)
+        set_workers(fx, [old])
+        armed, orig_tx = [], core.owner_transaction
+        @contextlib.contextmanager
+        def tx(*a, **k):
+            with orig_tx(*a, **k) as t:
+                if armed and armed.pop():
+                    # The emit lands just before the reserve takes the lock: write
+                    # it as emit-done would, from inside the held lock.
+                    (fx.rd / "tasks" / DONE_NAME).write_text(json.dumps(record(old, head)))
+                yield t
+        core.owner_transaction = tx
+        try:
+            with before_reserve(lambda: armed.append(True)):
+                refused(fx, fx.launch, "implement", "I-old", "completed", "implement")
+        finally:
+            core.owner_transaction = orig_tx
+        assert [w["launch_id"] for w in json.loads(fx.task_file.read_text())["workers"]] == ["I-old"]
+        assert starts(fx) == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_launch_proceeds_over_prior_or_superseded_done_record():
+    cases = []
+    # (a) no done record
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        set_workers(fx, [row("plan", "P-old", head)])
+        assert launch_phase(fx, "plan", "impl-td-a")["status"] == "launched"
+        cases.append("no-record")
+    finally:
+        fx.close()
+    # (b) the current attempt's paused record was on disk before launch read the task
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        old = row("plan", "P-old", head)
+        set_workers(fx, [old])
+        emit(fx, old, head, outcome="paused")
+        assert launch_phase(fx, "plan", "impl-td-a")["status"] == "launched"
+        cases.append("prior-paused")
+    finally:
+        fx.close()
+    # (c) the first repair launch: the implement record and the review verdict predate the read
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = row("implement", "I", head), row("review", "R", head, "w1:p2")
+        set_workers(fx, [impl, rev], "changes-requested")
+        (fx.rd / "tasks" / DONE_NAME).write_text(json.dumps(record(impl, head)))
+        (fx.rd / "tasks" / "td-a.review.json").write_text(json.dumps({**{k: rev[k] for k in core.ATTEMPT_FIELDS}, "outcome": "changes-requested"}))
+        assert fx.launch()["status"] == "launched"
+        cases.append("first-repair")
+    finally:
+        fx.close()
+    # (d) a record for an older, already superseded launch lands in the window
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        p1, p2 = row("plan", "P1", head), row("plan", "P2", head)
+        set_workers(fx, [p1, p2])
+        with before_reserve(lambda: (fx.rd / "tasks" / DONE_NAME).write_text(json.dumps(record(p1, head)))):
+            assert launch_phase(fx, "plan", "impl-td-a")["status"] == "launched"
+        cases.append("superseded-launch")
+    finally:
+        fx.close()
+    # (e) a review launch after a late implement record: review trails implement, nothing is superseded
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = row("implement", "I", head)
+        set_workers(fx, [impl])
+        with before_reserve(lambda: emit(fx, impl, head)):
+            assert launch_phase(fx, "review", "impl-td-a")["status"] == "launched"
+        task = json.loads(fx.task_file.read_text())
+        assert core.attempt_matches(task, done_on_disk(fx), "implement", "w1")
+        cases.append("review-trails")
+    finally:
+        fx.close()
+    # (f, g) an unreadable record and a non-object record land in the window
+    for label, raw in (("unreadable", "{not json"), ("non-object", "[1, 2]")):
+        fx = Fixture()
+        try:
+            head = core.repository_context(fx.repo)["head"]
+            set_workers(fx, [row("plan", "P-old", head)])
+            with before_reserve(lambda: (fx.rd / "tasks" / DONE_NAME).write_text(raw)):
+                assert launch_phase(fx, "plan", "impl-td-a")["status"] == "launched", label
+            cases.append(label)
+        finally:
+            fx.close()
+    # (h, i, j) read failures: a directory at the record path appears in the window
+    # (the locked re-read fails), a directory is there before launch (both reads
+    # fail), and an unreadable-mode file appears in the window.
+    def make_dir(fx):
+        (fx.rd / "tasks" / DONE_NAME).mkdir()
+    def make_mode0(fx):
+        path = fx.rd / "tasks" / DONE_NAME
+        path.write_text(json.dumps(record(row("plan", "P-old", core.repository_context(fx.repo)["head"]), core.repository_context(fx.repo)["head"])))
+        path.chmod(0)
+    for label, before, during in (("dir-in-window", None, make_dir), ("dir-before-read", make_dir, None),
+                                  ("mode0-in-window", None, make_mode0)):
+        fx = Fixture()
+        try:
+            head = core.repository_context(fx.repo)["head"]
+            set_workers(fx, [row("plan", "P-old", head)])
+            if before:
+                before(fx)
+            with before_reserve(lambda: during and during(fx)):
+                assert launch_phase(fx, "plan", "impl-td-a")["status"] == "launched", label
+            cases.append(label)
+        finally:
+            path = fx.rd / "tasks" / DONE_NAME
+            if path.is_file():
+                path.chmod(0o600)
+            fx.close()
+    assert cases == ["no-record", "prior-paused", "first-repair", "superseded-launch", "review-trails",
+                     "unreadable", "non-object", "dir-in-window", "dir-before-read", "mode0-in-window"], cases
+
+
+def test_failed_pane_prep_reserves_no_row_over_late_done():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        old = row("implement", "I-old", head)
+        set_workers(fx, [old])
+        fx.env["FAKE_HERDR_MODE"] = "omz-prompt-shell"
+        with before_reserve(lambda: emit(fx, old, head)):
+            refused(fx, fx.launch, "implement", "I-old", "completed", "implement")
+        assert [w["launch_id"] for w in json.loads(fx.task_file.read_text())["workers"]] == ["I-old"]
+    finally:
+        fx.close()
+
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -7878,6 +8160,16 @@ for name, test in (
     ("bound launch refuses implement while the lead review is live without a verdict", test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_verdict),
     ("bound launch names record removal when the lead review record is unreadable", test_bound_launch_names_record_removal_when_the_lead_review_record_is_unreadable),
     ("bound launch names list repair when herdr agent liveness is unreadable", test_bound_launch_names_list_repair_when_herdr_agent_liveness_is_unreadable),
+    ("launch refuses a plan relaunch when the old launch's completed or paused done record lands before the reserve",
+     test_launch_refuses_plan_relaunch_over_late_done_record),
+    ("launch refuses a repair relaunch when the dead repair's done record lands before the reserve",
+     test_launch_refuses_repair_relaunch_over_late_done_record),
+    ("launch refuses a relaunch whose late done record lands at the task read or under the reserve's owner lock",
+     test_launch_refuses_late_done_at_read_or_under_lock),
+    ("launch proceeds when the done record predates its read, cannot be read or parsed, names a superseded launch, or a review trails it",
+     test_launch_proceeds_over_prior_or_superseded_done_record),
+    ("a failed pane prep reserves no row over a late done record",
+     test_failed_pane_prep_reserves_no_row_over_late_done),
 ):
     check(name, test)
 
