@@ -774,6 +774,47 @@ rmg_denies_with "deny text D1 via Codex payload shape" \
 rmg_json_payload() {
     python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}, "cwd": sys.argv[2]}))' "$1" "$RMG_CWD"
 }
+# An rm inside a command substitution is denied like the same rm at top level.
+RMG_D2='Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
+RMG_D5='Blocked: rm target is a system path (/etc). Fix: remove only scratch paths under /tmp or $TMPDIR, or ask the user to run this removal.'
+RMG_TOO_COMPLEX='Blocked: command nests more command substitutions than this guard can check. Fix: split it into separate, simpler commands.'
+rmg_allows_json() {
+    label="$1"
+    payload="$2"
+    rc=0
+    out=$(printf '%s' "$payload" | HOME="$RMG_HOME" "$RMG" 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s stdout=%s)\n' "$label" "$rc" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_denies_with "denies an rm in a backtick body (S1)" "$(rmg_json_payload 'echo `rm -rf /`')" "$RMG_D2"
+rmg_denies_with "denies an rm in a backtick inside double quotes (S2)" "$(rmg_json_payload 'x="`rm -rf /`"')" "$RMG_D2"
+rmg_denies_with "denies an rm in a double-quoted dollar-paren (S3)" "$(rmg_json_payload 'x="$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies an rm in escaped nested backticks (S4)" "$(rmg_json_payload 'x=`echo \`rm -rf /\``')" "$RMG_D2"
+rmg_denies_with "denies an rm in a quoted substitution inside an unquoted one (S4)" "$(rmg_json_payload 'echo $(echo "$(rm -rf /)")')" "$RMG_D2"
+rmg_denies_with "denies an rm after a comment inside a backtick body (S5)" "$(rmg_json_payload 'pids=`pgrep x # c`; rm -rf /')" "$RMG_D2"
+rmg_denies_with "substitution deny text matches top level for /etc (S6)" "$(rmg_json_payload 'x="`rm -rf /etc`"')" "$RMG_D5"
+rmg_denies_with "denies a quoted substitution after cd / (S7)" "$(rmg_json_payload 'cd / && echo "$(rm -rf *)"')" "$RMG_D2"
+rmg_denies_with "denies a backtick rm inside sh -c (S7)" "$(rmg_json_payload 'sh -c '"'"'echo `rm -rf /etc`'"'"'')" "$RMG_D5"
+rmg_allows_json "allows a single-quoted dollar-paren rm (S8)" "$(rmg_json_payload "echo '\$(rm -rf /)'")"
+rmg_allows_json "allows an escaped backtick rm (S8)" "$(rmg_json_payload 'echo \`rm -rf /\`')"
+rmg_allows_json "allows a backtick rm in a quoted heredoc body (S8)" "$(rmg_json_payload 'cat <<'"'"'EOF'"'"'
+`rm -rf /`
+EOF')"
+rmg_allows_json "allows a commit-message heredoc inside a substitution (S8)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+rm -rf / is denied; rm -rf /etc too
+EOF
+)"')"
+rmg_allows_json "allows a quoted rm -rf / string (S8)" "$(rmg_json_payload 'echo "rm -rf /"')"
+RMG_NEST=$(python3 -c 'c = "true"
+for i in range(40):
+    c = "echo \"$(true %d; %s)\"" % (i, c)
+print(c + "; rm -f ./scratch.txt")')
+rmg_denies_with "denies a 40-level substitution nest with the limit text (S9)" "$(rmg_json_payload "$RMG_NEST")" "$RMG_TOO_COMPLEX"
 rmg_warns() {
     label="$1"
     payload="$2"

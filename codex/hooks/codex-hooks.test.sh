@@ -202,6 +202,42 @@ assert_allows "rm guard ignores malformed shell input" \
     claude/hooks/rm_guard.py \
     '{"tool_name":"exec_command","tool_input":{"args":[]}}'
 
+# An rm inside a command substitution is denied.
+rmg_sub_payload() {
+    python3 -c 'import json,sys; print(json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": sys.argv[1], "workdir": "/tmp/project"}}))' "$1"
+}
+assert_denies_2 "rm guard denies an rm in a backtick body (S1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo `rm -rf /`')"
+assert_denies_2 "rm guard denies a backtick in double quotes (S2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x="`rm -rf /`"')"
+assert_denies_2 "rm guard denies a double-quoted dollar-paren (S3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x="$(rm -rf /)"')"
+assert_denies_2 "rm guard denies escaped nested backticks (S4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x=`echo \`rm -rf /\``')"
+assert_denies_2 "rm guard denies nested dollar-paren substitutions (S4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $(echo "$(rm -rf /)")')"
+assert_denies_2 "rm guard denies an rm after a backtick comment (S5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'pids=`pgrep x # c`; rm -rf /')"
+assert_denies_2 "rm guard denies a substitution rm after cd / (S7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'cd / && echo "$(rm -rf *)"')"
+assert_denies_2 "rm guard denies a backtick rm inside sh -c (S7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'sh -c '"'"'echo `rm -rf /etc`'"'"'')"
+assert_allows "rm guard allows a single-quoted dollar-paren rm (S8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "echo '\$(rm -rf /)'")"
+assert_allows "rm guard allows an escaped backtick rm (S8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo \`rm -rf /\`')"
+assert_allows "rm guard allows a backtick rm in a quoted heredoc (S8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'cat <<'"'"'EOF'"'"'
+`rm -rf /`
+EOF')"
+assert_allows "rm guard allows a commit-message heredoc in a substitution (S8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+rm -rf / is denied
+EOF
+)"')"
+assert_allows "rm guard allows a quoted rm -rf / string (S8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "rm -rf /"')"
+
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.
 assert_rm_guard_warns() {
