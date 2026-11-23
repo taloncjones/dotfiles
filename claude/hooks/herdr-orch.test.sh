@@ -12173,6 +12173,44 @@ done = {k: row[k] for k in c.ATTEMPT_FIELDS}
 open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write(json.dumps(
     dict(done, task_id="PROJ-1", outcome="paused", head_sha="a" * 40, ts="2026-11-10T00:00:00Z")))
 assert no(task)
+assert not facts(task, empty)["dead_worker"]
+PY
+
+check "checkin_facts: a malformed agent entry suppresses relaunch-dead-worker and nothing else" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+now = 10**18
+row = {"phase": "plan", "workspace_id": "w1", "runtime": "claude", "launch_id": "P1",
+       "pane_id": "w1:p1", "source_head_sha": "a" * 40, "agent": "plan-x",
+       "status": "launched", "started_ns": now - 3 * 86400 * 10**9}
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "a" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [row]}
+SPACES = [{"workspace_id": "w1"}]
+OTHER = {"workspace_id": "w1", "name": "other-y", "pane_id": "w1:p2", "agent_status": "working"}
+ME = {"workspace_id": "w1", "name": "plan-x", "pane_id": "w1:p1", "agent_status": "idle"}
+def poll(agents, spaces=SPACES):
+    p = c.parse_poll({"result": {"agents": agents}}, {"result": {"workspaces": spaces}})
+    assert p is not None
+    return p
+def facts(agents, spaces=SPACES):
+    return c.checkin_facts(rd, task, poll(agents, spaces), c.state_root().parent, now_ns=now)
+clean = facts([OTHER])
+assert clean["action"] == "relaunch-dead-worker" and clean["dead_worker"], clean
+assert poll([OTHER])["agents_partial"] is False
+shapes = [None, "plan-x", 7, 0.5, {"name": "plan-x", "pane_id": "w1:p1"},
+          dict(OTHER, workspace_id=None), dict(OTHER, workspace_id=""),
+          dict(OTHER, workspace_id="w 1"), dict(OTHER, workspace_id=5),
+          dict(OTHER, workspace_id=["w1"])]
+for bad in shapes:
+    for agents in ([bad], [bad, OTHER], [OTHER, bad]):
+        assert poll(agents)["agents_partial"] is True, agents
+        x = facts(agents)
+        assert not x["dead_worker"] and x["action"] != "relaunch-dead-worker", (agents, x)
+assert facts([], SPACES + [{"workspace_id": 5}])["action"] == "relaunch-dead-worker"
+assert c.valid_workspace_id(5) is False
+x = facts([None, ME])
+assert x["live"] == "idle" and x["action"] == "reprompt-stalled", x
 PY
 
 check "next: relaunch-dead-worker asks to relaunch the phase, naming the agent, launch and pane" <<PY
@@ -14683,7 +14721,7 @@ files = {f for f in os.listdir(d + "/references") if f.endswith(".md")}
 assert named == files, ("named but missing", sorted(named - files), "present but unnamed", sorted(files - named))
 PY
 
-check "docs: SKILL.md stays at or under 67000 bytes" <<'SH'
+check "docs: SKILL.md stays at or under 68500 bytes" <<'SH'
 n=$(wc -c < claude/skills/herdr-orchestration/SKILL.md)
 [ "$n" -le 68500 ]
 SH
