@@ -192,6 +192,7 @@ def drop_heredocs_and_continuations(command: str) -> str:
     not read as commands and a continued line stays one command. Quote- and
     comment-aware like strip_line_comments."""
     out = []
+    bare = []  # out without quoted characters (each is `_`) and comments
     pending = []
     quote = None
     i, n = 0, len(command)
@@ -199,18 +200,22 @@ def drop_heredocs_and_continuations(command: str) -> str:
         ch = command[i]
         if quote:
             out.append(ch)
+            bare.append(ch if ch == "\n" else "_")
             if ch == "\\" and quote == '"' and i + 1 < n:
                 i += 1
                 out.append(command[i])
+                bare.append(command[i] if command[i] == "\n" else "_")
             elif ch == quote:
                 quote = None
         elif ch in ("'", '"'):
             quote = ch
             out.append(ch)
+            bare.append("_")
         elif ch == "\\" and i + 1 < n:
             if command[i + 1] != "\n":
                 out.append(ch)
                 out.append(command[i + 1])
+                bare.extend("__")
             i += 1
         elif ch == "#" and (not out or out[-1] in " \t\n;&|()"):
             while i < n and command[i] != "\n":
@@ -219,20 +224,24 @@ def drop_heredocs_and_continuations(command: str) -> str:
             continue
         elif ch == "\n" and pending:
             out.append(ch)
+            bare.append(ch)
             i = skip_heredoc_bodies(command, i + 1, pending)
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i) and command[i - 1 : i] != "<":
-            not_heredoc = command[i + 2 : i + 3] == "<" or in_arith_or_cond("".join(out))
+            not_heredoc = command[i + 2 : i + 3] == "<" or in_arith_or_cond("".join(bare))
             m = None if not_heredoc else HEREDOC_OP.match(command, i)
             if m:
                 pending.append((m.group(3), m.group(1) == "-"))
                 out.extend(m.group(0))
+                bare.extend(m.group(0))
                 i = m.end()
                 continue
             out.append(ch)
+            bare.append(ch)
         else:
             out.append(ch)
+            bare.append(ch)
         i += 1
     return "".join(out)
 
@@ -596,11 +605,29 @@ def substitution_end(command: str, i: int) -> int:
     return -1
 
 
-def collapse_quoted_substitutions(command: str) -> str:
-    """Replace each `$(...)` inside double quotes with `$(_)` and each backtick
-    span with `_` between backticks, so a quote or space inside it neither
-    pairs with the quote around it nor splits the token."""
-    out = []
+def backtick_end(command: str, i: int) -> int:
+    """Index of the backtick closing a span whose body starts at i, or -1.
+    A backslash escapes the one character after it."""
+    n = len(command)
+    while i < n:
+        if command[i] == "\\":
+            i += 2
+        elif command[i] == "`":
+            return i
+        else:
+            i += 1
+    return -1
+
+
+def collapse_quoted_substitutions(command: str) -> tuple[str, str, list[str]]:
+    """Drop `#` comments and collapse backtick spans in one quote-aware walk.
+    Returns (plain, collapsed, bodies). plain has each backtick span replaced
+    by `_` between backticks; collapsed also replaces each `$(...)` inside
+    double quotes with `$(_)`, so a quote or space inside it neither pairs
+    with the quote around it nor splits the token. bodies lists the backtick
+    span bodies in text order."""
+    plain, collapsed, bodies = [], [], []
+    last = ""
     quote = None
     i, n = 0, len(command)
     while i < n:
@@ -608,32 +635,45 @@ def collapse_quoted_substitutions(command: str) -> str:
         if quote == "'":
             quote = None if ch == "'" else quote
         elif ch == "\\" and i + 1 < n:
-            out.append(command[i : i + 2])
+            plain.append(command[i : i + 2])
+            collapsed.append(command[i : i + 2])
+            last = command[i + 1]
             i += 2
             continue
+        elif ch == "#" and quote is None and (not last or last in " \t\n;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
         elif ch == "`":
-            end = command.find("`", i + 1)
-            while end != -1 and command[end - 1] == "\\":
-                end = command.find("`", end + 1)
+            end = backtick_end(command, i + 1)
             if end == -1:
-                out.append(command[i:])
+                plain.append(command[i:])
+                collapsed.append(command[i:])
                 break
-            out.append("`_`")
+            bodies.append(command[i + 1 : end])
+            plain.append("`_`")
+            collapsed.append("`_`")
+            last = "`"
             i = end + 1
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
             end = substitution_end(command, i + 2)
             if end == -1:
-                out.append(command[i:])
+                plain.append(command[i:])
+                collapsed.append(command[i:])
                 break
-            out.append("$(_)")
+            plain.append(command[i:end])
+            collapsed.append("$(_)")
+            last = ")"
             i = end
             continue
         elif ch in ("'", '"'):
             quote = None if quote == ch else (quote or ch)
-        out.append(ch)
+        plain.append(ch)
+        collapsed.append(ch)
+        last = ch
         i += 1
-    return "".join(out)
+    return "".join(plain), "".join(collapsed), bodies
 
 
 def outside_substitutions(value: str) -> str:
@@ -659,33 +699,38 @@ def outside_substitutions(value: str) -> str:
     return "".join(out)
 
 
-def only_redirects(tokens: list[str]) -> bool:
-    """True when every token is a redirection, with its operand when the
-    operator is a token of its own."""
+def word_indexes(tokens: list[str]) -> list[int]:
+    """Indexes of the tokens that are not a redirection or the operand of one
+    whose operator is a token of its own."""
+    indexes = []
     i = 0
     while i < len(tokens):
         m = REDIRECT_OP.match(tokens[i])
         if not m:
-            return False
-        i += 2 if m.end() == len(tokens[i]) else 1
-    return True
+            indexes.append(i)
+            i += 1
+        else:
+            i += 2 if m.end() == len(tokens[i]) else 1
+    return indexes
 
 
 def assignment_indexes(tokens: list[str]) -> list[int]:
-    """Indexes of the tokens that assign a name: the leading run of a segment
-    that has no command word, or the operands of a declaration command."""
+    """Indexes of the tokens that assign a name: every word of a segment that
+    has no command word (redirections anywhere are ignored), or the operands
+    of a declaration command."""
     if tokens[:1] and tokens[0] in DECLARATIONS:
         return [i for i, tok in enumerate(tokens) if i and SCALAR_ASSIGNMENT.match(tok)]
-    run = 0
-    while run < len(tokens) and SCALAR_ASSIGNMENT.match(tokens[run]):
-        run += 1
-    return list(range(run)) if only_redirects(tokens[run:]) else []
+    words = word_indexes(tokens)
+    if words and all(SCALAR_ASSIGNMENT.match(tokens[i]) for i in words):
+        return words
+    return []
 
 
-def apply_assignments(frame: dict, tokens: list[str], follower: str) -> None:
+def apply_assignments(frame: dict, tokens: list[str], follower: str, maybe: bool = False) -> None:
     """Update frame (name -> (unsplit, multiword)) from the segment's assignments.
     follower is the operator token after the segment, where the tokenizer puts
-    the `(` of an unquoted `NAME=$(cmd)`."""
+    the `(` of an unquoted `NAME=$(cmd)`. maybe is true when the assignment may
+    not run, so its flags merge into the old ones."""
     for i in assignment_indexes(tokens):
         m = SCALAR_ASSIGNMENT.match(tokens[i])
         name, value = m.group(1), m.group(2)
@@ -700,7 +745,10 @@ def apply_assignments(frame: dict, tokens: list[str], follower: str) -> None:
             re.search(r"[ \t\n]", outside) or "`" in value or re.search(r"\$\((?!\()", value) or split_subst
         )
         multiword = bool(re.search(r"[ \t\n]", outside))
-        if tokens[i][len(name)] == "+":
+        source = var_name(value)
+        if source in frame:
+            unsplit, multiword = frame[source]
+        if maybe or tokens[i][len(name)] == "+":
             old = frame.get(name, (False, False))
             unsplit, multiword = unsplit or old[0], multiword or old[1]
         frame[name] = (unsplit, multiword)
@@ -714,6 +762,7 @@ def stated_segments(all_tokens: list[str], masked_tokens: list[str]) -> list[tup
     if len(masked_tokens) != len(all_tokens):
         masked_tokens = all_tokens
     frames = [{}]
+    depth, previous = 0, ""
     pairs, current = [], []
     for tok, masked in zip(all_tokens + [None], masked_tokens + [None]):
         is_operator = tok is None or (tok and all(c in SEGMENT_OPERATORS for c in tok))
@@ -722,9 +771,16 @@ def stated_segments(all_tokens: list[str], masked_tokens: list[str]) -> list[tup
             continue
         if current:
             tokens = strip_keywords(current)
+            dropped = current[: len(current) - len(tokens)]
+            if tokens[:1] in (["fi"], ["done"], ["esac"]):
+                depth = max(depth - 1, 0)
+            elif tokens[:1] in (["for"], ["case"]) or {"if", "while", "until"} & set(dropped):
+                depth += 1
+            maybe = depth > 0 or "&&" in previous or "||" in previous
             pairs.append((tokens, dict(frames[-1])))
-            apply_assignments(frames[-1], tokens, tok or "")
+            apply_assignments(frames[-1], tokens, tok or "", maybe)
             current = []
+        previous = tok or ""
         for ch in masked or "":
             if ch == "(":
                 frames.append(dict(frames[-1]))
@@ -792,10 +848,9 @@ def shlex_accepts(command: str) -> bool:
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
-    command = drop_heredocs_and_continuations(command)
-    collapsed = collapse_quoted_substitutions(command)
+    plain, collapsed, bodies = collapse_quoted_substitutions(drop_heredocs_and_continuations(command))
     all_tokens = tokenize(collapsed)
-    masked_tokens = tokenize(mask_quotes(strip_line_comments(collapsed)))
+    masked_tokens = tokenize(mask_quotes(collapsed))
     pairs = stated_segments(all_tokens, masked_tokens)
     segments = [tokens for tokens, _ in pairs]
     states = [state for _, state in pairs]
@@ -821,17 +876,18 @@ def zsh_warnings(command: str) -> list[str]:
             path_lines.append(WARN_PATH)
 
     unsplit_out = []
-    if shlex_accepts(command) and len(masked_tokens) == len(all_tokens):
+    if shlex_accepts(plain) and len(masked_tokens) == len(all_tokens):
         masked = [strip_keywords(seg) for seg in masked_segments(all_tokens, masked_tokens)]
         unsplit_out = unsplit_lines(segments, masked, states, reported)
 
     modifier_lines = [
         WARN_MODIFIER % (name, letter, letter, name, name, letter)
-        for name, letter in MODIFIER.findall(unquoted_text(command))
+        for name, letter in MODIFIER.findall(unquoted_text(plain))
     ]
 
+    body_lines = [line for body in bodies for line in zsh_warnings(body)]
     lines = []
-    for line in prefix_lines + modifier_lines + path_lines + kill_lines + unsplit_out:
+    for line in prefix_lines + modifier_lines + path_lines + kill_lines + unsplit_out + body_lines:
         if line not in lines:
             lines.append(line)
     return lines

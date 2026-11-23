@@ -933,6 +933,15 @@ rmg_warns "unsplit kill of a spaced backtick value after a prefix pair (B1)" "$(
 rmg_warns "unsplit kill of a spaced backtick value after an append (B1)" "$(rmg_json_payload 'p=`a b`; p+=x; kill $p')" "$(rmg_wk p)"
 rmg_silent "unsplit malformed input with a spaced backtick value (R8)" "$(rmg_json_payload 'v=`ls -a` ; for i in $v ; do : ; done ; echo "oops')"
 rmg_warns "unsplit quoted parentheses do not change the frame (V2)" "$(rmg_json_payload 'printf "("; pids="1 2"; printf ")"; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "kill of a spaced backtick value after an apostrophe comment (C1)" "$(rmg_json_payload "# don't${NL}pids=\`pgrep -f worker\`; kill \$pids")" "$(rmg_wk pids)"
+rmg_silent "quoted substitution with a quoted variable after an apostrophe comment (C1)" "$(rmg_json_payload "# don't${NL}"'v="a b"; gh pr view "$(foo "bar $v baz")"')"
+rmg_warns "modifier scan reads text after an apostrophe comment (C1)" "$(rmg_json_payload "# don't${NL}git show \$sha:t")" "$(rmg_w2 sha t)"
+rmg_warns "escaped backslash before a closing backtick ends the span (C6)" "$(rmg_json_payload 'pids=`printf "1 2" \\`; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "kill inside a backtick body is scanned (C2)" "$(rmg_json_payload 'out=`true; pids="1 2"; kill $pids; echo done`')" "$(rmg_wk pids)"
+rmg_warns "skipped reassignment after && keeps the warning (C3)" "$(rmg_json_payload 'pids="1 2"; false && pids=one; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "copy of a multi-word name keeps the warning (C4)" "$(rmg_json_payload 'pids="1 2"; pids="$pids"; kill $pids')" "$(rmg_wk pids)"
+rmg_warns "redirect before an assignment keeps the warning (C5)" "$(rmg_json_payload '> /dev/null pids="1 2"; kill $pids')" "$(rmg_wk pids)"
+rmg_silent "quoted double bracket before a heredoc keeps heredoc detection (C7)" "$(rmg_json_payload "echo \"[[\"; cat <<EOF${NL}pids=\"1 2\"${NL}kill \$pids${NL}EOF")"
 
 # shell_hint.py: warn-only advisory for a bare background `&`.
 SHH=claude/hooks/shell_hint.py
