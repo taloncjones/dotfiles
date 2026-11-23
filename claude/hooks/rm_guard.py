@@ -249,6 +249,20 @@ def single_quote_end(command: str, i: int, ansi: bool) -> int:
     return n
 
 
+def ansi_quote_at(command: str, i: int) -> bool:
+    """True when the `'` at i opens `$'...'`: an odd run of unescaped `$`
+    precedes it (`$$'` is the PID and a plain quote)."""
+    run = 0
+    while i - run > 0 and command[i - run - 1] == "$":
+        run += 1
+    slashes = 0
+    while i - run - slashes > 0 and command[i - run - slashes - 1] == "\\":
+        slashes += 1
+    if slashes % 2:
+        run -= 1
+    return run % 2 == 1
+
+
 def drop_heredocs_and_continuations(command: str) -> str:
     """Drop heredoc bodies and unquoted backslash-newline pairs, so a body is
     not read as commands and a continued line stays one command. Quote- and
@@ -259,11 +273,9 @@ def drop_heredocs_and_continuations(command: str) -> str:
     pending = []  # (word, dash, paren level)
     quote = None
     level = 0
-    prev_dollar = False
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
-        after_dollar, prev_dollar = prev_dollar, False
         if quote:
             out.append(ch)
             bare.append(ch if ch == "\n" else "_")
@@ -274,7 +286,7 @@ def drop_heredocs_and_continuations(command: str) -> str:
             elif ch == quote[-1]:
                 quote = None
         elif ch in ("'", '"', "`"):
-            quote = "$'" if ch == "'" and after_dollar else ch
+            quote = "$'" if ch == "'" and ansi_quote_at(command, i) else ch
             out.append(ch)
             bare.append("_")
         elif ch == "\\" and i + 1 < n:
@@ -314,7 +326,6 @@ def drop_heredocs_and_continuations(command: str) -> str:
             out.append(ch)
             bare.append(ch)
         else:
-            prev_dollar = ch == "$"
             out.append(ch)
             bare.append(ch)
         i += 1
@@ -760,10 +771,10 @@ def substitution_end(command: str, i: int) -> int:
             if end == -1:
                 return -1
             i = end + 1
+        elif ch == "'" and ansi_quote_at(command, i):
+            i = single_quote_end(command, i + 1, True) + 1
         elif ch == "'":
             i = single_quote_end(command, i + 1, False) + 1
-        elif ch == "$" and command[i + 1 : i + 2] == "'":
-            i = single_quote_end(command, i + 2, True) + 1
         elif ch == '"':
             stack.append('"')
             nest += 1
@@ -870,11 +881,12 @@ def collapse_quoted_substitutions(
             last = ")"
             i = end
             continue
-        elif ch == "'" and quote is None and plain and plain[-1] == "$":
+        elif ch == "'" and quote is None and ansi_quote_at(command, i):
             end = single_quote_end(command, i + 1, True)
             if end >= n:
                 plain.append(command[i:])
                 collapsed.append(command[i:])
+                unpaired = command[i:]
                 break
             plain.append(command[i : end + 1])
             collapsed.append("'_'")

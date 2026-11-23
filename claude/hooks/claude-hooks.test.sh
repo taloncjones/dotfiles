@@ -872,6 +872,7 @@ EOF
 )"')"
 RMG_WIDE=$(python3 -c 'print("".join("cd /tmp/d%d; " % i for i in range(300)) + "echo \"$(true " + "x" * 4000 + ")\"; rm -f ./scratch.txt")')
 rmg_denies_with "denies a wide substitution scan past the text budget (T6)" "$(rmg_json_payload "$RMG_WIDE")" "$RMG_TOO_COMPLEX"
+rmg_denies_with "denies an rm after a PID dollar and plain quote (S10)" "$(rmg_json_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')" "$RMG_D2"
 rmg_warns() {
     label="$1"
     payload="$2"
