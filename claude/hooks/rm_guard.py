@@ -18,9 +18,10 @@ could be auto-approved in auto permission mode, so the hook denies (exit 2)
 instead.
 
 Scope: this hook only recognizes `rm` and `rmdir` invocations (including
-inside `sh -c`/`bash -c`/`zsh -c` wrappers). Other deleters (`find -delete`,
-`xargs rm`, `gio trash`, etc.) and `rm` reached only via a pipe or command
-substitution are not inspected; that residual is left to the classifier.
+inside `sh -c`/`bash -c`/`zsh -c` wrappers). A command substitution body is
+checked like a command, except inside a heredoc body. Other deleters
+(`find -delete`, `xargs rm`, `gio trash`, etc.) and `rm` reached only via a
+pipe are not inspected; that residual is left to the classifier.
 
 The hook also runs warn-only checks for recurring zsh pitfalls (a stored
 multi-word command prefix, a `$var:X` modifier, a loop variable named `path`,
@@ -504,9 +505,33 @@ def extract_shell_c_arg(tokens: list[str]) -> str | None:
     return None
 
 
+BACKTICK_ESCAPE = re.compile(r"\\([\\$`])")
+SUBSTITUTION_DEPTH = 32
+SUBSTITUTION_BUDGET = 4096
+TOO_COMPLEX = (
+    "Blocked: command nests more command substitutions than this guard can "
+    "check. Fix: split it into separate, simpler commands."
+)
+
+
 def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None) -> str | None:
     if cwd is None:
         cwd = real_cwd
+    return check_segments(command, real_cwd, home, cwd, [], []) or check_substitutions(
+        command, real_cwd, home, cwd, 0, [SUBSTITUTION_BUDGET]
+    )
+
+
+def check_segments(
+    command: str,
+    real_cwd: str,
+    home: str,
+    cwd: str,
+    cwds: list[str],
+    scripts: list[tuple[str, str]],
+) -> str | None:
+    """Check each segment of command. Appends every directory a `cd` enters to
+    cwds and every `sh -c` script, with its directory, to scripts."""
     for tokens in split_segments(tokenize(command)):
         raw = tokens
         tokens = strip_prefixes(raw)
@@ -520,12 +545,43 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
         elif head == "cd":
             if not skipped_keyword(raw, tokens):
                 cwd = resolve_cd_target(tokens, cwd, home)
+                cwds.append(cwd)
         elif head in SHELL_WRAPPERS:
             inner = extract_shell_c_arg(tokens)
             if inner is not None:
-                reason = check_command(inner, real_cwd, home, cwd)
+                scripts.append((inner, cwd))
+                reason = check_segments(inner, real_cwd, home, cwd, [], [])
                 if reason:
                     return reason
+    return None
+
+
+def check_substitutions(
+    command: str, real_cwd: str, home: str, cwd: str, depth: int, budget: list[int]
+) -> str | None:
+    """Check the rm inside each backtick and double-quoted `$(...)` body, and
+    any top-level rm a backtick comment hid from the raw walk. Denies when the
+    depth or work limit is reached instead of failing open."""
+    budget[0] -= 1
+    if depth > SUBSTITUTION_DEPTH or budget[0] < 0:
+        return TOO_COMPLEX
+    _, collapsed, ticks, quoted = collapse_quoted_substitutions(
+        drop_heredocs_and_continuations(command)
+    )
+    cwds, scripts = [cwd], []
+    reason = check_segments(collapsed, real_cwd, home, cwd, cwds, scripts)
+    if reason:
+        return reason
+    for text, text_cwd in scripts:
+        reason = check_substitutions(text, real_cwd, home, text_cwd, depth + 1, budget)
+        if reason:
+            return reason
+    dirs = list(dict.fromkeys(cwds))
+    for body in [BACKTICK_ESCAPE.sub(r"\1", tick) for tick in ticks] + quoted:
+        for body_cwd in dirs:
+            reason = check_substitutions(body, real_cwd, home, body_cwd, depth + 1, budget)
+            if reason:
+                return reason
     return None
 
 
@@ -619,14 +675,14 @@ def backtick_end(command: str, i: int) -> int:
     return -1
 
 
-def collapse_quoted_substitutions(command: str) -> tuple[str, str, list[str]]:
+def collapse_quoted_substitutions(command: str) -> tuple[str, str, list[str], list[str]]:
     """Drop `#` comments and collapse backtick spans in one quote-aware walk.
     Returns (plain, collapsed, bodies). plain has each backtick span replaced
     by `_` between backticks; collapsed also replaces each `$(...)` inside
     double quotes with `$(_)`, so a quote or space inside it neither pairs
     with the quote around it nor splits the token. bodies lists the backtick
-    span bodies in text order."""
-    plain, collapsed, bodies = [], [], []
+    span bodies in text order; quoted lists the collapsed `$(...)` bodies."""
+    plain, collapsed, bodies, quoted = [], [], [], []
     last = ""
     quote = None
     i, n = 0, len(command)
@@ -662,6 +718,7 @@ def collapse_quoted_substitutions(command: str) -> tuple[str, str, list[str]]:
                 plain.append(command[i:])
                 collapsed.append(command[i:])
                 break
+            quoted.append(command[i + 2 : end - 1])
             plain.append(command[i:end])
             collapsed.append("$(_)")
             last = ")"
@@ -673,7 +730,7 @@ def collapse_quoted_substitutions(command: str) -> tuple[str, str, list[str]]:
         collapsed.append(ch)
         last = ch
         i += 1
-    return "".join(plain), "".join(collapsed), bodies
+    return "".join(plain), "".join(collapsed), bodies, quoted
 
 
 def outside_substitutions(value: str) -> str:
@@ -848,7 +905,7 @@ def shlex_accepts(command: str) -> bool:
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
-    plain, collapsed, bodies = collapse_quoted_substitutions(drop_heredocs_and_continuations(command))
+    plain, collapsed, bodies, _ = collapse_quoted_substitutions(drop_heredocs_and_continuations(command))
     all_tokens = tokenize(collapsed)
     masked_tokens = tokenize(mask_quotes(collapsed))
     pairs = stated_segments(all_tokens, masked_tokens)
