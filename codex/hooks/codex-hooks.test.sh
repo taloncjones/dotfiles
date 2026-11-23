@@ -297,6 +297,32 @@ EOF
 )"')"
 assert_denies_2 "rm guard denies an rm after a PID dollar and plain quote (S10)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')"
+assert_allows "rm guard allows apostrophe in an unquoted non-identifier heredoc delimiter (A1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<COMMIT-MSG
+don'"'"'t remove rm entries
+COMMIT-MSG
+)"')"
+assert_denies_within_3s() {
+    label="$1"
+    hook="$2"
+    payload="$3"
+    hook_status=0
+    printf '%s\n' "$payload" | python3 -c 'import subprocess,sys
+try:
+    sys.exit(subprocess.run([sys.argv[1]], input=sys.stdin.read(), text=True, capture_output=True, timeout=3).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "$hook" || hook_status=$?
+    if [ "$hook_status" -eq 2 ]; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s returned %s instead of 2 within 3 s\n' "$label" "$hook_status" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + ")\"")')
+assert_denies_within_3s "rm guard denies a hidden rm among thousands of << operators within 3 s (B1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_MANY_HEREDOCS")"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

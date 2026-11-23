@@ -873,6 +873,29 @@ EOF
 RMG_WIDE=$(python3 -c 'print("".join("cd /tmp/d%d; " % i for i in range(300)) + "echo \"$(true " + "x" * 4000 + ")\"; rm -f ./scratch.txt")')
 rmg_denies_with "denies a wide substitution scan past the text budget (T6)" "$(rmg_json_payload "$RMG_WIDE")" "$RMG_TOO_COMPLEX"
 rmg_denies_with "denies an rm after a PID dollar and plain quote (S10)" "$(rmg_json_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')" "$RMG_D2"
+rmg_allows_json "allows apostrophe in an unquoted non-identifier heredoc delimiter (A1)" "$(rmg_json_payload 'git commit -m "$(cat <<COMMIT-MSG
+don'"'"'t remove rm entries
+COMMIT-MSG
+)"')"
+rmg_denies_within_3s() {
+    label="$1"
+    payload="$2"
+    rc=0
+    printf '%s' "$payload" | HOME="$RMG_HOME" python3 -c 'import subprocess,sys
+try:
+    sys.exit(subprocess.run([sys.argv[1]], input=sys.stdin.read(), text=True, capture_output=True, timeout=3).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "$RMG" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s)\n' "$label" "$rc" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + ")\"")')
+rmg_denies_within_3s "denies a hidden rm among thousands of << operators within 3 s (B1)" "$(rmg_json_payload "$RMG_MANY_HEREDOCS")"
 rmg_warns() {
     label="$1"
     payload="$2"

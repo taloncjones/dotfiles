@@ -165,11 +165,23 @@ def strip_line_comments(command: str) -> str:
     return "".join(out)
 
 
-# The lookahead keeps `<<EOF-X` from reading as `<<EOF`. The delimiter is
-# `'any but quote'`, `"any but quote"`, or an optionally escaped identifier.
+# The delimiter is `'any but quote'`, `"any but quote"`, or an optionally
+# escaped run of characters that are not whitespace, `;&|()<>`, a quote or a
+# backslash. The lookahead keeps `<<EOF"x"` from reading as `<<EOF`.
 HEREDOC_OP = re.compile(
-    r"""<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z_][A-Za-z0-9_]*))(?=[ \t\n;&|()<>]|$)"""
+    r"""<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|()<>'"\\]+))(?=[ \t\n;&|()<>]|$)"""
 )
+
+
+class TooComplexError(Exception):
+    """Raised when the guard has spent its text budget rescanning lines."""
+
+
+def charge(budget: list[int], n: int) -> None:
+    """Spend n characters of the shared text budget; raise when it is gone."""
+    budget[1] -= n
+    if budget[1] < 0:
+        raise TooComplexError
 
 
 def heredoc_word(m: re.Match) -> tuple[str, bool]:
@@ -178,13 +190,17 @@ def heredoc_word(m: re.Match) -> tuple[str, bool]:
     return word, m.group(1) == "-"
 
 
-def skip_heredoc_bodies(command: str, i: int, pending: list[tuple]) -> int:
+def skip_heredoc_bodies(command: str, i: int, pending: list[tuple], missing: set) -> int:
     """Index just past the terminator line of each pending (word, dash, ...)
     heredoc. A heredoc with no terminator line is not one: its lines stay, so
-    the index where its body would start is returned."""
+    the index where its body would start is returned. missing holds the
+    (word, dash) pairs already found to have no terminator line after an
+    earlier index, so a later newline does not rescan to the end of text."""
     n = len(command)
     for entry in pending:
         word, dash = entry[0], entry[1]
+        if (word, dash) in missing:
+            return i
         start = i
         found = False
         while i < n:
@@ -196,6 +212,7 @@ def skip_heredoc_bodies(command: str, i: int, pending: list[tuple]) -> int:
                 found = True
                 break
         if not found:
+            missing.add((word, dash))
             return start
     return i
 
@@ -263,7 +280,16 @@ def ansi_quote_at(command: str, i: int) -> bool:
     return run % 2 == 1
 
 
-def drop_heredocs_and_continuations(command: str) -> str:
+def last_line(chars: list[str], budget: list[int]) -> str:
+    """The text after the last newline in chars, charged to the budget."""
+    k = len(chars)
+    while k and chars[k - 1] != "\n":
+        k -= 1
+    charge(budget, len(chars) - k)
+    return "".join(chars[k:])
+
+
+def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
     """Drop heredoc bodies and unquoted backslash-newline pairs, so a body is
     not read as commands and a continued line stays one command. Quote- and
     comment-aware like strip_line_comments; a backtick span and `$'...'` count
@@ -271,6 +297,7 @@ def drop_heredocs_and_continuations(command: str) -> str:
     out = []
     bare = []  # out without quoted characters (each is `_`) and comments
     pending = []  # (word, dash, paren level)
+    missing = set()
     quote = None
     level = 0
     i, n = 0, len(command)
@@ -303,11 +330,11 @@ def drop_heredocs_and_continuations(command: str) -> str:
         elif ch == "\n" and pending:
             out.append(ch)
             bare.append(ch)
-            i = skip_heredoc_bodies(command, i + 1, pending)
+            i = skip_heredoc_bodies(command, i + 1, pending, missing)
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i):
-            m = heredoc_at(command, i, "".join(bare))
+            m = heredoc_at(command, i, last_line(bare, budget))
             if m:
                 pending.append((*heredoc_word(m), level))
                 out.extend(m.group(0))
@@ -660,9 +687,12 @@ def check_substitutions(
         budget[1] -= len(command)
     if depth > SUBSTITUTION_DEPTH or budget[0] < 0 or budget[1] < 0:
         return TOO_COMPLEX
-    _, collapsed, ticks, quoted, unpaired = collapse_quoted_substitutions(
-        drop_heredocs_and_continuations(command)
-    )
+    try:
+        _, collapsed, ticks, quoted, unpaired = collapse_quoted_substitutions(
+            drop_heredocs_and_continuations(command, budget), budget
+        )
+    except TooComplexError:
+        return TOO_COMPLEX
     cwds, scripts = [cwd], []
     reason = check_segments(collapsed, real_cwd, home, cwd, cwds, scripts)
     if reason:
@@ -734,7 +764,7 @@ DECLARATIONS = ("export", "local", "typeset", "declare", "readonly")
 REDIRECT_OP = re.compile(r"\d*[<>]+")
 
 
-def substitution_end(command: str, i: int) -> int:
+def substitution_end(command: str, i: int, budget: list[int]) -> int:
     """Index just past the `)` closing a `$(` whose body starts at i, or -1.
     Reads the body as shell: `#` comments, heredoc bodies, `'...'`, `$'...'`,
     backtick spans and nested double-quoted spans hide their `)`. Iterative."""
@@ -742,6 +772,7 @@ def substitution_end(command: str, i: int) -> int:
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
     nest = 1
     pending = []  # (word, dash, nest)
+    missing = set()
     while i < n:
         ch = command[i]
         if stack[-1] == '"':
@@ -783,10 +814,11 @@ def substitution_end(command: str, i: int) -> int:
             while i < n and command[i] != "\n":
                 i += 1
         elif ch == "\n" and pending:
-            i = skip_heredoc_bodies(command, i + 1, pending)
+            i = skip_heredoc_bodies(command, i + 1, pending, missing)
             pending = []
         elif ch == "<" and command.startswith("<<", i):
             line_start = max(command.rfind("\n", 0, i) + 1, start)
+            charge(budget, i - line_start)
             m = heredoc_at(command, i, mask_quotes(command[line_start:i]))
             if m:
                 pending.append((*heredoc_word(m), nest))
@@ -826,7 +858,7 @@ def backtick_end(command: str, i: int) -> int:
 
 
 def collapse_quoted_substitutions(
-    command: str,
+    command: str, budget: list[int]
 ) -> tuple[str, str, list[str], list[str], str]:
     """Drop `#` comments and collapse backtick spans in one quote-aware walk.
     Returns (plain, collapsed, bodies, quoted, unpaired). plain has each
@@ -869,7 +901,7 @@ def collapse_quoted_substitutions(
             i = end + 1
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
-            end = substitution_end(command, i + 2)
+            end = substitution_end(command, i + 2, budget)
             if end == -1:
                 plain.append(command[i:])
                 collapsed.append(command[i:])
@@ -1074,7 +1106,13 @@ def shlex_accepts(command: str) -> bool:
 def zsh_warnings(command: str) -> list[str]:
     """Warning lines for zsh pitfalls visible in the command text. Advisory
     only: the caller never blocks on them."""
-    plain, collapsed, bodies, _, _ = collapse_quoted_substitutions(drop_heredocs_and_continuations(command))
+    budget = [0, SUBSTITUTION_TEXT_BUDGET]
+    try:
+        plain, collapsed, bodies, _, _ = collapse_quoted_substitutions(
+            drop_heredocs_and_continuations(command, budget), budget
+        )
+    except TooComplexError:
+        return []
     all_tokens = tokenize(collapsed)
     masked_tokens = tokenize(mask_quotes(collapsed))
     pairs = stated_segments(all_tokens, masked_tokens)
