@@ -777,6 +777,7 @@ rmg_json_payload() {
 # An rm inside a command substitution is denied like the same rm at top level.
 RMG_D2='Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
 RMG_D5='Blocked: rm target is a system path (/etc). Fix: remove only scratch paths under /tmp or $TMPDIR, or ask the user to run this removal.'
+RMG_UNPAIRED='Blocked: this guard cannot find where a command substitution ends, and an rm follows it. Fix: close each $( and backtick, or run the rm as a separate command.'
 RMG_TOO_COMPLEX='Blocked: command nests more command substitutions than this guard can check. Fix: split it into separate, simpler commands.'
 rmg_allows_json() {
     label="$1"
@@ -815,6 +816,62 @@ for i in range(40):
     c = "echo \"$(true %d; %s)\"" % (i, c)
 print(c + "; rm -f ./scratch.txt")')
 rmg_denies_with "denies a 40-level substitution nest with the limit text (S9)" "$(rmg_json_payload "$RMG_NEST")" "$RMG_TOO_COMPLEX"
+rmg_denies_with "denies apostrophe heredoc then quoted substitution rm (T1)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"; echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies apostrophe heredoc then backtick rm (T1)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"; echo `rm -rf /`')" "$RMG_D2"
+rmg_denies_with "denies comment paren in quoted body (T2)" "$(rmg_json_payload 'echo "$(true # )
+rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies comment apostrophe in quoted body (T2)" "$(rmg_json_payload 'echo "$(true # don'"'"'t
+rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies comment quote in quoted body (T2)" "$(rmg_json_payload 'echo "$(true # a "
+rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies arithmetic-bracket shift operator (T3)" "$(rmg_json_payload 'echo $[ 1 <<N ]
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies expansion shift operator (T3)" "$(rmg_json_payload 'echo ${x:- <<EOF }
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies unterminated heredoc in backtick span (T3)" "$(rmg_json_payload 'x=`cat <<EOF `
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies heredoc closed by its own parenthesis (T3)" "$(rmg_json_payload 'x=$(cat <<EOF)
+echo "$(rm -rf /)"
+EOF')" "$RMG_D2"
+rmg_denies_with "denies ANSI-C quote then quoted substitution rm (T4)" "$(rmg_json_payload 'echo $'"'"'\'"'"''"'"' "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies ANSI-C quote then top-level rm (T4)" "$(rmg_json_payload 'echo $'"'"'\'"'"''"'"';rm -rf /')" "$RMG_D2"
+rmg_denies_with "denies unpaired substitution before an rm (T5)" "$(rmg_json_payload 'echo "$(echo hi
+rm -f ./x')" "$RMG_UNPAIRED"
+rmg_allows_json "allows unpaired substitution with no rm word (T5)" "$(rmg_json_payload 'echo "$(echo hi
+confirm the format')"
+rmg_allows_json "allows apostrophe heredoc commit message (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"')"
+rmg_allows_json "allows backtick rm example in heredoc commit message (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+use `rm -rf /` carefully
+EOF
+)"')"
+rmg_allows_json "allows hash line and quoted rm in heredoc commit message (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+# title
+fix (a) and "rm -rf /"
+EOF
+)"')"
+rmg_allows_json "allows quoted hyphenated heredoc delimiter (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'COMMIT-MSG'"'"'
+don'"'"'t rm -rf /
+COMMIT-MSG
+)"')"
+rmg_allows_json "allows ANSI-C printf before a safe rm (T7)" "$(rmg_json_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
+rmg_allows_json "allows grep for an rm string (T7)" "$(rmg_json_payload 'grep '"'"'rm -rf'"'"' f')"
+rmg_allows_json "allows numbered-list commit message with backtick rm example (T8)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+Steps:
+1) deny
+2) `rm -rf /` example
+EOF
+)"')"
+RMG_WIDE=$(python3 -c 'print("".join("cd /tmp/d%d; " % i for i in range(300)) + "echo \"$(true " + "x" * 4000 + ")\"; rm -f ./scratch.txt")')
+rmg_denies_with "denies a wide substitution scan past the text budget (T6)" "$(rmg_json_payload "$RMG_WIDE")" "$RMG_TOO_COMPLEX"
 rmg_warns() {
     label="$1"
     payload="$2"

@@ -237,6 +237,64 @@ EOF
 )"')"
 assert_allows "rm guard allows a quoted rm -rf / string (S8)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "rm -rf /"')"
+assert_denies_2 "rm guard denies apostrophe heredoc then backtick rm (T1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"; echo `rm -rf /`')"
+assert_denies_2 "rm guard denies comment paren in quoted body (T2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(true # )
+rm -rf /)"')"
+assert_denies_2 "rm guard denies comment apostrophe in quoted body (T2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(true # don'"'"'t
+rm -rf /)"')"
+assert_denies_2 "rm guard denies comment quote in quoted body (T2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(true # a "
+rm -rf /)"')"
+assert_denies_2 "rm guard denies arithmetic-bracket shift operator (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $[ 1 <<N ]
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies expansion shift operator (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo ${x:- <<EOF }
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies unterminated heredoc in backtick span (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x=`cat <<EOF `
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies heredoc closed by its own parenthesis (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x=$(cat <<EOF)
+echo "$(rm -rf /)"
+EOF')"
+assert_denies_2 "rm guard denies ANSI-C quote then quoted substitution rm (T4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $'"'"'\'"'"''"'"' "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies ANSI-C quote then top-level rm (T4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $'"'"'\'"'"''"'"';rm -rf /')"
+assert_denies_2 "rm guard denies unpaired substitution before an rm (T5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(echo hi
+rm -f ./x')"
+assert_allows "rm guard allows apostrophe heredoc commit message (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"')"
+assert_allows "rm guard allows backtick rm example in heredoc commit message (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+use `rm -rf /` carefully
+EOF
+)"')"
+assert_allows "rm guard allows quoted hyphenated heredoc delimiter (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'COMMIT-MSG'"'"'
+don'"'"'t rm -rf /
+COMMIT-MSG
+)"')"
+assert_allows "rm guard allows ANSI-C printf before a safe rm (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
+assert_allows "rm guard allows numbered-list commit message with backtick rm example (T8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+Steps:
+1) deny
+2) `rm -rf /` example
+EOF
+)"')"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.
