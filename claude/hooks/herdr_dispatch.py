@@ -800,13 +800,23 @@ def _refuse_superseding_live_review(base, task, task_id, phase, bound, herdr_cli
     launch_id = row["launch_id"]
     if core.review_retired(task, {"launch_id": launch_id}):
         return
-    review = _sidecar(base, task_id, ".review.json")
+    stop = (f"herdr agent prompt {row['agent']} /exit, then herdr pane close "
+            f"{row['pane_id']} if it stays listed")
+    retire = f"append {launch_id} to retired_review_launch_ids with write-task"
+    hatch = f"stop it ({stop})" if bound else f"retire it ({retire})"
+    try:
+        review = _sidecar(base, task_id, ".review.json")
+    except DispatchError as exc:
+        path = base / "tasks" / f"{task_id}.review.json"
+        recheck = f"launch again, and remove {path} only if the record is still unreadable"
+        repair = (f"Stop it ({stop}), {recheck}" if bound else
+                  f"Retire it ({retire}) and launch again, or stop the reviewer "
+                  f"if it is still listed, {recheck}")
+        raise DispatchError(
+            f"cannot read the review record for review {launch_id} ({exc}); "
+            f"a {phase} launch would supersede it. {repair}") from exc
     if isinstance(review, dict) and review.get("launch_id") == launch_id:
         return
-    hatch = (
-        f"stop it (herdr agent prompt {row['agent']} /exit, then herdr pane close "
-        f"{row['pane_id']} if it stays listed)" if bound else
-        f"retire it (append {launch_id} to retired_review_launch_ids with write-task)")
     try:
         agents = _agents_snapshot(herdr_cli, env)
         if any(_malformed_agent(a) for a in agents):
