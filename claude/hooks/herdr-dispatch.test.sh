@@ -1500,7 +1500,7 @@ def test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_
         fx.close()
 
 
-def test_bound_launch_names_the_hatch_when_the_review_record_is_unreadable():
+def test_bound_launch_names_record_removal_when_the_lead_review_record_is_unreadable():
     fx = LeadFixture()
     try:
         before = bound_live_review(fx)
@@ -7876,7 +7876,7 @@ for name, test in (
     ("launch proceeds for implement when a later row already superseded the review", test_launch_proceeds_for_implement_when_a_later_row_already_superseded_the_review),
     ("launch proceeds for a review relaunch while the prior review is live", test_launch_proceeds_for_a_review_relaunch_while_the_prior_review_is_live),
     ("bound launch refuses implement while the lead review is live without a verdict", test_bound_launch_refuses_implement_while_the_lead_review_is_live_without_a_verdict),
-    ("bound launch names the hatch when the review record is unreadable", test_bound_launch_names_the_hatch_when_the_review_record_is_unreadable),
+    ("bound launch names record removal when the lead review record is unreadable", test_bound_launch_names_record_removal_when_the_lead_review_record_is_unreadable),
     ("bound launch names list repair when herdr agent liveness is unreadable", test_bound_launch_names_list_repair_when_herdr_agent_liveness_is_unreadable),
 ):
     check(name, test)
