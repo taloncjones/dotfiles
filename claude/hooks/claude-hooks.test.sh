@@ -772,7 +772,8 @@ rmg_denies_with "deny text D1 via Codex payload shape" \
 
 # Warn-only zsh pitfall checks: one additionalContext JSON on stdout, exit 0.
 rmg_json_payload() {
-    python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}, "cwd": sys.argv[2]}))' "$1" "$RMG_CWD"
+    # The command goes in on stdin: Linux caps one argv entry at 131072 bytes.
+    printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.stdin.read()}, "cwd": sys.argv[1]}))' "$RMG_CWD"
 }
 # An rm inside a command substitution is denied like the same rm at top level.
 RMG_D2='Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'

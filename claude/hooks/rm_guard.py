@@ -19,8 +19,8 @@ instead.
 
 Scope: this hook only recognizes `rm` and `rmdir` invocations (including
 inside `sh -c`/`bash -c`/`zsh -c` wrappers). A command substitution body is
-checked like a command, except inside a heredoc body; a substitution the scan
-cannot pair denies when an rm follows it. Other deleters
+checked like a command, including inside an unquoted heredoc body; a
+substitution the scan cannot pair denies when an rm follows it. Other deleters
 (`find -delete`, `xargs rm`, `gio trash`, etc.) and `rm` reached only via a
 pipe are not inspected; that residual is left to the classifier.
 

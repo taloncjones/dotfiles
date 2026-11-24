@@ -204,7 +204,8 @@ assert_allows "rm guard ignores malformed shell input" \
 
 # An rm inside a command substitution is denied.
 rmg_sub_payload() {
-    python3 -c 'import json,sys; print(json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": sys.argv[1], "workdir": "/tmp/project"}}))' "$1"
+    # The command goes in on stdin: Linux caps one argv entry at 131072 bytes.
+    printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": sys.stdin.read(), "workdir": "/tmp/project"}}))'
 }
 assert_denies_2 "rm guard denies an rm in a backtick body (S1)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo `rm -rf /`')"
