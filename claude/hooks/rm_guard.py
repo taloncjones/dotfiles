@@ -176,6 +176,14 @@ HEREDOC_OP = re.compile(
 )
 
 
+# The delimiter forms the guard recognized before quoted and punctuated words
+# were added. Any other word is read as a heredoc only for a consumer that
+# cannot run the body (see safe_heredoc_consumer).
+BASE_HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;&|()<>]|$)")
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+HEREDOC_SAFE_CONSUMERS = ("cat", "git", "gh", "tee")
+
+
 class TooComplexError(Exception):
     """Raised when the guard has spent its text budget rescanning lines."""
 
@@ -205,8 +213,16 @@ class HeredocLines:
     def __init__(self, command: str, pos: int = 0):
         self.command = command
         self.pos = pos  # lines before pos are never indexed
+        self.joins = None  # positions of a backslash-newline pair, built on first use
         self.exact = {}  # line -> [(start, after)]
         self.tabbed = {}  # line without leading tabs -> [(start, after)]
+
+    def has_join(self, i: int, j: int) -> bool:
+        """True when a backslash-newline pair starts in command[i:j]."""
+        if self.joins is None:
+            self.joins = [m.start() for m in re.finditer(r"\\\n", self.command)]
+        k = bisect.bisect_left(self.joins, i)
+        return k < len(self.joins) and self.joins[k] < j
 
     def find(self, word: str, dash: bool, i: int) -> tuple[int, int] | None:
         """(start, after) of the first line at or past i that is the word, or
@@ -241,6 +257,11 @@ def skip_heredoc_bodies(
     for word, dash, expands, *_ in pending:
         found = scan.find(word, dash, i)
         if found is None:
+            return i
+        # The shell joins a backslash-newline in an unquoted body before it
+        # matches the terminator; a word the guard reads only as written
+        # would end the heredoc at the wrong line.
+        if expands and not IDENTIFIER.fullmatch(word) and scan.has_join(i, found[0]):
             return i
         if expands and exposed is not None:
             exposed.append(command[i : found[0]])
@@ -296,23 +317,39 @@ def in_expansion(text: str) -> bool:
         if ch == "$" and line[i + 1 : i + 2] in ("{", "["):
             stack.append("}" if line[i + 1] == "{" else "]")
             i += 1
-        elif stack and ch in "{[":
-            stack.append("}" if ch == "{" else "]")
         elif stack and ch == stack[-1]:
             stack.pop()
         i += 1
     return bool(stack)
 
 
+def safe_heredoc_consumer(command: str, end: int, before: str) -> bool:
+    """True when the command reading a heredoc cannot run its body: cat, git,
+    gh or tee, with no pipe after the operator. before is the line text up to
+    the operator."""
+    words = strip_prefixes(re.split(r"[;&|(`]", before)[-1].split())
+    rest = command[end : end + 200]
+    if "\n" in rest:
+        rest = rest[: rest.index("\n")]
+    elif len(rest) == 200:
+        return False
+    return bool(words) and basename(words[0]) in HEREDOC_SAFE_CONSUMERS and "|" not in rest
+
+
 def heredoc_at(command: str, i: int, before: str) -> re.Match | None:
     """The HEREDOC_OP match at i, or None when the `<<` is a here-string, part
     of `<<<`, or sits inside `((`, `[[`, `${` or `$[` on its line. before is
-    the text up to i with quoted characters blanked."""
+    the text up to i with quoted characters blanked. A delimiter the guard did
+    not recognize before is accepted only for a consumer that cannot run the
+    body."""
     if command.startswith("<<<", i) or command[i - 1 : i] == "<":
         return None
     if in_arith_or_cond(before) or in_expansion(before):
         return None
-    return HEREDOC_OP.match(command, i)
+    m = HEREDOC_OP.match(command, i)
+    if m and not BASE_HEREDOC_OP.match(command, i) and not safe_heredoc_consumer(command, m.end(), before):
+        return None
+    return m
 
 
 def single_quote_end(command: str, i: int, ansi: bool) -> int:
@@ -359,10 +396,9 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
     as quotes."""
     out = []
     bare = []  # out without quoted characters (each is `_`) and comments
-    pending = []  # (word, dash, expands, paren level)
+    pending = []  # (word, dash, expands)
     scan = HeredocLines(command)
     quote = None
-    level = 0
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -402,20 +438,11 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
         elif ch == "<" and command.startswith("<<", i):
             m = heredoc_at(command, i, last_line(bare, budget))
             if m:
-                pending.append((*heredoc_word(m), level))
+                pending.append(heredoc_word(m))
                 out.extend(m.group(0))
                 bare.extend(m.group(0))
                 i = m.end()
                 continue
-            out.append(ch)
-            bare.append(ch)
-        elif ch == "(":
-            level += 1
-            out.append(ch)
-            bare.append(ch)
-        elif ch == ")":
-            level = max(0, level - 1)
-            pending = [p for p in pending if p[3] <= level]
             out.append(ch)
             bare.append(ch)
         else:
@@ -840,8 +867,7 @@ def substitution_end(
     without one the call builds its own."""
     n, start = len(command), i
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
-    nest = 1
-    pending = []  # (word, dash, expands, nest)
+    pending = []  # (word, dash, expands)
     scan = scan or HeredocLines(command, start)
     while i < n:
         ch = command[i]
@@ -857,12 +883,10 @@ def substitution_end(
                 continue
             if command.startswith("$(", i) and not command.startswith("$((", i):
                 stack.append(1)
-                nest += 1
                 i += 2
                 continue
             if ch == '"':
                 stack.pop()
-                nest -= 1
             i += 1
             continue
         if ch == "\\":
@@ -878,7 +902,6 @@ def substitution_end(
             i = single_quote_end(command, i + 1, False) + 1
         elif ch == '"':
             stack.append('"')
-            nest += 1
             i += 1
         elif ch == "#" and (i == start or command[i - 1] in " \t\n;&|()"):
             while i < n and command[i] != "\n":
@@ -891,18 +914,15 @@ def substitution_end(
             charge(budget, i - line_start)
             m = heredoc_at(command, i, mask_quotes(command[line_start:i]))
             if m:
-                pending.append((*heredoc_word(m), nest))
+                pending.append(heredoc_word(m))
                 i = m.end()
             else:
                 i += 1
         elif ch == "(":
             stack[-1] += 1
-            nest += 1
             i += 1
         elif ch == ")":
             stack[-1] -= 1
-            nest -= 1
-            pending = [p for p in pending if p[3] <= nest]
             if stack[-1] == 0:
                 stack.pop()
                 if not stack:
