@@ -191,6 +191,9 @@ def heredoc_word(m: re.Match) -> tuple[str, bool, bool]:
     """The (delimiter word, dash, expands) of a HEREDOC_OP match. expands is
     true for an unquoted word: the shell expands its body."""
     word = next(g for g in m.group(2, 3, 4) if g is not None)
+    if m.group(3) is not None:
+        # Inside double quotes the shell drops a backslash before $ ` " \ newline.
+        word = re.sub(r'\\([$`"\\\n])', r"\1", word)
     expands = m.group(4) is not None and "\\" not in m.group(0)
     return word, m.group(1) == "-", expands
 
@@ -392,7 +395,8 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
             bare.append(ch)
             exposed = []
             i = skip_heredoc_bodies(command, i + 1, pending, scan, exposed)
-            out.extend(expanded_spans(body, budget) for body in exposed)
+            for body in exposed:
+                out.extend(expanded_spans(body, budget))  # one char per element
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i):

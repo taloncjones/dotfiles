@@ -896,6 +896,27 @@ rmg_denies_with "denies a substitution rm in an unquoted numeric heredoc body (C
 $(rm -rf /)
 123
 )"')" "$RMG_D2"
+rmg_denies_with "denies an rm after a comment following an expanding heredoc with a substitution (F1)" "$(rmg_json_payload 'cat <<EOF
+$(true)
+EOF
+# don'"'"'t
+echo '"'"'<<\EOF '"'"' \'"'"'
+echo "$(rm -rf /)"
+EOF')" "$RMG_D2"
+rmg_allows_json "allows a commit heredoc with a substitution, a comment and an apostrophe (F1)" "$(rmg_json_payload 'cat <<EOF
+$(date)
+EOF
+# don'"'"'t
+echo ok')"
+rmg_denies_with "denies an rm after a double-quoted heredoc delimiter with an escaped dollar (F2)" "$(rmg_json_payload 'cat <<"a\$b"
+body
+a$b
+echo "$(rm -rf /)"
+a\$b')" "$RMG_D2"
+rmg_allows_json "allows a double-quoted heredoc delimiter with an apostrophe in the body (F2)" "$(rmg_json_payload 'cat <<"EOF"
+don'"'"'t
+EOF
+echo ok')"
 rmg_denies_within_3s() {
     label="$1"
     payload="$2"
