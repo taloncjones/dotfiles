@@ -309,6 +309,16 @@ $(true)
 rm -rf /
 $
 )"')"
+assert_denies_2 "rm guard denies a backtick rm in an unquoted heredoc body the shell expands (C1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<COMMIT-MSG
+use `rm -rf /` here
+COMMIT-MSG
+)"')"
+assert_denies_2 "rm guard denies a substitution rm in an unquoted numeric heredoc body (C1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<123
+$(rm -rf /)
+123
+)"')"
 assert_denies_within_3s() {
     label="$1"
     hook="$2"
@@ -330,6 +340,9 @@ except subprocess.TimeoutExpired:
 RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + ")\"")')
 assert_denies_within_3s "rm guard denies a hidden rm among thousands of << operators within 3 s (B1)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_MANY_HEREDOCS")"
+RMG_MISSING_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /)\"\n" + "".join("cat <<E%d\n" % i for i in range(12000)))')
+assert_denies_within_3s "rm guard denies a hidden rm before thousands of distinct unterminated heredocs within 3 s (C2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_MISSING_HEREDOCS")"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

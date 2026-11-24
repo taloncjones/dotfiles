@@ -883,6 +883,14 @@ $(true)
 rm -rf /
 $
 )"')" "$RMG_D2"
+rmg_denies_with "denies a backtick rm in an unquoted heredoc body the shell expands (C1)" "$(rmg_json_payload 'echo "$(cat <<COMMIT-MSG
+use `rm -rf /` here
+COMMIT-MSG
+)"')" "$RMG_D2"
+rmg_denies_with "denies a substitution rm in an unquoted numeric heredoc body (C1)" "$(rmg_json_payload 'echo "$(cat <<123
+$(rm -rf /)
+123
+)"')" "$RMG_D2"
 rmg_denies_within_3s() {
     label="$1"
     payload="$2"
@@ -902,6 +910,8 @@ except subprocess.TimeoutExpired:
 }
 RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + ")\"")')
 rmg_denies_within_3s "denies a hidden rm among thousands of << operators within 3 s (B1)" "$(rmg_json_payload "$RMG_MANY_HEREDOCS")"
+RMG_MISSING_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /)\"\n" + "".join("cat <<E%d\n" % i for i in range(12000)))')
+rmg_denies_within_3s "denies a hidden rm before thousands of distinct unterminated heredocs within 3 s (C2)" "$(rmg_json_payload "$RMG_MISSING_HEREDOCS")"
 rmg_warns() {
     label="$1"
     payload="$2"

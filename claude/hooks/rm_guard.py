@@ -45,6 +45,7 @@ and on any segment that contains no `rm`/`rmdir` token.
 # runtime expression.
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import re
@@ -186,37 +187,92 @@ def charge(budget: list[int], n: int) -> None:
         raise TooComplexError
 
 
-def heredoc_word(m: re.Match) -> tuple[str, bool]:
-    """The (delimiter word, dash) of a HEREDOC_OP match."""
+def heredoc_word(m: re.Match) -> tuple[str, bool, bool]:
+    """The (delimiter word, dash, expands) of a HEREDOC_OP match. expands is
+    true for an unquoted word: the shell expands its body."""
     word = next(g for g in m.group(2, 3, 4) if g is not None)
-    return word, m.group(1) == "-"
+    expands = m.group(4) is not None and "\\" not in m.group(0)
+    return word, m.group(1) == "-", expands
 
 
-def skip_heredoc_bodies(command: str, i: int, pending: list[tuple], missing: set) -> int:
-    """Index just past the terminator line of each pending (word, dash, ...)
-    heredoc. A heredoc with no terminator line is not one: its lines stay, so
-    the index where its body would start is returned. missing holds the
-    (word, dash) pairs already found to have no terminator line after an
-    earlier index, so a later newline does not rescan to the end of text."""
-    n = len(command)
-    for entry in pending:
-        word, dash = entry[0], entry[1]
-        if (word, dash) in missing:
-            return i
-        start = i
-        found = False
-        while i < n:
-            end = command.find("\n", i)
+class HeredocLines:
+    """Terminator lookup for one command text. Scans each line once, however
+    many heredocs ask, so distinct unterminated delimiters stay linear."""
+
+    def __init__(self, command: str):
+        self.command = command
+        self.pos = 0
+        self.exact = {}  # line -> [(start, after)]
+        self.tabbed = {}  # line without leading tabs -> [(start, after)]
+
+    def find(self, word: str, dash: bool, i: int) -> tuple[int, int] | None:
+        """(start, after) of the first line at or past i that is the word, or
+        None. A dash heredoc ignores leading tabs on the line."""
+        table = self.tabbed if dash else self.exact
+        lines = table.get(word, [])
+        k = bisect.bisect_left(lines, (i,))
+        if k < len(lines):
+            return lines[k]
+        n = len(self.command)
+        while self.pos < n:
+            start = self.pos
+            end = self.command.find("\n", start)
             end = n if end == -1 else end
-            line = command[i:end]
-            i = min(end + 1, n)
-            if (line.lstrip("\t") if dash else line) == word:
-                found = True
-                break
-        if not found:
-            missing.add((word, dash))
-            return start
+            line = self.command[start:end]
+            self.pos = min(end + 1, n)
+            entry = (start, self.pos)
+            self.exact.setdefault(line, []).append(entry)
+            self.tabbed.setdefault(line.lstrip("\t"), []).append(entry)
+            if start >= i and (line.lstrip("\t") if dash else line) == word:
+                return entry
+        return None
+
+
+def skip_heredoc_bodies(
+    command: str, i: int, pending: list[tuple], scan: HeredocLines, exposed: list[str] | None = None
+) -> int:
+    """Index just past the terminator line of each pending (word, dash,
+    expands, ...) heredoc. A heredoc with no terminator line is not one: its
+    lines stay, so the index where its body would start is returned. The body
+    of an expanding heredoc is appended to exposed when given."""
+    for word, dash, expands, *_ in pending:
+        found = scan.find(word, dash, i)
+        if found is None:
+            return i
+        if expands and exposed is not None:
+            exposed.append(command[i : found[0]])
+        i = found[1]
     return i
+
+
+def expanded_spans(body: str, budget: list[int]) -> str:
+    """The backtick and `$(...)` spans of an expanding heredoc body, one per
+    line, each `$(...)` in double quotes so the substitution walk reads it. A
+    span that cannot be paired runs to the end of the body."""
+    charge(budget, len(body))
+    out = []
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            i += 2 if body[i + 1 : i + 2] in ("\\", "$", "`") else 1
+        elif ch == "`":
+            end = backtick_end(body, i + 1)
+            if end == -1:
+                out.append(body[i:] + "\n")
+                break
+            out.append(body[i : end + 1] + "\n")
+            i = end + 1
+        elif body.startswith("$(", i) and not body.startswith("$((", i):
+            end = substitution_end(body, i + 2, budget)
+            if end == -1:
+                out.append('"' + body[i:] + "\n")
+                break
+            out.append('"' + body[i:end] + '"\n')
+            i = end
+        else:
+            i += 1
+    return "".join(out)
 
 
 def in_arith_or_cond(text: str) -> bool:
@@ -298,8 +354,8 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
     as quotes."""
     out = []
     bare = []  # out without quoted characters (each is `_`) and comments
-    pending = []  # (word, dash, paren level)
-    missing = set()
+    pending = []  # (word, dash, expands, paren level)
+    scan = HeredocLines(command)
     quote = None
     level = 0
     i, n = 0, len(command)
@@ -332,7 +388,9 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
         elif ch == "\n" and pending:
             out.append(ch)
             bare.append(ch)
-            i = skip_heredoc_bodies(command, i + 1, pending, missing)
+            exposed = []
+            i = skip_heredoc_bodies(command, i + 1, pending, scan, exposed)
+            out.extend(expanded_spans(body, budget) for body in exposed)
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i):
@@ -351,7 +409,7 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
             bare.append(ch)
         elif ch == ")":
             level = max(0, level - 1)
-            pending = [p for p in pending if p[2] <= level]
+            pending = [p for p in pending if p[3] <= level]
             out.append(ch)
             bare.append(ch)
         else:
@@ -773,8 +831,8 @@ def substitution_end(command: str, i: int, budget: list[int]) -> int:
     n, start = len(command), i
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
     nest = 1
-    pending = []  # (word, dash, nest)
-    missing = set()
+    pending = []  # (word, dash, expands, nest)
+    scan = HeredocLines(command)
     while i < n:
         ch = command[i]
         if stack[-1] == '"':
@@ -816,7 +874,7 @@ def substitution_end(command: str, i: int, budget: list[int]) -> int:
             while i < n and command[i] != "\n":
                 i += 1
         elif ch == "\n" and pending:
-            i = skip_heredoc_bodies(command, i + 1, pending, missing)
+            i = skip_heredoc_bodies(command, i + 1, pending, scan)
             pending = []
         elif ch == "<" and command.startswith("<<", i):
             line_start = max(command.rfind("\n", 0, i) + 1, start)
@@ -834,7 +892,7 @@ def substitution_end(command: str, i: int, budget: list[int]) -> int:
         elif ch == ")":
             stack[-1] -= 1
             nest -= 1
-            pending = [p for p in pending if p[2] <= nest]
+            pending = [p for p in pending if p[3] <= nest]
             if stack[-1] == 0:
                 stack.pop()
                 if not stack:
