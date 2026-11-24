@@ -858,7 +858,7 @@ def backtick_end(command: str, i: int) -> int:
 
 
 def collapse_quoted_substitutions(
-    command: str, budget: list[int]
+    command: str, budget: list[int] | None = None
 ) -> tuple[str, str, list[str], list[str], str]:
     """Drop `#` comments and collapse backtick spans in one quote-aware walk.
     Returns (plain, collapsed, bodies, quoted, unpaired). plain has each
@@ -868,6 +868,8 @@ def collapse_quoted_substitutions(
     it nor splits the token. bodies lists the backtick span bodies in text
     order; quoted lists the collapsed `$(...)` bodies; unpaired is the text
     from a backtick or `$(` the walk could not pair (it stops there), or ""."""
+    if budget is None:
+        budget = [0, SUBSTITUTION_TEXT_BUDGET]
     plain, collapsed, bodies, quoted = [], [], [], []
     unpaired = ""
     last = ""
