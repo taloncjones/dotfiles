@@ -27,7 +27,7 @@ write; approval rejection means blocked. Do not edit reviewed source or relax
 
 The `render-brief` core verb fills the `brief:<name>` blocks below (its
 `BRIEF_PHASES` table names the blocks per phase). It leaves only
-`<launch_id>`, `<pane_id>`, `<launch_source_head>`, `<sha>`, `<outcome>`,
+`<launch_id>`, `<pane_id>`, `<launch_source_head>`, `<full 40-char sha from git rev-parse HEAD>`, `<outcome>`,
 `<n>` and `<artifact-list-json>` for the worker (a lead also keeps
 `<binding_id>` and `<lead_fence>`); the adapter's attempt
 context supplies the first three. Each block is a fence whose info
@@ -157,7 +157,7 @@ When you finish, pause, or fail this phase:
    `completed`.
 3. <lessons-step>
 4. Run:
-   `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase <emit_phase> --outcome <outcome> --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
+   `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase <emit_phase> --outcome <outcome> --head-sha <full 40-char sha from git rev-parse HEAD> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
    `<outcome>` is completed, failed or paused, under step 2's rule.
 5. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
@@ -314,7 +314,7 @@ When the envelope is written, or you stop short:
    pin"; otherwise emit `failed` or `paused`.
 2. <lessons-step>
 3. Run:
-   `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome <outcome> --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
+   `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome <outcome> --head-sha <full 40-char sha from git rev-parse HEAD> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
 4. Then STOP and go idle. The director reads the envelope, integrates it and
    ships through its own gates. Never merge.
 ```
@@ -366,7 +366,7 @@ When the private PRD is frozen and reviewed:
 1. Commit intended public code only. Keep the private PRD, the verification contract, and state untracked.
 2. <lessons-step>
 3. Run (note `--phase plan`):
-   `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --plan-artifacts <artifact-list-json> --outcome <outcome> --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
+   `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --plan-artifacts <artifact-list-json> --outcome <outcome> --head-sha <full 40-char sha from git rev-parse HEAD> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
    `<outcome>` is completed, failed or paused.
 4. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan or start the
@@ -398,7 +398,7 @@ todo's Solution is the plan. Stay within the files the todo names: <file list>.
 `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`
 before closing. If the work needs a design decision the todo does not settle,
 or a file outside that list, commit what is safe and close with
-`<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome paused --reason needs_design --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`;
+`<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome paused --reason needs_design --head-sha <full 40-char sha from git rev-parse HEAD> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`;
 the director re-kicks the item as raw.
 ```
 
@@ -460,7 +460,7 @@ appear in a script you author:
 2. Run `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`;
    `--outcome completed` only on exit 0 (or exit 5, noting "exit 5, no pin").
 3. <lessons-step>
-4. Run `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head> [--reason needs_design|blocked_on_human|other]`
+4. Run `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <full 40-char sha from git rev-parse HEAD> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head> [--reason needs_design|blocked_on_human|other]`
 5. Stop. Never push, merge, open a PR, or run /handoff.
 ```
 

@@ -65,7 +65,7 @@ ok "claim-owner recorded the inbox socket" \
   "python3 -c \"import json;o=json.load(open('$ROOT/herdr-orch/$SLUG/owner.json'));assert o['messaging_socket']=='$INBOX' and o['pid']==4242,o\""
 $CLI refresh-owner --repo-slug "$SLUG" --session S --fence "$F" --messaging-socket "$INBOX"
 $CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","review_head_sha":null}'
+  --json '{"task_id":"PROJ-1","base_sha":"0000000000000000000000000000000000000000","status":"in-progress","review_head_sha":null}'
 $CLI write-index --repo-slug "$SLUG" --workspace w1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","repo_slug":"'"$SLUG"'","role":"impl"}'
 ok "kickoff wrote one task record" "[ -f '$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json' ]"
@@ -87,15 +87,15 @@ rm -rf "$SOCKDIR"; trap - EXIT
 # this core guarantee.
 ok "status shows the task" "$CLI status --repo-slug '$SLUG' | grep -q PROJ-1"
 $CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"re-kicked-off","review_head_sha":null}'
+  --json '{"task_id":"PROJ-1","base_sha":"0000000000000000000000000000000000000000","status":"re-kicked-off","review_head_sha":null}'
 ok "write-task is single-record last-write-wins per task_id" \
   "[ \"\$(ls '$ROOT/herdr-orch/$SLUG/tasks/'PROJ-1.json | wc -l)\" -eq 1 ] && python3 -c \"import json;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json'));import sys;sys.exit(0 if d['status']=='re-kicked-off' else 1)\""
 
 # 3. worker completes -> emit-done; completion correlates
 $CLI emit-done --repo-slug "$SLUG" --task-id PROJ-1 --workspace w1 --agent impl-proj-1 \
-  --phase implement --outcome completed --head-sha h1 --base-sha b0
+  --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000
 ok "done.json written with matching SHAs" \
-  "python3 -c \"import json;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json'));import sys;sys.exit(0 if d['outcome']=='completed' and d['head_sha']=='h1' and d['base_sha']=='b0' else 1)\""
+  "python3 -c \"import json;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json'));import sys;sys.exit(0 if d['outcome']=='completed' and d['head_sha']=='1111111111111111111111111111111111111111' and d['base_sha']=='0000000000000000000000000000000000000000' else 1)\""
 
 # 4. dispatch-once-per-HEAD, re-review on new HEAD (decision function)
 ok "dispatch once per HEAD; re-review on new HEAD" "python3 - <<PY
@@ -110,9 +110,9 @@ PY"
 
 # 5. review changes-requested recorded in a separate file; impl done.json survives
 $CLI emit-review --repo-slug "$SLUG" --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
-  --reviewed-head-sha h1 --outcome changes-requested --findings-ref /tmp/f.md
+  --reviewed-head-sha 1111111111111111111111111111111111111111 --outcome changes-requested --findings-ref /tmp/f.md
 ok "review record is a separate review.json; the impl completion record is not clobbered" \
-  "python3 -c \"import json,sys;r=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.review.json'));d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json'));sys.exit(0 if r['outcome']=='changes-requested' and r['reviewed_head_sha']=='h1' and d['outcome']=='completed' and d['head_sha']=='h1' else 1)\""
+  "python3 -c \"import json,sys;r=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.review.json'));d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json'));sys.exit(0 if r['outcome']=='changes-requested' and r['reviewed_head_sha']=='1111111111111111111111111111111111111111' and d['outcome']=='completed' and d['head_sha']=='1111111111111111111111111111111111111111' else 1)\""
 
 # 6. fenced writes fail after ownership takeover (yield semantics)
 F2=$($CLI claim-owner --repo-slug "$SLUG" --session T --host h --pid 2 --stale-secs 0 2>/dev/null || true)
@@ -678,9 +678,9 @@ RSSLUG="github-com-org-reset-deadbeef"
 RSF=$($CLI claim-owner --repo-slug "$RSSLUG" --session RS --host h --pid 7)
 RSRD="$ROOT/herdr-orch/$RSSLUG"
 $CLI write-task --repo-slug "$RSSLUG" --task-id PROJ-R1 --session RS --fence "$RSF" \
-  --json '{"task_id":"PROJ-R1","base_sha":"b0","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1"}]}'
+  --json '{"task_id":"PROJ-R1","base_sha":"0000000000000000000000000000000000000000","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1"}]}'
 $CLI emit-done --repo-slug "$RSSLUG" --task-id PROJ-R1 --workspace w1 --agent impl-proj-r1 \
-  --phase implement --outcome failed --head-sha h1 --base-sha b0
+  --phase implement --outcome failed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000
 RS_OLD=$(shasum -a 256 "$RSRD/tasks/PROJ-R1.json" "$RSRD/tasks/PROJ-R1.done.json")
 ok "unbound write-task refuses an explicit [] over dispatched history" \
   "! $CLI write-task --repo-slug '$RSSLUG' --task-id PROJ-R1 --session RS --fence '$RSF' --json '{\"task_id\":\"PROJ-R1\",\"base_sha\":\"b0\",\"status\":\"in-progress\",\"workers\":[]}' 2>/dev/null"
