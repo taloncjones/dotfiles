@@ -737,7 +737,7 @@ BRIEF_TEMPLATE_PATH = (Path(__file__).resolve().parents[1] / "skills" / "herdr-o
 BRIEF_BLOCK_RE = re.compile(r"^```brief:([a-z0-9-]+)\n(.*?)\n```$", re.M | re.S)
 BRIEF_TOKEN_RE = re.compile(r"<[A-Za-z][^<>\s]{0,40}>")
 # Left for the briefed agent; the adapter's attempt context supplies the first three.
-BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>",
+BRIEF_WORKER_FIELDS = frozenset({"<launch_id>", "<pane_id>", "<launch_source_head>",
                                  "<outcome>", "<n>", "<artifact-list-json>", "<binding_id>",
                                  "<lead_fence>"})
 # Only the lead brief may leave these; the unfilled-token guard exempts them for that phase alone.
@@ -3686,26 +3686,33 @@ def apply_workspace_keys(rec, prior) -> None:
                  f"{key} is written only by close-idle and reopen")
 
 
-def is_completed(task, done, live_head_sha, workspace) -> bool:
-    if not isinstance(task, dict) or not isinstance(done, dict):
-        return False
+def completion_mismatch(task, done, live_head_sha, workspace):
+    """First reason `done` does not complete `task` at live_head_sha, else None."""
+    if not isinstance(task, dict):
+        return "no readable task record"
+    if not isinstance(done, dict):
+        return "no readable done record"
     if not attempt_matches(task, done, "implement", workspace):
-        return False
+        return "done record does not match the dispatched implement attempt"
     if done.get("outcome") != "completed":
-        return False
+        return f"outcome {_shown(done.get('outcome'))} != completed"
     if done.get("task_id") != task.get("task_id"):
-        return False
+        return f"task_id {_shown(done.get('task_id'))} != task {_shown(task.get('task_id'))}"
     # Provenance: the record must come from the workspace the orchestrator
     # dispatched for this task, not a foreign/older worker that raced the file.
     if done.get("workspace_id") != workspace:
-        return False
-    if done.get("head_sha") != live_head_sha or done.get("base_sha") != task.get(
-        "base_sha"
-    ):
-        return False
-    return done.get("head_sha") != done.get(
-        "base_sha"
-    )  # at least one commit ahead of base
+        return f"workspace_id {_shown(done.get('workspace_id'))} != requested {_shown(workspace)}"
+    if done.get("head_sha") != live_head_sha:
+        return f"head_sha {_shown(done.get('head_sha'))} != live {_shown(live_head_sha)}"
+    if done.get("base_sha") != task.get("base_sha"):
+        return f"base_sha {_shown(done.get('base_sha'))} != task {_shown(task.get('base_sha'))}"
+    if done.get("head_sha") == done.get("base_sha"):  # need a commit past base
+        return f"head_sha {_shown(done.get('head_sha'))} == base_sha (no commit past base)"
+    return None
+
+
+def is_completed(task, done, live_head_sha, workspace) -> bool:
+    return completion_mismatch(task, done, live_head_sha, workspace) is None
 
 
 def plan_record_matches(task, done, head_sha, workspace) -> bool:
@@ -4551,35 +4558,46 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     blocking findings from clearing the gate; the findings check stops a
     native verdict whose evidence is missing, altered, or outside the state
     root."""
-    if not isinstance(task, dict) or not isinstance(done, dict):
-        return False
+    return review_mismatch(task, done, head_sha, workspace) is None
+
+
+def review_mismatch(task, done, head_sha, workspace):
+    """First reason `done` does not approve `task` at head_sha, else None."""
+    if not isinstance(task, dict):
+        return "no readable task record"
+    if not isinstance(done, dict):
+        return "no readable review record"
     if not attempt_matches(task, done, "review", workspace):
-        return False
+        return "review record does not match the dispatched review attempt"
     if review_retired(task, done):
-        return False
+        return f"review launch {_shown(done.get('launch_id'))} is retired"
     if done.get("task_id") != task.get("task_id"):
-        return False
+        return f"task_id {_shown(done.get('task_id'))} != task {_shown(task.get('task_id'))}"
     # Provenance: only the workspace the orchestrator dispatched for review.
     if done.get("workspace_id") != workspace:
-        return False
-    if done.get("phase") != "review" or done.get("outcome") != "approved":
-        return False
+        return f"workspace_id {_shown(done.get('workspace_id'))} != requested {_shown(workspace)}"
+    if done.get("phase") != "review":
+        return f"phase {_shown(done.get('phase'))} != review"
+    if done.get("outcome") != "approved":
+        return f"outcome {_shown(done.get('outcome'))} != approved"
     if type(done.get("blocking_count")) is not int or done["blocking_count"] != 0:
-        return False
+        return f"blocking_count {_shown(done.get('blocking_count'))} != 0"
     if not _findings_evidence_ok(done):
-        return False
+        return "findings evidence is missing or does not match findings_sha256"
     if task.get("review_head_sha") != head_sha:
-        return False
+        return f"review_head_sha {_shown(task.get('review_head_sha'))} != live {_shown(head_sha)}"
     if done.get("reviewed_head_sha") == head_sha:
-        return True
+        return None
     # A proven carry (carry-review) re-pins at a later head and names the
     # review launch and reviewed head it carried the approval from.
     carry = task.get("review_carry")
-    return (isinstance(carry, dict) and carry.get("head") == head_sha
+    if (isinstance(carry, dict) and carry.get("head") == head_sha
             and _nonempty_str(carry.get("reviewed_head_sha"))
             and done.get("reviewed_head_sha") == carry["reviewed_head_sha"]
             and _nonempty_str(carry.get("review_launch_id"))
-            and done.get("launch_id") == carry["review_launch_id"])
+            and done.get("launch_id") == carry["review_launch_id"]):
+        return None
+    return f"reviewed_head_sha {_shown(done.get('reviewed_head_sha'))} != live {_shown(head_sha)}"
 
 
 _TERMINAL_TASK = frozenset({"merged", "abandoned", "failed"})
@@ -5263,6 +5281,11 @@ def _parse_payload(text):
         return json.loads(text)
     except (ValueError, RecursionError):
         return None
+
+
+def _shown(value) -> str:
+    """Render a value on one line: control characters become backslash escapes."""
+    return str(value).encode("unicode_escape").decode("ascii")
 
 
 def _require(cond, msg) -> None:
@@ -7375,6 +7398,12 @@ def _main(argv=None) -> int:
                     or os.environ.get("HERDR_WORKSPACE_ID") != ns.workspace):
                 sys.stderr.write("[X] not the designated agent\n")
                 return 3
+        for flag in ("head_sha", "base_sha", "reviewed_head_sha",
+                     "reviewed_base_sha", "source_head_sha"):
+            value = getattr(ns, flag, None)
+            _require(value is None or bool(SHA40_RE.fullmatch(value)),
+                     f"--{flag.replace('_', '-')} {_shown(value)} is not a full "
+                     "40-character commit sha; pass the full value from git rev-parse HEAD")
         rd = repo_dir(ns.repo_slug)
         base = rd
         if getattr(ns, "binding", None) is not None:
@@ -7459,7 +7488,6 @@ def _main(argv=None) -> int:
         if ns.runtime is not None:
             _require(ns.launch_id and ns.pane_id and ns.source_head_sha,
                      "runtime attempt requires launch-id, pane-id, and source-head-sha")
-            _require(SHA40_RE.fullmatch(ns.source_head_sha), "source-head-sha must be 40 hex")
             done.update(runtime=ns.runtime, pane_id=ns.pane_id, source_head_sha=ns.source_head_sha)
             done.update(
                 emitter_pane_id=os.environ.get("HERDR_PANE_ID") or None,
@@ -8988,6 +9016,8 @@ def _main(argv=None) -> int:
         try:
             task = json.loads(read_payload_text(tf))
         except (OSError, ValueError):
+            if ns.cmd == "confirm-completion":
+                sys.stderr.write("[X] no readable task record\n")
             return 1
         try:
             done = json.loads(read_payload_text(df))
@@ -8997,7 +9027,11 @@ def _main(argv=None) -> int:
             payload_root = Path(ns.payload_root) if ns.payload_root else state_root().parent
             _require(contained(payload_root, state_root().parent), "payload-root escapes selected account scope")
             return 0 if is_plan_completed(task, done, ns.head_sha, ns.workspace, payload_root) else 1
-        return 0 if is_completed(task, done, ns.head_sha, ns.workspace) else 1
+        reason = completion_mismatch(task, done, ns.head_sha, ns.workspace)
+        if reason is not None:
+            sys.stderr.write(f"[X] {reason}\n")
+            return 1
+        return 0
     if ns.cmd == "confirm-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -9010,12 +9044,17 @@ def _main(argv=None) -> int:
         try:
             task = json.loads(read_payload_text(tf))
         except (OSError, ValueError):
+            sys.stderr.write("[X] no readable task record\n")
             return 1
         try:
             done = json.loads(read_payload_text(rf))
         except (OSError, ValueError):
             done = None
-        return 0 if is_reviewed(task, done, ns.head_sha, ns.workspace) else 1
+        reason = review_mismatch(task, done, ns.head_sha, ns.workspace)
+        if reason is not None:
+            sys.stderr.write(f"[X] {reason}\n")
+            return 1
+        return 0
     if ns.cmd == "watch":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(ns.interval >= 1, "interval must be >= 1")

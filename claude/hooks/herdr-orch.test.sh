@@ -362,10 +362,10 @@ check "CLI emit-done rejects path-escaping ids" <<'SH'
 root=$(mktemp -d)
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
   --repo-slug "../evil" --task-id "PROJ-1" --workspace w1 --agent a --phase implement \
-  --outcome completed --head-sha h --base-sha b 2>/dev/null; then exit 1; fi
+  --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 2>/dev/null; then exit 1; fi
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
   --repo-slug "slug-x" --task-id "../evil" --workspace w1 --agent a --phase implement \
-  --outcome completed --head-sha h --base-sha b 2>/dev/null; then exit 1; fi
+  --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 2>/dev/null; then exit 1; fi
 test ! -e "$root/../evil"
 SH
 
@@ -587,44 +587,44 @@ root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 # no task/review yet -> not reviewed
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"h1","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched","source_head_sha":"h1"}]}'
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"1111111111111111111111111111111111111111","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched","source_head_sha":"1111111111111111111111111111111111111111"}]}'
 # legacy emit-review records carry no source_head_sha, so the legacy row drops it
 python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); del d["workers"][0]["source_head_sha"]; json.dump(d, open(p, "w"))' "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
-# task dispatched at h1 but no review.json yet -> not reviewed
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
-  --reviewed-head-sha h1 --outcome approved
-# dispatched == reviewed == HEAD (h1), right workspace, no blocking -> merge-ready
-$CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1
+# task dispatched at 1111111111111111111111111111111111111111 but no review.json yet -> not reviewed
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha 1111111111111111111111111111111111111111 \
+  --reviewed-head-sha 1111111111111111111111111111111111111111 --outcome approved
+# dispatched == reviewed == HEAD (1111111111111111111111111111111111111111), right workspace, no blocking -> merge-ready
+$CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 1111111111111111111111111111111111111111
 # a foreign review workspace's record does not clear the gate (provenance)
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w8 --head-sha h1 2>/dev/null; then exit 1; fi
-# HEAD advanced to h2 after a clean review of h1 -> gate holds
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h2 2>/dev/null; then exit 1; fi
-# reviewer records the new live SHA h2 though dispatch was h1 -> still rejected
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
-  --reviewed-head-sha h2 --outcome approved
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h2 2>/dev/null; then exit 1; fi
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w8 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
+# HEAD advanced to 2222222222222222222222222222222222222222 after a clean review of 1111111111111111111111111111111111111111 -> gate holds
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 2222222222222222222222222222222222222222 2>/dev/null; then exit 1; fi
+# reviewer records the new live SHA 2222222222222222222222222222222222222222 though dispatch was 1111111111111111111111111111111111111111 -> still rejected
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha 1111111111111111111111111111111111111111 \
+  --reviewed-head-sha 2222222222222222222222222222222222222222 --outcome approved
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 2222222222222222222222222222222222222222 2>/dev/null; then exit 1; fi
 # approved but blocking findings remain -> rejected
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
-  --reviewed-head-sha h1 --outcome approved --blocking-count 1
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha 1111111111111111111111111111111111111111 \
+  --reviewed-head-sha 1111111111111111111111111111111111111111 --outcome approved --blocking-count 1
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
 # a changes-requested review is never merge-ready
-$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha h1 \
-  --reviewed-head-sha h1 --outcome changes-requested
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 --source-head-sha 1111111111111111111111111111111111111111 \
+  --reviewed-head-sha 1111111111111111111111111111111111111111 --outcome changes-requested
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
 SH
 
 check "CLI emit-review writes a separate review.json with blocking_count, never clobbering done.json" <<'SH'
 root=$(mktemp -d)
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
   --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
-  --reviewed-head-sha h9 --outcome changes-requested --blocking-count 3 --findings-ref /tmp/f.md
+  --reviewed-head-sha 9999999999999999999999999999999999999999 --outcome changes-requested --blocking-count 3 --findings-ref /tmp/f.md
 python3 - <<PY
 import json,os
 d=json.load(open("$root/herdr-orch/slug-x/tasks/PROJ-1.review.json"))
-assert d["phase"]=="review" and d["outcome"]=="changes-requested" and d["reviewed_head_sha"]=="h9"
+assert d["phase"]=="review" and d["outcome"]=="changes-requested" and d["reviewed_head_sha"]=="9999999999999999999999999999999999999999"
 assert d["blocking_count"]==3
 assert not os.path.exists("$root/herdr-orch/slug-x/tasks/PROJ-1.done.json")  # review record is a distinct file
 PY
@@ -649,9 +649,9 @@ root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"reviewed","review_head_sha":"h1"}'
+  --json '{"task_id":"PROJ-1","status":"reviewed","review_head_sha":"1111111111111111111111111111111111111111"}'
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
-  --reviewed-head-sha h1 --outcome approved
+  --reviewed-head-sha 1111111111111111111111111111111111111111 --outcome approved
 # the sidecar sorts after PROJ-1.json; status must still report the real status
 $CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans','_think'] and s['PROJ-1']['status']=='reviewed',s"
 SH
@@ -674,16 +674,16 @@ root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress"}'
+  --json '{"task_id":"PROJ-1","base_sha":"0000000000000000000000000000000000000000","status":"in-progress"}'
 # no done.json yet -> not completed
-if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h1 2>/dev/null; then exit 1; fi
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
 $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 \
-  --phase implement --outcome completed --head-sha h1 --base-sha b0
-$CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h1
+  --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000
+$CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha 1111111111111111111111111111111111111111
 # a foreign workspace's record does not satisfy the gate (provenance)
-if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w2 --head-sha h1 2>/dev/null; then exit 1; fi
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w2 --head-sha 1111111111111111111111111111111111111111 2>/dev/null; then exit 1; fi
 # HEAD moved past the recorded done.json -> not completed
-if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h2 2>/dev/null; then exit 1; fi
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha 2222222222222222222222222222222222222222 2>/dev/null; then exit 1; fi
 SH
 
 check "wake_decision: three consecutive Stops with no record change push zero wakes" <<PY
@@ -2538,13 +2538,13 @@ check "emit-done: optional launch_id and reason round-trip; bad reason rejected"
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 $CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent mech-td-x --phase implement \
-  --outcome paused --head-sha h1 --base-sha b0 --launch-id mech-td-x-20260901T000000Z --reason needs_design
+  --outcome paused --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 --launch-id mech-td-x-20260901T000000Z --reason needs_design
 python3 -c "import json;d=json.load(open('$CLAUDE_CONFIG_DIR/herdr-orch/slug-e/tasks/td-x.done.json'));assert d['launch_id']=='mech-td-x-20260901T000000Z' and d['reason']=='needs_design',d"
 $CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent impl-td-x --phase implement \
-  --outcome completed --head-sha h1 --base-sha b0
+  --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000
 python3 -c "import json;d=json.load(open('$CLAUDE_CONFIG_DIR/herdr-orch/slug-e/tasks/td-x.done.json'));assert 'launch_id' not in d and 'reason' not in d,d"
 rc=0; $CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent impl-td-x --phase implement \
-  --outcome paused --head-sha h1 --base-sha b0 --reason tired 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+  --outcome paused --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 --reason tired 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
 SH
 
 check "agent_name mech prefix obeys canonical constraints" <<PY
@@ -4435,12 +4435,12 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 # 1) emit-done WITHOUT the runtime attempt flags but WITH --binding -> refused.
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --binding "$bid" --task-id PROJ-2 --workspace w1 --agent mech-td-x \
-   --phase implement --outcome completed --head-sha h1 --base-sha b0 2>/dev/null; then exit 1; fi
+   --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-2.done.json"
 # 2) emit-done WITH matching runtime attempt flags + --binding -> succeeds.
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-2 --workspace w1 \
-   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40"
 # 3) the record lands at leads/$bid/tasks/PROJ-2.done.json, not the launcher path.
 test -f "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-2.done.json"
@@ -4451,7 +4451,7 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py set-bindi
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --status revoked
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-2 --workspace w1 \
-   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
 SH
 
@@ -4487,13 +4487,13 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 # lease now names binding B -- an emit under A must be refused.
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bidA" --task-id PROJ-4 --workspace w1 \
-   --agent mech-td-a --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-a --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bidA/tasks/PROJ-4.done.json"
 # An emit under B, the current lease holder, succeeds.
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bidB" --task-id PROJ-4 --workspace w1 \
-   --agent mech-td-b --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-b --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40"
 test -f "$root/herdr-orch/$LF_SLUG/leads/$bidB/tasks/PROJ-4.done.json"
 SH
@@ -4596,7 +4596,7 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
    --json '{"task_id":"PROJ-6"}'
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-6 --workspace w1 \
-   --agent mech-td-noatt --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-noatt --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-6.done.json"
 # emit-review shares the same check (one guard before attempt_matches covers
@@ -4606,7 +4606,7 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
    --json '{"task_id":"PROJ-7"}'
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-7 --workspace w1 \
-   --agent rev-proj-7 --reviewed-head-sha h1 --outcome approved \
+   --agent rev-proj-7 --reviewed-head-sha 1111111111111111111111111111111111111111 --outcome approved \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-7.review.json"
@@ -4617,7 +4617,7 @@ root=$(mktemp -d)
 esc="$(mktemp -d)/evil"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug slug-escbind --binding "$esc" --task-id PROJ-9 --workspace w1 \
-   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    2>/dev/null; then exit 1; fi
 test ! -e "$esc/tasks"
 test ! -e "$esc"
@@ -5336,7 +5336,7 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-
 grep -q "writes are frozen" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w1 \
-   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
    2>"$ERRFILE"; then exit 1; fi
 grep -q "writes are frozen" "$ERRFILE"
@@ -5719,6 +5719,134 @@ rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID=pane9 prov_emit_review --f
 test "$rc" = 3
 grep -q 'not the designated agent' "$ERRFILE"
 test ! -e "$REVIEW_JSON"
+SH
+
+check "emit-done refuses an abbreviated hash, names the flag, writes nothing" <<'SH'
+root=$(mktemp -d); CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+FULL=$(printf 'a%.0s' $(seq 1 40))
+for flag in --head-sha --base-sha --source-head-sha; do
+  head=$FULL; base=$FULL; src=$FULL
+  case $flag in --head-sha) head=16b96a6;; --base-sha) base=16b96a6;; *) src=16b96a6;; esac
+  rc=0; CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 \
+    --agent impl-proj-1 --phase implement --outcome completed --head-sha "$head" --base-sha "$base" \
+    --source-head-sha "$src" 2>"$ERRFILE" || rc=$?
+  test "$rc" = 2
+  test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+  grep -q -- "$flag 16b96a6 " "$ERRFILE"
+  grep -q 'git rev-parse HEAD' "$ERRFILE"
+  test -z "$(ls -A "$root")"
+done
+rc=0; CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 \
+  --agent impl-proj-1 --phase implement --outcome paused --head-sha 16b96a6 --base-sha "$FULL" 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+test -z "$(ls -A "$root")"
+rc=0; CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 \
+  --agent impl-proj-1 --phase implement --outcome completed --head-sha "$(printf '16b\nforged')" \
+  --base-sha "$FULL" 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+test -z "$(ls -A "$root")"
+rc=0; CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace "bad ws" \
+  --agent impl-proj-1 --phase implement --outcome completed --head-sha 16b96a6 --base-sha "$FULL" 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+grep -q 'invalid workspace' "$ERRFILE"
+! grep -q -- '--head-sha' "$ERRFILE"
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-abbrev-done.git
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=pane9 prov_emit_done --head-sha 16b96a6 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+grep -q 'not the designated agent' "$ERRFILE"
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 \
+  --agent impl-proj-1 --phase implement --outcome completed --head-sha "$FULL" --base-sha "$(printf 'b%.0s' $(seq 1 40))"
+test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.done.json"
+SH
+
+check "emit-review refuses an abbreviated hash, names the flag, writes nothing" <<'SH'
+root=$(mktemp -d); CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+FULL=$(printf 'a%.0s' $(seq 1 40))
+for flag in --reviewed-head-sha --reviewed-base-sha --source-head-sha; do
+  rh=$FULL; rb=$FULL; src=$FULL
+  case $flag in --reviewed-head-sha) rh=16b96a6;; --reviewed-base-sha) rb=16b96a6;; *) src=16b96a6;; esac
+  rc=0; CLAUDE_CONFIG_DIR="$root" $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 \
+    --agent rev-proj-1 --outcome approved --reviewed-head-sha "$rh" --reviewed-base-sha "$rb" \
+    --source-head-sha "$src" 2>"$ERRFILE" || rc=$?
+  test "$rc" = 2
+  test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+  grep -q -- "$flag 16b96a6 " "$ERRFILE"
+  grep -q 'git rev-parse HEAD' "$ERRFILE"
+  test -z "$(ls -A "$root")"
+done
+rc=0; CLAUDE_CONFIG_DIR="$root" $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 \
+  --agent rev-proj-1 --outcome approved --reviewed-head-sha "$(printf '16b\r\nforged')" 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+test -z "$(ls -A "$root")"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 \
+  --agent rev-proj-1 --outcome approved --reviewed-head-sha "$FULL"
+test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.review.json"
+SH
+
+check "confirm-completion names the mismatched field on exit 1" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+B=$(printf '0%.0s' $(seq 1 40)); H=$(printf '1%.0s' $(seq 1 40)); C=$(printf '2%.0s' $(seq 1 40)); D=$(printf '3%.0s' $(seq 1 40))
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_sha":"'"$B"'","status":"in-progress"}'
+rc=0; $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha "$H" >"$ERRFILE.out" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1; test ! -s "$ERRFILE.out"
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+grep -q '^\[X\] no readable done record$' "$ERRFILE"
+$CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 \
+  --phase implement --outcome completed --head-sha "$H" --base-sha "$B"
+rc=0; $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha "$C" >"$ERRFILE.out" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1; test ! -s "$ERRFILE.out"
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+grep -q "^\[X\] head_sha $H != live $C\$" "$ERRFILE"
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_sha":"'"$D"'","status":"in-progress"}'
+rc=0; $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha "$H" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1
+grep -q "^\[X\] base_sha $B != task $D\$" "$ERRFILE"
+python3 - "$root/herdr-orch/slug-x/tasks/PROJ-1.done.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["head_sha"] = "16b\nforged"; json.dump(d, open(p, "w"))
+PY
+rc=0; $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha "$H" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+grep -q 'head_sha 16b\\nforged != live' "$ERRFILE"
+SH
+
+check "confirm-review names the mismatched field on exit 1" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+H=$(printf '1%.0s' $(seq 1 40)); C=$(printf '2%.0s' $(seq 1 40))
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched"}]}'
+rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha "$H" >"$ERRFILE.out" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1; test ! -s "$ERRFILE.out"
+grep -q '^\[X\] no readable review record$' "$ERRFILE"
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 --launch-id L1 \
+  --reviewed-head-sha "$H" --outcome approved
+rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha "$C" >"$ERRFILE.out" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1; test ! -s "$ERRFILE.out"
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+grep -q "^\[X\] review_head_sha $H != live $C\$" "$ERRFILE"
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$C"'","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched"}]}'
+rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha "$C" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1
+grep -q "^\[X\] reviewed_head_sha $H != live $C\$" "$ERRFILE"
+python3 - "$root/herdr-orch/slug-x/tasks/PROJ-1.review.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["reviewed_head_sha"] = "16b\nforged"; json.dump(d, open(p, "w"))
+PY
+rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha "$C" 2>"$ERRFILE" || rc=$?
+test "$rc" = 1
+test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
+grep -q 'reviewed_head_sha 16b\\nforged != live' "$ERRFILE"
 SH
 
 check "emit provenance: refused before any directory is created" <<'SH'
@@ -9579,7 +9707,7 @@ reg.write_text(json.dumps(data))
 ' "$LF_SLUG" "$KEY"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-2 --workspace w1 \
-   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
 grep -q "does not corroborate the lease" "$ERRFILE"
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-2.done.json"
@@ -10925,7 +11053,7 @@ CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --pane-id pane1 --source-head-sha "$SHA40"
 CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-fo --workspace w1 \
-   --agent impl-td-fo --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent impl-td-fo --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id I1 --pane-id pane1 --source-head-sha "$SHA40"
 # I2 is reserved and its pane goes live.
 CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
@@ -11023,7 +11151,7 @@ CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
 # The attempt settles. Its identity is now the CURRENT row and settled.
 CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-f1 --workspace w1 \
-   --agent impl-td-f1 --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --agent impl-td-f1 --phase implement --outcome completed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000 \
    --runtime claude --launch-id I1 --pane-id pane1 --source-head-sha "$SHA40"
 # Reusing that exact identity for a NEW dispatch must NOT be swallowed as a
 # retry: writing nothing would leave the pane the caller is about to start
@@ -11390,17 +11518,17 @@ f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 TASKS="$root/herdr-orch/slug-rs/tasks"
 CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug slug-rs --session S --fence "$f" --task-id td-a \
-   --json '{"task_id":"td-a","base_sha":"b0","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1"}]}'
+   --json '{"task_id":"td-a","base_sha":"0000000000000000000000000000000000000000","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1"}]}'
 CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-rs --task-id td-a --workspace w1 --agent impl-td-a \
-   --phase implement --outcome failed --head-sha h1 --base-sha b0
+   --phase implement --outcome failed --head-sha 1111111111111111111111111111111111111111 --base-sha 0000000000000000000000000000000000000000
 OLD_REC=$(shasum -a 256 "$TASKS/td-a.json"); OLD_DONE=$(shasum -a 256 "$TASKS/td-a.done.json")
 # Happy path: fresh id, empty history, provenance, old files byte-identical.
 CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --fence "$f" \
-   --task-id td-a --new-task-id td-a2 --json '{"task_id":"td-a2","base_sha":"b0","status":"kickoff"}'
+   --task-id td-a --new-task-id td-a2 --json '{"task_id":"td-a2","base_sha":"0000000000000000000000000000000000000000","status":"kickoff"}'
 python3 -c "
 import json
 d=json.load(open('$TASKS/td-a2.json'))
-assert d['workers']==[] and d['reset_from']=='td-a' and d['status']=='kickoff' and d['base_sha']=='b0', d
+assert d['workers']==[] and d['reset_from']=='td-a' and d['status']=='kickoff' and d['base_sha']=='0000000000000000000000000000000000000000', d
 "
 [ "$(shasum -a 256 "$TASKS/td-a.json")" = "$OLD_REC" ]
 [ "$(shasum -a 256 "$TASKS/td-a.done.json")" = "$OLD_DONE" ]
@@ -13505,7 +13633,7 @@ def put(rec):
 put(record)
 focus_text = "FIXTURE-FOCUS-TEXT quotes <task-body> and <lessons-step> verbatim"
 focus = os.path.join(tmp, "focus.md"); open(focus, "w").write(focus_text + "\n")
-WORKER = {"<launch_id>", "<pane_id>", "<launch_source_head>", "<sha>", "<outcome>", "<n>", "<artifact-list-json>"}
+WORKER = {"<launch_id>", "<pane_id>", "<launch_source_head>", "<outcome>", "<n>", "<artifact-list-json>"}
 def render(*extra):
     return subprocess.run(["python3", CORE, "render-brief", "--repo-slug", slug, "--repo-path", repo,
                            "--runtime", "claude", "--task-id", "td-render-x", *extra],
