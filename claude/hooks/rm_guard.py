@@ -166,10 +166,12 @@ def strip_line_comments(command: str) -> str:
 
 
 # The delimiter is `'any but quote'`, `"any but quote"`, or an optionally
-# escaped run of characters that are not whitespace, `;&|()<>`, a quote or a
-# backslash. The lookahead keeps `<<EOF"x"` from reading as `<<EOF`.
+# escaped run of characters that are not whitespace, `;&|()<>`, a quote, a
+# backslash, `$`, a backtick or a bracket: a word with an expansion is left
+# unmatched so its lines stay visible. The lookahead keeps `<<EOF"x"` from
+# reading as `<<EOF`.
 HEREDOC_OP = re.compile(
-    r"""<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|()<>'"\\]+))(?=[ \t\n;&|()<>]|$)"""
+    r"""<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|()<>'"\\$`{}\[\]]+))(?=[ \t\n;&|()<>]|$)"""
 )
 
 

@@ -877,6 +877,12 @@ rmg_allows_json "allows apostrophe in an unquoted non-identifier heredoc delimit
 don'"'"'t remove rm entries
 COMMIT-MSG
 )"')"
+rmg_denies_with "denies an rm after a heredoc delimiter holding an expansion (A1)" "$(rmg_json_payload 'echo "$(cat <<$(true)
+x
+$(true)
+rm -rf /
+$
+)"')" "$RMG_D2"
 rmg_denies_within_3s() {
     label="$1"
     payload="$2"

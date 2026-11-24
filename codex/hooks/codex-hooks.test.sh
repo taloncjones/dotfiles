@@ -302,6 +302,13 @@ assert_allows "rm guard allows apostrophe in an unquoted non-identifier heredoc 
 don'"'"'t remove rm entries
 COMMIT-MSG
 )"')"
+assert_denies_2 "rm guard denies an rm after a heredoc delimiter holding an expansion (A1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<$(true)
+x
+$(true)
+rm -rf /
+$
+)"')"
 assert_denies_within_3s() {
     label="$1"
     hook="$2"
