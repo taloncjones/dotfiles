@@ -793,7 +793,7 @@ def check_reading(
             reason = check_substitutions(body, real_cwd, home, body_cwd, depth + 1, budget, mode)
             if reason:
                 return reason
-    return UNPAIRED if RM_WORD.search(unpaired) else None
+    return UNPAIRED if RM_WORD.search(unpaired) and not legacy else None
 
 
 def strip_keywords(tokens: list[str]) -> list[str]:
@@ -926,11 +926,10 @@ def substitution_end(
     return -1
 
 
-def legacy_substitution_end(command: str, i: int, budget: list[int]) -> int:
+def legacy_substitution_end(command: str, i: int) -> int:
     """substitution_end as the guard once read it: only quotes and
-    parentheses, no comments or heredocs. Charges the text it scans."""
-    start, depth, n = i, 1, len(command)
-    end = -1
+    parentheses, no comments or heredocs."""
+    depth, n = 1, len(command)
     while i < n:
         ch = command[i]
         if ch == "\\":
@@ -945,11 +944,9 @@ def legacy_substitution_end(command: str, i: int, budget: list[int]) -> int:
         elif ch == ")":
             depth -= 1
             if depth == 0:
-                end = i + 1
-                break
+                return i + 1
         i += 1
-    charge(budget, (n if end == -1 else end) - start)
-    return end
+    return -1
 
 
 def backtick_end(command: str, i: int) -> int:
@@ -1015,7 +1012,7 @@ def collapse_quoted_substitutions(
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
             scan = scan or HeredocLines(command, i + 2)
             end = (
-                legacy_substitution_end(command, i + 2, budget)
+                legacy_substitution_end(command, i + 2)
                 if legacy
                 else substitution_end(command, i + 2, budget, scan)
             )
