@@ -5822,9 +5822,11 @@ check "confirm-review names the mismatched field on exit 1" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 H=$(printf '1%.0s' $(seq 1 40)); C=$(printf '2%.0s' $(seq 1 40))
+STRIP="python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); del d[\"workers\"][0][\"source_head_sha\"]; json.dump(d, open(p, \"w\"))' $root/herdr-orch/slug-x/tasks/PROJ-1.json"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched"}]}'
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched","source_head_sha":"'"$H"'"}]}'
+eval "$STRIP"
 rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha "$H" >"$ERRFILE.out" 2>"$ERRFILE" || rc=$?
 test "$rc" = 1; test ! -s "$ERRFILE.out"
 grep -q '^\[X\] no readable review record$' "$ERRFILE"
@@ -5834,8 +5836,11 @@ rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --h
 test "$rc" = 1; test ! -s "$ERRFILE.out"
 test "$(wc -l < "$ERRFILE" | tr -d ' ')" = 1
 grep -q "^\[X\] review_head_sha $H != live $C\$" "$ERRFILE"
-$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$C"'","workers":[{"phase":"review","launch_id":"L1","workspace_id":"w9","agent":"rev-proj-1","status":"launched"}]}'
+# dispatch re-pinned at the live head while the record still names the old one
+python3 - "$root/herdr-orch/slug-x/tasks/PROJ-1.json" "$C" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["review_head_sha"] = sys.argv[2]; json.dump(d, open(p, "w"))
+PY
 rc=0; $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha "$C" 2>"$ERRFILE" || rc=$?
 test "$rc" = 1
 grep -q "^\[X\] reviewed_head_sha $H != live $C\$" "$ERRFILE"
@@ -13563,7 +13568,8 @@ for spec in c.BRIEF_PHASES.values():
 missing = sorted(need - set(blocks))
 assert not missing, missing
 assert str(c.BRIEF_TEMPLATE_PATH.resolve()) == os.path.realpath("claude/skills/herdr-orchestration/references/brief-template.md")
-spaced = [n for n, body in blocks.items() if re.search(r"<[A-Za-z][^<>]*\s[^<>]*>", body)]
+FULL_SHA = "<full 40-char sha from git rev-parse HEAD>"  # the one spaced placeholder, by design
+spaced = [n for n, body in blocks.items() if re.search(r"<[A-Za-z][^<>]*\s[^<>]*>", body.replace(FULL_SHA, ""))]
 assert not spaced, spaced  # the token scan only sees space-free tokens
 try:
     c.brief_blocks("\`\`\`brief:a\nx\n\`\`\`\n\`\`\`brief:a\ny\n\`\`\`\n")
@@ -14097,10 +14103,10 @@ BASE = {
     "opt-in-granted": "1bfeefb45bab429c13ec7373dda0d299eb399d0d1215ed0a3c9409997d5fb4fb",
     "opt-in-withheld": "ee34badbb06428632e063e8ceeaf0d026110e2f9e3d298fcd61aee30b371c25c",
     "ground-rules": "17071141914deda7c7d88009055228ff0388b3811470af8d8d7afb9c4e9d467d",
-    "close-implement": "268a24bf638f03111c27862aa173f6c7d5d67115000bd36e09a19113a6971472",
+    "close-implement": "739e2db53b5da6b402fad69c3ef0bf224d1a85667593186826943f02e2bbab9f",
     "intro-plan": "eecb08256a316d7d2b5dcbb28485ac3363b415f76d4d60350b1dc237a6c58d13",
     "plan-produce": "14dfdc0febe641e87cd5be73b28690acd594ff688454a612b045600342d4b17c",
-    "close-plan": "798ff6e37c305ecf1eefb969951ad8ff89e6fb6a5f89b9a3dea43eb8eca6fc37",
+    "close-plan": "4db599de1683883f650f88ec2d6061effc113b68515eccf5fad0f0c209b68a70",
     "intro-review": "f6f0cd56d1a5d72e2c7e5a01fb699832a15c3ebb1d8f61b56593827058c52d2d",
     "review-task": "95e868fed7f3f875087f730497aeaf74f7c071ff17af181af36e2ad0c4514cc5",
     "close-review": "0630a58c04cf74ee009b849a22f452e7f19858abcad077f7278dee8d0b9c5ab8",
