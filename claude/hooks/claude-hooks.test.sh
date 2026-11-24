@@ -869,12 +869,12 @@ COMMIT-MSG
 )"')" "$RMG_UNPAIRED"
 rmg_allows_json "allows ANSI-C printf before a safe rm (T7)" "$(rmg_json_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
 rmg_allows_json "allows grep for an rm string (T7)" "$(rmg_json_payload 'grep '"'"'rm -rf'"'"' f')"
-rmg_allows_json "allows numbered-list commit message with backtick rm example (T8)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+rmg_denies_with "denies numbered-list commit message with backtick rm example, as base does (T8)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
 Steps:
 1) deny
 2) `rm -rf /` example
 EOF
-)"')"
+)"')" "$RMG_D2"
 RMG_WIDE=$(python3 -c 'print("".join("cd /tmp/d%d; " % i for i in range(300)) + "echo \"$(true " + "x" * 4000 + ")\"; rm -f ./scratch.txt")')
 rmg_denies_with "denies a wide substitution scan past the text budget (T6)" "$(rmg_json_payload "$RMG_WIDE")" "$RMG_TOO_COMPLEX"
 rmg_denies_with "denies an rm after a PID dollar and plain quote (S10)" "$(rmg_json_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')" "$RMG_D2"

@@ -236,7 +236,7 @@ def skip_heredoc_bodies(
     return i
 
 
-def expanded_spans(body: str, budget: list[int], legacy: bool = False) -> list[str]:
+def expanded_spans(body: str, budget: list[int]) -> list[str]:
     """The backtick and `$(...)` spans of an expanding heredoc body, each
     `$(...)` in double quotes so the substitution walk reads it. A span that
     cannot be paired runs to the end of the body."""
@@ -256,7 +256,7 @@ def expanded_spans(body: str, budget: list[int], legacy: bool = False) -> list[s
             i = end + 1
         elif body.startswith("$(", i) and not body.startswith("$((", i):
             scan = scan or HeredocLines(body, i + 2)
-            end = substitution_end(body, i + 2, budget, scan, legacy)
+            end = substitution_end(body, i + 2, budget, scan)
             if end == -1:
                 out.append('"' + body[i:])
                 break
@@ -344,7 +344,6 @@ def drop_heredocs_and_continuations(
     command: str,
     budget: list[int],
     legacy: bool = False,
-    misread: list[bool] | None = None,
     backtick: bool = False,
     spans: list[str] | None = None,
 ) -> str:
@@ -353,9 +352,8 @@ def drop_heredocs_and_continuations(
     comment-aware like strip_line_comments; `$'...'` counts as a quote, and
     a backtick span does when backtick is true. legacy reads the text as the
     guard once did: a `<<` inside `${` or `$[` is a heredoc and `$'` opens a
-    plain quote. misread gets True when a `<<` inside `${` or `$[` was left as
-    text. spans, when given, collects the substitutions in expanding heredoc
-    bodies; they are not kept in the returned text."""
+    plain quote. spans, when given, collects the substitutions in expanding
+    heredoc bodies; they are not kept in the returned text."""
     out = []
     bare = []  # out without quoted characters (each is `_`) and comments
     pending = []  # (word, dash, expands)
@@ -394,14 +392,12 @@ def drop_heredocs_and_continuations(
             exposed = [] if spans is not None else None
             i = skip_heredoc_bodies(command, i + 1, pending, scan, exposed)
             for body in exposed or ():
-                spans.extend(expanded_spans(body, budget, legacy))
+                spans.extend(expanded_spans(body, budget))
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i):
             line = last_line(bare, budget)
             m = heredoc_at(command, i, line, not legacy)
-            if m is None and misread is not None and heredoc_at(command, i, line, False):
-                misread.append(True)
             if m:
                 pending.append(heredoc_word(m))
                 out.extend(m.group(0))
@@ -694,9 +690,22 @@ TOO_COMPLEX = (
 def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None) -> str | None:
     if cwd is None:
         cwd = real_cwd
-    return check_segments(command, real_cwd, home, cwd, [], []) or check_substitutions(
-        command, real_cwd, home, cwd, 0, [SUBSTITUTION_BUDGET, SUBSTITUTION_TEXT_BUDGET]
-    )
+    reason = check_segments(command, real_cwd, home, cwd, [], [])
+    if reason:
+        return reason
+    # The shell may read the text differently from the first reading: a `<<`
+    # inside `${` or `$[` as a heredoc, `$'` as a plain quote (the legacy
+    # reading, equal to the guard before it read them), a backtick span as a
+    # quote. Each reading is checked, so a hidden rm is denied if any shows it.
+    modes = [(False, False), (True, False)]
+    if "`" in command and "<<" in command:
+        modes.append((False, True))
+    for mode in modes:
+        budget = [SUBSTITUTION_BUDGET, SUBSTITUTION_TEXT_BUDGET]
+        reason = check_substitutions(command, real_cwd, home, cwd, 0, budget, mode)
+        if reason:
+            return reason
+    return None
 
 
 def check_segments(
@@ -734,7 +743,13 @@ def check_segments(
 
 
 def check_substitutions(
-    command: str, real_cwd: str, home: str, cwd: str, depth: int, budget: list[int]
+    command: str,
+    real_cwd: str,
+    home: str,
+    cwd: str,
+    depth: int,
+    budget: list[int],
+    mode: tuple[bool, bool] = (False, False),
 ) -> str | None:
     """Check the rm inside each backtick and double-quoted `$(...)` body, and
     any top-level rm a backtick comment hid from the raw walk. Denies when the
@@ -745,30 +760,20 @@ def check_substitutions(
         budget[1] -= len(command)
     if depth > SUBSTITUTION_DEPTH or budget[0] < 0 or budget[1] < 0:
         return TOO_COMPLEX
-    misread = []
-    reason = check_reading(command, real_cwd, home, cwd, depth, budget, False, misread, False)
-    if reason:
-        return reason
-    # The shell may read the text differently from the first reading: a `<<`
-    # inside `${` or `$[` as a heredoc, `$'` as a plain quote, a backtick span
-    # as a quote. Read it those ways too, so a hidden rm is denied if any
-    # reading shows it.
-    if misread or "$'" in command:
-        reason = check_reading(command, real_cwd, home, cwd, depth, budget, True, None, False)
-    if not reason and "`" in command and "<<" in command:
-        reason = check_reading(command, real_cwd, home, cwd, depth, budget, False, None, True)
-    return reason
+    return check_reading(command, real_cwd, home, cwd, depth, budget, mode)
 
 
 def check_reading(
     command: str, real_cwd: str, home: str, cwd: str, depth: int, budget: list[int],
-    legacy: bool, misread: list[bool] | None, backtick: bool,
+    mode: tuple[bool, bool],
 ) -> str | None:
-    """check_substitutions for one reading of the heredocs in command."""
-    spans = []
+    """check_substitutions for one reading of command. mode is (legacy,
+    backtick): see drop_heredocs_and_continuations."""
+    legacy, backtick = mode
+    spans = None if legacy else []
     try:
         _, collapsed, ticks, quoted, unpaired = collapse_quoted_substitutions(
-            drop_heredocs_and_continuations(command, budget, legacy, misread, backtick, spans),
+            drop_heredocs_and_continuations(command, budget, legacy, backtick, spans),
             budget,
             legacy,
         )
@@ -779,13 +784,13 @@ def check_reading(
     if reason:
         return reason
     for text, text_cwd in scripts:
-        reason = check_substitutions(text, real_cwd, home, text_cwd, depth + 1, budget)
+        reason = check_substitutions(text, real_cwd, home, text_cwd, depth + 1, budget, mode)
         if reason:
             return reason
     dirs = list(dict.fromkeys(cwds))
-    for body in [BACKTICK_ESCAPE.sub(r"\1", tick) for tick in ticks] + quoted + spans:
+    for body in [BACKTICK_ESCAPE.sub(r"\1", tick) for tick in ticks] + quoted + (spans or []):
         for body_cwd in dirs:
-            reason = check_substitutions(body, real_cwd, home, body_cwd, depth + 1, budget)
+            reason = check_substitutions(body, real_cwd, home, body_cwd, depth + 1, budget, mode)
             if reason:
                 return reason
     return UNPAIRED if RM_WORD.search(unpaired) else None
@@ -846,13 +851,13 @@ REDIRECT_OP = re.compile(r"\d*[<>]+")
 
 
 def substitution_end(
-    command: str, i: int, budget: list[int], scan: HeredocLines | None = None, legacy: bool = False
+    command: str, i: int, budget: list[int], scan: HeredocLines | None = None
 ) -> int:
     """Index just past the `)` closing a `$(` whose body starts at i, or -1.
     Reads the body as shell: `#` comments, heredoc bodies, `'...'`, `$'...'`,
     backtick spans and nested double-quoted spans hide their `)`. Iterative.
     scan is a terminator index shared by a walk whose starts only increase;
-    without one the call builds its own. legacy: see drop_heredocs_and_continuations."""
+    without one the call builds its own."""
     n, start = len(command), i
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
     pending = []  # (word, dash, expands)
@@ -884,7 +889,7 @@ def substitution_end(
             if end == -1:
                 return -1
             i = end + 1
-        elif ch == "'" and not legacy and ansi_quote_at(command, i):
+        elif ch == "'" and ansi_quote_at(command, i):
             i = single_quote_end(command, i + 1, True) + 1
         elif ch == "'":
             i = single_quote_end(command, i + 1, False) + 1
@@ -900,7 +905,7 @@ def substitution_end(
         elif ch == "<" and command.startswith("<<", i):
             line_start = max(command.rfind("\n", 0, i) + 1, start)
             charge(budget, i - line_start)
-            m = heredoc_at(command, i, mask_quotes(command[line_start:i]), not legacy)
+            m = heredoc_at(command, i, mask_quotes(command[line_start:i]))
             if m:
                 pending.append(heredoc_word(m))
                 i = m.end()
@@ -919,6 +924,32 @@ def substitution_end(
         else:
             i += 1
     return -1
+
+
+def legacy_substitution_end(command: str, i: int, budget: list[int]) -> int:
+    """substitution_end as the guard once read it: only quotes and
+    parentheses, no comments or heredocs. Charges the text it scans."""
+    start, depth, n = i, 1, len(command)
+    end = -1
+    while i < n:
+        ch = command[i]
+        if ch == "\\":
+            i += 1
+        elif ch in ("'", '"'):
+            j = i + 1
+            while j < n and command[j] != ch:
+                j += 2 if ch == '"' and command[j] == "\\" else 1
+            i = j
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+        i += 1
+    charge(budget, (n if end == -1 else end) - start)
+    return end
 
 
 def backtick_end(command: str, i: int) -> int:
@@ -983,7 +1014,11 @@ def collapse_quoted_substitutions(
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
             scan = scan or HeredocLines(command, i + 2)
-            end = substitution_end(command, i + 2, budget, scan, legacy)
+            end = (
+                legacy_substitution_end(command, i + 2, budget)
+                if legacy
+                else substitution_end(command, i + 2, budget, scan)
+            )
             if end == -1:
                 plain.append(command[i:])
                 collapsed.append(command[i:])

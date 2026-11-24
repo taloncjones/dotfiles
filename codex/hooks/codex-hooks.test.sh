@@ -293,7 +293,7 @@ COMMIT-MSG
 )"')"
 assert_allows "rm guard allows ANSI-C printf before a safe rm (T7)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
-assert_allows "rm guard allows numbered-list commit message with backtick rm example (T8)" \
+assert_denies_2 "rm guard denies numbered-list commit message with backtick rm example, as base does (T8)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
 Steps:
 1) deny
