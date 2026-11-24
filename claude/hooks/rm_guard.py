@@ -181,7 +181,7 @@ HEREDOC_OP = re.compile(
 # cannot run the body (see safe_heredoc_consumer).
 BASE_HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;&|()<>]|$)")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-HEREDOC_SAFE_CONSUMERS = ("cat", "git", "gh", "tee")
+HEREDOC_SAFE_CONSUMERS = ("cat",)
 
 
 class TooComplexError(Exception):
@@ -273,7 +273,6 @@ def expanded_spans(body: str, budget: list[int]) -> str:
     """The backtick and `$(...)` spans of an expanding heredoc body, one per
     line, each `$(...)` in double quotes so the substitution walk reads it. A
     span that cannot be paired runs to the end of the body."""
-    charge(budget, len(body))
     out = []
     scan = None
     i, n = 0, len(body)
@@ -324,16 +323,16 @@ def in_expansion(text: str) -> bool:
 
 
 def safe_heredoc_consumer(command: str, end: int, before: str) -> bool:
-    """True when the command reading a heredoc cannot run its body: cat, git,
-    gh or tee, with no pipe after the operator. before is the line text up to
-    the operator."""
+    """True when the command reading a heredoc cannot run its body: cat, with
+    no pipe, parenthesis or backslash after the operator. before is the line
+    text up to the operator."""
     words = strip_prefixes(re.split(r"[;&|(`]", before)[-1].split())
     rest = command[end : end + 200]
     if "\n" in rest:
         rest = rest[: rest.index("\n")]
     elif len(rest) == 200:
         return False
-    return bool(words) and basename(words[0]) in HEREDOC_SAFE_CONSUMERS and "|" not in rest
+    return bool(words) and basename(words[0]) in HEREDOC_SAFE_CONSUMERS and not any(c in rest for c in "|(\\")
 
 
 def heredoc_at(command: str, i: int, before: str) -> re.Match | None:

@@ -382,6 +382,32 @@ assert_denies_within_3s "rm guard denies an rm after thousands of unterminated h
 RMG_BODY_SUBS=$(python3 -c 'print("cat <<X\n" + "$(cat <<E\n)\n" * 4000 + "X\necho \"$(rm -rf /)\"")')
 assert_denies_within_3s "rm guard denies an rm after thousands of unterminated substitutions in an expanding heredoc body within 3 s (E2)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_BODY_SUBS")"
+assert_denies_2 "rm guard denies an rm after a subshell heredoc closed on its own line with an apostrophe body (R1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '(cat <<EOF)
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')"
+assert_denies_2 "rm guard denies an rm after a heredoc beside a bracket in a parameter expansion (R2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo ${x/[/} <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')"
+RMG_PENDING_PARENS=$(python3 -c 'q = chr(39); print("echo \"$(rm -rf /)\"\n" + ("x<<y " + q + "\n" + q + " ") * 8000 + ")" * 30000)')
+assert_denies_within_3s "rm guard denies a hidden rm among thousands of pending heredocs and closing parentheses within 3 s (R3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_PENDING_PARENS")"
+assert_denies_2 "rm guard denies an rm after a hyphenated heredoc terminator split by a backslash-newline (R4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<END-MSG
+END-\
+MSG
+rm -rf /etc
+END-MSG
+)"')"
+assert_denies_2 "rm guard denies a substitution rm in a quoted hyphenated heredoc fed to bash (R5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'bash <<'"'"'COMMIT-MSG'"'"'
+echo "$(rm -rf /etc)"
+COMMIT-MSG')"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

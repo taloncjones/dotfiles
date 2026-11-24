@@ -944,6 +944,48 @@ RMG_UNTERM_SUBS=$(python3 -c 'print("echo \"$(cat <<E\n)\"\n" * 4000 + "echo \"$
 rmg_denies_within_3s "denies an rm after thousands of unterminated heredoc substitutions within 3 s (E1)" "$(rmg_json_payload "$RMG_UNTERM_SUBS")"
 RMG_BODY_SUBS=$(python3 -c 'print("cat <<X\n" + "$(cat <<E\n)\n" * 4000 + "X\necho \"$(rm -rf /)\"")')
 rmg_denies_within_3s "denies an rm after thousands of unterminated substitutions in an expanding heredoc body within 3 s (E2)" "$(rmg_json_payload "$RMG_BODY_SUBS")"
+rmg_denies_with "denies an rm after a subshell heredoc closed on its own line with an apostrophe body (R1)" "$(rmg_json_payload '(cat <<EOF)
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')" "$RMG_D2"
+rmg_denies_with "denies an rm after a heredoc beside a bracket in a parameter expansion (R2)" "$(rmg_json_payload 'echo ${x/[/} <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')" "$RMG_D2"
+rmg_denies_with "denies an rm after a heredoc beside a brace in a parameter expansion (R2)" "$(rmg_json_payload 'echo ${x:-{} <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')" "$RMG_D2"
+RMG_PENDING_PARENS=$(python3 -c 'q = chr(39); print("echo \"$(rm -rf /)\"\n" + ("x<<y " + q + "\n" + q + " ") * 8000 + ")" * 30000)')
+rmg_denies_within_3s "denies a hidden rm among thousands of pending heredocs and closing parentheses within 3 s (R3)" "$(rmg_json_payload "$RMG_PENDING_PARENS")"
+rmg_denies_with "denies an rm after a hyphenated heredoc terminator split by a backslash-newline (R4)" "$(rmg_json_payload 'echo "$(cat <<END-MSG
+END-\
+MSG
+rm -rf /etc
+END-MSG
+)"')" "$RMG_D5"
+rmg_denies_with "denies an rm after a numeric heredoc terminator split by a backslash-newline (R4)" "$(rmg_json_payload 'echo "$(cat <<123
+12\
+3
+rm -rf /etc
+123
+)"')" "$RMG_D5"
+rmg_denies_with "denies a substitution rm in a quoted hyphenated heredoc fed to bash (R5)" "$(rmg_json_payload 'bash <<'"'"'COMMIT-MSG'"'"'
+echo "$(rm -rf /etc)"
+COMMIT-MSG')" "$RMG_D5"
+rmg_denies_with "denies an rm in an unquoted hyphenated heredoc fed to bash (R5)" "$(rmg_json_payload 'bash <<END-MSG
+rm -rf /etc
+END-MSG')" "$RMG_D5"
+rmg_denies_with "denies a substitution rm in a quoted hyphenated heredoc piped to bash (R5)" "$(rmg_json_payload 'cat <<'"'"'COMMIT-MSG'"'"' | bash
+echo "$(rm -rf /etc)"
+COMMIT-MSG')" "$RMG_D5"
+rmg_allows_json "allows a large unquoted heredoc body that mentions format (R6)" "$(rmg_json_payload "echo format
+cat <<EOF
+$(python3 -c 'print("hello world line\n" * 18000, end="")')
+EOF")"
 rmg_warns() {
     label="$1"
     payload="$2"
