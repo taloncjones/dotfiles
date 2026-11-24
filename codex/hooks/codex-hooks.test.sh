@@ -434,6 +434,18 @@ assert_denies_2 "rm guard denies an eval of a quoted punctuated heredoc delimite
 rm -rf /
 E.F
 )")"')"
+assert_denies_2 "rm guard denies a wrapped rm before a heredoc operator inside a parameter expansion and a stray quote (B4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '(rm -rf /)
+${<<'"'"'E'"'"'
+"')"
+assert_denies_2 "rm guard denies an rm before a heredoc body holding an unpaired substitution (B5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'F
+rm -rf /
+<<EOF
+"$(
+EOF')"
+assert_denies_2 "rm guard denies a substitution rm after an ANSI-C quote inside an arithmetic bracket (B6)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '$[$'"'"'\'"'"'"$(rm -rf /)'"'"']')"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

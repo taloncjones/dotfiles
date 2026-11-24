@@ -1006,6 +1006,15 @@ rmg_denies_with "denies an eval of a quoted punctuated heredoc delimiter (B3)" "
 rm -rf /
 E.F
 )")"')" "$RMG_D2"
+rmg_denies_with "denies a wrapped rm before a heredoc operator inside a parameter expansion and a stray quote (B4)" "$(rmg_json_payload '(rm -rf /)
+${<<'"'"'E'"'"'
+"')" "$RMG_D2"
+rmg_denies_with "denies an rm before a heredoc body holding an unpaired substitution (B5)" "$(rmg_json_payload 'F
+rm -rf /
+<<EOF
+"$(
+EOF')" "$RMG_D2"
+rmg_denies_with "denies a substitution rm after an ANSI-C quote inside an arithmetic bracket (B6)" "$(rmg_json_payload '$[$'"'"'\'"'"'"$(rm -rf /)'"'"']')" "$RMG_D2"
 rmg_warns() {
     label="$1"
     payload="$2"

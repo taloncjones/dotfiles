@@ -236,10 +236,10 @@ def skip_heredoc_bodies(
     return i
 
 
-def expanded_spans(body: str, budget: list[int]) -> str:
-    """The backtick and `$(...)` spans of an expanding heredoc body, one per
-    line, each `$(...)` in double quotes so the substitution walk reads it. A
-    span that cannot be paired runs to the end of the body."""
+def expanded_spans(body: str, budget: list[int], legacy: bool = False) -> list[str]:
+    """The backtick and `$(...)` spans of an expanding heredoc body, each
+    `$(...)` in double quotes so the substitution walk reads it. A span that
+    cannot be paired runs to the end of the body."""
     out = []
     scan = None
     i, n = 0, len(body)
@@ -250,21 +250,21 @@ def expanded_spans(body: str, budget: list[int]) -> str:
         elif ch == "`":
             end = backtick_end(body, i + 1)
             if end == -1:
-                out.append(body[i:] + "\n")
+                out.append(body[i:])
                 break
-            out.append(body[i : end + 1] + "\n")
+            out.append(body[i : end + 1])
             i = end + 1
         elif body.startswith("$(", i) and not body.startswith("$((", i):
             scan = scan or HeredocLines(body, i + 2)
-            end = substitution_end(body, i + 2, budget, scan)
+            end = substitution_end(body, i + 2, budget, scan, legacy)
             if end == -1:
-                out.append('"' + body[i:] + "\n")
+                out.append('"' + body[i:])
                 break
-            out.append('"' + body[i:end] + '"\n')
+            out.append('"' + body[i:end] + '"')
             i = end
         else:
             i += 1
-    return "".join(out)
+    return out
 
 
 def in_arith_or_cond(text: str) -> bool:
@@ -291,13 +291,14 @@ def in_expansion(text: str) -> bool:
     return bool(stack)
 
 
-def heredoc_at(command: str, i: int, before: str) -> re.Match | None:
+def heredoc_at(command: str, i: int, before: str, expansion: bool = True) -> re.Match | None:
     """The HEREDOC_OP match at i, or None when the `<<` is a here-string, part
     of `<<<`, or sits inside `((`, `[[`, `${` or `$[` on its line. before is
-    the text up to i with quoted characters blanked."""
+    the text up to i with quoted characters blanked. expansion false reads a
+    `<<` inside `${` or `$[` as a heredoc, as the guard once did."""
     if command.startswith("<<<", i) or command[i - 1 : i] == "<":
         return None
-    if in_arith_or_cond(before) or in_expansion(before):
+    if in_arith_or_cond(before) or (expansion and in_expansion(before)):
         return None
     return HEREDOC_OP.match(command, i)
 
@@ -339,11 +340,22 @@ def last_line(chars: list[str], budget: list[int]) -> str:
     return "".join(chars[k:])
 
 
-def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
+def drop_heredocs_and_continuations(
+    command: str,
+    budget: list[int],
+    legacy: bool = False,
+    misread: list[bool] | None = None,
+    backtick: bool = False,
+    spans: list[str] | None = None,
+) -> str:
     """Drop heredoc bodies and unquoted backslash-newline pairs, so a body is
     not read as commands and a continued line stays one command. Quote- and
-    comment-aware like strip_line_comments; a backtick span and `$'...'` count
-    as quotes."""
+    comment-aware like strip_line_comments; `$'...'` counts as a quote, and
+    a backtick span does when backtick is true. legacy reads the text as the
+    guard once did: a `<<` inside `${` or `$[` is a heredoc and `$'` opens a
+    plain quote. misread gets True when a `<<` inside `${` or `$[` was left as
+    text. spans, when given, collects the substitutions in expanding heredoc
+    bodies; they are not kept in the returned text."""
     out = []
     bare = []  # out without quoted characters (each is `_`) and comments
     pending = []  # (word, dash, expands)
@@ -361,8 +373,8 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
                 bare.append(command[i] if command[i] == "\n" else "_")
             elif ch == quote[-1]:
                 quote = None
-        elif ch in ("'", '"', "`"):
-            quote = "$'" if ch == "'" and ansi_quote_at(command, i) else ch
+        elif ch in ("'", '"') or (backtick and ch == "`"):
+            quote = "$'" if ch == "'" and not legacy and ansi_quote_at(command, i) else ch
             out.append(ch)
             bare.append("_")
         elif ch == "\\" and i + 1 < n:
@@ -379,14 +391,17 @@ def drop_heredocs_and_continuations(command: str, budget: list[int]) -> str:
         elif ch == "\n" and pending:
             out.append(ch)
             bare.append(ch)
-            exposed = []
+            exposed = [] if spans is not None else None
             i = skip_heredoc_bodies(command, i + 1, pending, scan, exposed)
-            for body in exposed:
-                out.extend(expanded_spans(body, budget))  # one char per element
+            for body in exposed or ():
+                spans.extend(expanded_spans(body, budget, legacy))
             pending = []
             continue
         elif ch == "<" and command.startswith("<<", i):
-            m = heredoc_at(command, i, last_line(bare, budget))
+            line = last_line(bare, budget)
+            m = heredoc_at(command, i, line, not legacy)
+            if m is None and misread is not None and heredoc_at(command, i, line, False):
+                misread.append(True)
             if m:
                 pending.append(heredoc_word(m))
                 out.extend(m.group(0))
@@ -730,9 +745,32 @@ def check_substitutions(
         budget[1] -= len(command)
     if depth > SUBSTITUTION_DEPTH or budget[0] < 0 or budget[1] < 0:
         return TOO_COMPLEX
+    misread = []
+    reason = check_reading(command, real_cwd, home, cwd, depth, budget, False, misread, False)
+    if reason:
+        return reason
+    # The shell may read the text differently from the first reading: a `<<`
+    # inside `${` or `$[` as a heredoc, `$'` as a plain quote, a backtick span
+    # as a quote. Read it those ways too, so a hidden rm is denied if any
+    # reading shows it.
+    if misread or "$'" in command:
+        reason = check_reading(command, real_cwd, home, cwd, depth, budget, True, None, False)
+    if not reason and "`" in command and "<<" in command:
+        reason = check_reading(command, real_cwd, home, cwd, depth, budget, False, None, True)
+    return reason
+
+
+def check_reading(
+    command: str, real_cwd: str, home: str, cwd: str, depth: int, budget: list[int],
+    legacy: bool, misread: list[bool] | None, backtick: bool,
+) -> str | None:
+    """check_substitutions for one reading of the heredocs in command."""
+    spans = []
     try:
         _, collapsed, ticks, quoted, unpaired = collapse_quoted_substitutions(
-            drop_heredocs_and_continuations(command, budget), budget
+            drop_heredocs_and_continuations(command, budget, legacy, misread, backtick, spans),
+            budget,
+            legacy,
         )
     except TooComplexError:
         return TOO_COMPLEX
@@ -745,7 +783,7 @@ def check_substitutions(
         if reason:
             return reason
     dirs = list(dict.fromkeys(cwds))
-    for body in [BACKTICK_ESCAPE.sub(r"\1", tick) for tick in ticks] + quoted:
+    for body in [BACKTICK_ESCAPE.sub(r"\1", tick) for tick in ticks] + quoted + spans:
         for body_cwd in dirs:
             reason = check_substitutions(body, real_cwd, home, body_cwd, depth + 1, budget)
             if reason:
@@ -808,13 +846,13 @@ REDIRECT_OP = re.compile(r"\d*[<>]+")
 
 
 def substitution_end(
-    command: str, i: int, budget: list[int], scan: HeredocLines | None = None
+    command: str, i: int, budget: list[int], scan: HeredocLines | None = None, legacy: bool = False
 ) -> int:
     """Index just past the `)` closing a `$(` whose body starts at i, or -1.
     Reads the body as shell: `#` comments, heredoc bodies, `'...'`, `$'...'`,
     backtick spans and nested double-quoted spans hide their `)`. Iterative.
     scan is a terminator index shared by a walk whose starts only increase;
-    without one the call builds its own."""
+    without one the call builds its own. legacy: see drop_heredocs_and_continuations."""
     n, start = len(command), i
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
     pending = []  # (word, dash, expands)
@@ -846,7 +884,7 @@ def substitution_end(
             if end == -1:
                 return -1
             i = end + 1
-        elif ch == "'" and ansi_quote_at(command, i):
+        elif ch == "'" and not legacy and ansi_quote_at(command, i):
             i = single_quote_end(command, i + 1, True) + 1
         elif ch == "'":
             i = single_quote_end(command, i + 1, False) + 1
@@ -862,7 +900,7 @@ def substitution_end(
         elif ch == "<" and command.startswith("<<", i):
             line_start = max(command.rfind("\n", 0, i) + 1, start)
             charge(budget, i - line_start)
-            m = heredoc_at(command, i, mask_quotes(command[line_start:i]))
+            m = heredoc_at(command, i, mask_quotes(command[line_start:i]), not legacy)
             if m:
                 pending.append(heredoc_word(m))
                 i = m.end()
@@ -898,7 +936,7 @@ def backtick_end(command: str, i: int) -> int:
 
 
 def collapse_quoted_substitutions(
-    command: str, budget: list[int] | None = None
+    command: str, budget: list[int] | None = None, legacy: bool = False
 ) -> tuple[str, str, list[str], list[str], str]:
     """Drop `#` comments and collapse backtick spans in one quote-aware walk.
     Returns (plain, collapsed, bodies, quoted, unpaired). plain has each
@@ -945,7 +983,7 @@ def collapse_quoted_substitutions(
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
             scan = scan or HeredocLines(command, i + 2)
-            end = substitution_end(command, i + 2, budget, scan)
+            end = substitution_end(command, i + 2, budget, scan, legacy)
             if end == -1:
                 plain.append(command[i:])
                 collapsed.append(command[i:])
@@ -957,7 +995,7 @@ def collapse_quoted_substitutions(
             last = ")"
             i = end
             continue
-        elif ch == "'" and quote is None and ansi_quote_at(command, i):
+        elif ch == "'" and quote is None and not legacy and ansi_quote_at(command, i):
             end = single_quote_end(command, i + 1, True)
             if end >= n:
                 plain.append(command[i:])
