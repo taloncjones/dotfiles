@@ -199,9 +199,9 @@ class HeredocLines:
     """Terminator lookup for one command text. Scans each line once, however
     many heredocs ask, so distinct unterminated delimiters stay linear."""
 
-    def __init__(self, command: str):
+    def __init__(self, command: str, pos: int = 0):
         self.command = command
-        self.pos = 0
+        self.pos = pos  # lines before pos are never indexed
         self.exact = {}  # line -> [(start, after)]
         self.tabbed = {}  # line without leading tabs -> [(start, after)]
 
@@ -832,7 +832,7 @@ def substitution_end(command: str, i: int, budget: list[int]) -> int:
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
     nest = 1
     pending = []  # (word, dash, expands, nest)
-    scan = HeredocLines(command)
+    scan = HeredocLines(command, start)
     while i < n:
         ch = command[i]
         if stack[-1] == '"':

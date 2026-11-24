@@ -912,6 +912,8 @@ RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + 
 rmg_denies_within_3s "denies a hidden rm among thousands of << operators within 3 s (B1)" "$(rmg_json_payload "$RMG_MANY_HEREDOCS")"
 RMG_MISSING_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /)\"\n" + "".join("cat <<E%d\n" % i for i in range(12000)))')
 rmg_denies_within_3s "denies a hidden rm before thousands of distinct unterminated heredocs within 3 s (C2)" "$(rmg_json_payload "$RMG_MISSING_HEREDOCS")"
+RMG_SUB_HEREDOCS=$(python3 -c 'print("echo \"$(cat <<E\nx\nE\n)\"\n" * 5000 + "echo \"$(rm -rf /)\"")')
+rmg_denies_within_3s "denies an rm after thousands of heredoc substitutions within 3 s (D1)" "$(rmg_json_payload "$RMG_SUB_HEREDOCS")"
 rmg_warns() {
     label="$1"
     payload="$2"
