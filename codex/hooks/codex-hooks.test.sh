@@ -286,7 +286,7 @@ assert_allows "rm guard allows backtick rm example in heredoc commit message (T7
 use `rm -rf /` carefully
 EOF
 )"')"
-assert_allows "rm guard allows quoted hyphenated heredoc delimiter (T7)" \
+assert_denies_2 "rm guard denies a quoted hyphenated heredoc delimiter, read as base does (T7)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'COMMIT-MSG'"'"'
 don'"'"'t rm -rf /
 COMMIT-MSG
@@ -302,7 +302,7 @@ EOF
 )"')"
 assert_denies_2 "rm guard denies an rm after a PID dollar and plain quote (S10)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')"
-assert_allows "rm guard allows apostrophe in an unquoted non-identifier heredoc delimiter (A1)" \
+assert_denies_2 "rm guard denies an unquoted non-identifier heredoc delimiter, read as base does (A1)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<COMMIT-MSG
 don'"'"'t remove rm entries
 COMMIT-MSG
@@ -408,6 +408,32 @@ assert_denies_2 "rm guard denies a substitution rm in a quoted hyphenated heredo
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'bash <<'"'"'COMMIT-MSG'"'"'
 echo "$(rm -rf /etc)"
 COMMIT-MSG')"
+assert_denies_2 "rm guard denies a wrapped rm before an unterminated heredoc and a stray quote (B1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '(rm -rf /) <<EOF
+'"'"'')"
+assert_denies_2 "rm guard denies a wrapped rm before an unterminated heredoc and a stray double quote (B1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'bash -c '"'"'rm -rf /'"'"' <<EOF
+"')"
+assert_denies_2 "rm guard denies an rm after a PID dollar and a brace before a heredoc (B2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $${ <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies an rm after a PID dollar and a bracket before a heredoc (B2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$[ <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies a quoted punctuated heredoc delimiter whose output a later sh runs (B3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<'"'"'E.F'"'"' > f; sh f
+rm -rf /
+E.F
+)"')"
+assert_denies_2 "rm guard denies an eval of a quoted punctuated heredoc delimiter (B3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(eval "$(cat <<'"'"'E.F'"'"'
+rm -rf /
+E.F
+)")"')"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

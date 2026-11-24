@@ -166,22 +166,8 @@ def strip_line_comments(command: str) -> str:
     return "".join(out)
 
 
-# The delimiter is `'any but quote'`, `"any but quote"`, or an optionally
-# escaped run of characters that are not whitespace, `;&|()<>`, a quote, a
-# backslash, `$`, a backtick or a bracket: a word with an expansion is left
-# unmatched so its lines stay visible. The lookahead keeps `<<EOF"x"` from
-# reading as `<<EOF`.
-HEREDOC_OP = re.compile(
-    r"""<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|()<>'"\\$`{}\[\]]+))(?=[ \t\n;&|()<>]|$)"""
-)
-
-
-# The delimiter forms the guard recognized before quoted and punctuated words
-# were added. Any other word is read as a heredoc only for a consumer that
-# cannot run the body (see safe_heredoc_consumer).
-BASE_HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;&|()<>]|$)")
-IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-HEREDOC_SAFE_CONSUMERS = ("cat",)
+# The lookahead keeps `<<EOF-X` from reading as `<<EOF`.
+HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;&|()<>]|$)")
 
 
 class TooComplexError(Exception):
@@ -198,12 +184,7 @@ def charge(budget: list[int], n: int) -> None:
 def heredoc_word(m: re.Match) -> tuple[str, bool, bool]:
     """The (delimiter word, dash, expands) of a HEREDOC_OP match. expands is
     true for an unquoted word: the shell expands its body."""
-    word = next(g for g in m.group(2, 3, 4) if g is not None)
-    if m.group(3) is not None:
-        # Inside double quotes the shell drops a backslash before $ ` " \ newline.
-        word = re.sub(r'\\([$`"\\\n])', r"\1", word)
-    expands = m.group(4) is not None and "\\" not in m.group(0)
-    return word, m.group(1) == "-", expands
+    return m.group(3), m.group(1) == "-", m.group(2) == ""
 
 
 class HeredocLines:
@@ -213,16 +194,8 @@ class HeredocLines:
     def __init__(self, command: str, pos: int = 0):
         self.command = command
         self.pos = pos  # lines before pos are never indexed
-        self.joins = None  # positions of a backslash-newline pair, built on first use
         self.exact = {}  # line -> [(start, after)]
         self.tabbed = {}  # line without leading tabs -> [(start, after)]
-
-    def has_join(self, i: int, j: int) -> bool:
-        """True when a backslash-newline pair starts in command[i:j]."""
-        if self.joins is None:
-            self.joins = [m.start() for m in re.finditer(r"\\\n", self.command)]
-        k = bisect.bisect_left(self.joins, i)
-        return k < len(self.joins) and self.joins[k] < j
 
     def find(self, word: str, dash: bool, i: int) -> tuple[int, int] | None:
         """(start, after) of the first line at or past i that is the word, or
@@ -251,18 +224,12 @@ def skip_heredoc_bodies(
     command: str, i: int, pending: list[tuple], scan: HeredocLines, exposed: list[str] | None = None
 ) -> int:
     """Index just past the terminator line of each pending (word, dash,
-    expands, ...) heredoc. A heredoc with no terminator line is not one: its
-    lines stay, so the index where its body would start is returned. The body
-    of an expanding heredoc is appended to exposed when given."""
-    for word, dash, expands, *_ in pending:
+    expands) heredoc. A heredoc with no terminator line runs to the end of the
+    text. The body of an expanding heredoc is appended to exposed when given."""
+    for word, dash, expands in pending:
         found = scan.find(word, dash, i)
         if found is None:
-            return i
-        # The shell joins a backslash-newline in an unquoted body before it
-        # matches the terminator; a word the guard reads only as written
-        # would end the heredoc at the wrong line.
-        if expands and not IDENTIFIER.fullmatch(word) and scan.has_join(i, found[0]):
-            return i
+            return len(command)
         if expands and exposed is not None:
             exposed.append(command[i : found[0]])
         i = found[1]
@@ -313,7 +280,9 @@ def in_expansion(text: str) -> bool:
     i, n = 0, len(line)
     while i < n:
         ch = line[i]
-        if ch == "$" and line[i + 1 : i + 2] in ("{", "["):
+        if line.startswith("$$", i):
+            i += 1
+        elif ch == "$" and line[i + 1 : i + 2] in ("{", "["):
             stack.append("}" if line[i + 1] == "{" else "]")
             i += 1
         elif stack and ch == stack[-1]:
@@ -322,33 +291,15 @@ def in_expansion(text: str) -> bool:
     return bool(stack)
 
 
-def safe_heredoc_consumer(command: str, end: int, before: str) -> bool:
-    """True when the command reading a heredoc cannot run its body: cat, with
-    no pipe, parenthesis or backslash after the operator. before is the line
-    text up to the operator."""
-    words = strip_prefixes(re.split(r"[;&|(`]", before)[-1].split())
-    rest = command[end : end + 200]
-    if "\n" in rest:
-        rest = rest[: rest.index("\n")]
-    elif len(rest) == 200:
-        return False
-    return bool(words) and basename(words[0]) in HEREDOC_SAFE_CONSUMERS and not any(c in rest for c in "|(\\")
-
-
 def heredoc_at(command: str, i: int, before: str) -> re.Match | None:
     """The HEREDOC_OP match at i, or None when the `<<` is a here-string, part
     of `<<<`, or sits inside `((`, `[[`, `${` or `$[` on its line. before is
-    the text up to i with quoted characters blanked. A delimiter the guard did
-    not recognize before is accepted only for a consumer that cannot run the
-    body."""
+    the text up to i with quoted characters blanked."""
     if command.startswith("<<<", i) or command[i - 1 : i] == "<":
         return None
     if in_arith_or_cond(before) or in_expansion(before):
         return None
-    m = HEREDOC_OP.match(command, i)
-    if m and not BASE_HEREDOC_OP.match(command, i) and not safe_heredoc_consumer(command, m.end(), before):
-        return None
-    return m
+    return HEREDOC_OP.match(command, i)
 
 
 def single_quote_end(command: str, i: int, ansi: bool) -> int:
