@@ -914,6 +914,10 @@ RMG_MISSING_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /)\"\n" + "".join("cat
 rmg_denies_within_3s "denies a hidden rm before thousands of distinct unterminated heredocs within 3 s (C2)" "$(rmg_json_payload "$RMG_MISSING_HEREDOCS")"
 RMG_SUB_HEREDOCS=$(python3 -c 'print("echo \"$(cat <<E\nx\nE\n)\"\n" * 5000 + "echo \"$(rm -rf /)\"")')
 rmg_denies_within_3s "denies an rm after thousands of heredoc substitutions within 3 s (D1)" "$(rmg_json_payload "$RMG_SUB_HEREDOCS")"
+RMG_UNTERM_SUBS=$(python3 -c 'print("echo \"$(cat <<E\n)\"\n" * 4000 + "echo \"$(rm -rf /)\"")')
+rmg_denies_within_3s "denies an rm after thousands of unterminated heredoc substitutions within 3 s (E1)" "$(rmg_json_payload "$RMG_UNTERM_SUBS")"
+RMG_BODY_SUBS=$(python3 -c 'print("cat <<X\n" + "$(cat <<E\n)\n" * 4000 + "X\necho \"$(rm -rf /)\"")')
+rmg_denies_within_3s "denies an rm after thousands of unterminated substitutions in an expanding heredoc body within 3 s (E2)" "$(rmg_json_payload "$RMG_BODY_SUBS")"
 rmg_warns() {
     label="$1"
     payload="$2"

@@ -346,6 +346,12 @@ assert_denies_within_3s "rm guard denies a hidden rm before thousands of distinc
 RMG_SUB_HEREDOCS=$(python3 -c 'print("echo \"$(cat <<E\nx\nE\n)\"\n" * 5000 + "echo \"$(rm -rf /)\"")')
 assert_denies_within_3s "rm guard denies an rm after thousands of heredoc substitutions within 3 s (D1)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_SUB_HEREDOCS")"
+RMG_UNTERM_SUBS=$(python3 -c 'print("echo \"$(cat <<E\n)\"\n" * 4000 + "echo \"$(rm -rf /)\"")')
+assert_denies_within_3s "rm guard denies an rm after thousands of unterminated heredoc substitutions within 3 s (E1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_UNTERM_SUBS")"
+RMG_BODY_SUBS=$(python3 -c 'print("cat <<X\n" + "$(cat <<E\n)\n" * 4000 + "X\necho \"$(rm -rf /)\"")')
+assert_denies_within_3s "rm guard denies an rm after thousands of unterminated substitutions in an expanding heredoc body within 3 s (E2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_BODY_SUBS")"
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

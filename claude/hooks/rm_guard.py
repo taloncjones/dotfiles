@@ -251,6 +251,7 @@ def expanded_spans(body: str, budget: list[int]) -> str:
     span that cannot be paired runs to the end of the body."""
     charge(budget, len(body))
     out = []
+    scan = None
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
@@ -264,7 +265,8 @@ def expanded_spans(body: str, budget: list[int]) -> str:
             out.append(body[i : end + 1] + "\n")
             i = end + 1
         elif body.startswith("$(", i) and not body.startswith("$((", i):
-            end = substitution_end(body, i + 2, budget)
+            scan = scan or HeredocLines(body, i + 2)
+            end = substitution_end(body, i + 2, budget, scan)
             if end == -1:
                 out.append('"' + body[i:] + "\n")
                 break
@@ -824,15 +826,19 @@ DECLARATIONS = ("export", "local", "typeset", "declare", "readonly")
 REDIRECT_OP = re.compile(r"\d*[<>]+")
 
 
-def substitution_end(command: str, i: int, budget: list[int]) -> int:
+def substitution_end(
+    command: str, i: int, budget: list[int], scan: HeredocLines | None = None
+) -> int:
     """Index just past the `)` closing a `$(` whose body starts at i, or -1.
     Reads the body as shell: `#` comments, heredoc bodies, `'...'`, `$'...'`,
-    backtick spans and nested double-quoted spans hide their `)`. Iterative."""
+    backtick spans and nested double-quoted spans hide their `)`. Iterative.
+    scan is a terminator index shared by a walk whose starts only increase;
+    without one the call builds its own."""
     n, start = len(command), i
     stack = [1]  # an int counts open parentheses; `"` is a double-quoted span
     nest = 1
     pending = []  # (word, dash, expands, nest)
-    scan = HeredocLines(command, start)
+    scan = scan or HeredocLines(command, start)
     while i < n:
         ch = command[i]
         if stack[-1] == '"':
@@ -934,6 +940,7 @@ def collapse_quoted_substitutions(
     unpaired = ""
     last = ""
     quote = None
+    scan = None
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -963,7 +970,8 @@ def collapse_quoted_substitutions(
             i = end + 1
             continue
         elif quote == '"' and command.startswith("$(", i) and not command.startswith("$((", i):
-            end = substitution_end(command, i + 2, budget)
+            scan = scan or HeredocLines(command, i + 2)
+            end = substitution_end(command, i + 2, budget, scan)
             if end == -1:
                 plain.append(command[i:])
                 collapsed.append(command[i:])
