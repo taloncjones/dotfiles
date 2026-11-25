@@ -270,6 +270,19 @@ def load_pinned_contract(task, wt, task_id, rel=None):
     return load_contract(wt, pin_path, expected_sha, task_id)
 
 
+BASE_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{7,40}(?![0-9A-Fa-f])")
+BASE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
+
+
+def base_literal_command(commands, base_sha):
+    """Name of the first command naming base_sha in full or by a 7+ hex prefix, else None."""
+    for cmd in commands:
+        for token in BASE_TOKEN_RE.findall(cmd["run"]):
+            if base_sha.startswith(token.lower()):
+                return cmd["name"]
+    return None
+
+
 def run_contract_commands(commands, worktree, pass_fds=(), output=None) -> int:
     """Run each contract command via /bin/sh -c with the system grep in the
     worktree, streaming output. Own process group per command; on timeout, or
@@ -9130,9 +9143,18 @@ def _main(argv=None) -> int:
             not ns.allow_unpinned or ns.contract,
             "--allow-unpinned requires --contract",
         )
+        task = None
         if ns.allow_unpinned:
             code, rec, actual_sha, message = load_contract(
                 wt, ns.contract, None, ns.task_id)
+            if ns.validate_only:
+                # Best effort: direct and mech kickoffs pin before a record exists.
+                tf = repo_dir(ns.repo_slug) / "tasks" / f"{ns.task_id}.json"
+                try:
+                    if contained(tf, state_root()):
+                        task = json.loads(read_payload_text(tf))
+                except (OSError, ValueError):
+                    task = None
         else:
             tf = repo_dir(ns.repo_slug) / "tasks" / f"{ns.task_id}.json"
             _require(contained(tf, state_root()), "escapes state root")
@@ -9153,6 +9175,18 @@ def _main(argv=None) -> int:
             sys.stderr.write(f"[X] {message}\n")
             return code
         if ns.validate_only:
+            base = task.get("base_sha") if isinstance(task, dict) else None
+            if isinstance(base, str) and SHA40_RE.match(base):
+                name = base_literal_command(rec["commands"], base)
+                if name is not None:
+                    ref = task.get("base_ref")
+                    if not (isinstance(ref, str) and BASE_REF_RE.match(ref)):
+                        ref = "<base_ref>"
+                    _require(False, (
+                        f"contract command {name!r} names the task base commit "
+                        f"{base[:12]}; compute it at run time with "
+                        f"base=$(git merge-base {ref} HEAD) "
+                        "(references/contract-pinning.md, Scope and path checks)"))
             print(actual_sha)
             return 0
         return run_contract_commands(rec["commands"], str(wt))
