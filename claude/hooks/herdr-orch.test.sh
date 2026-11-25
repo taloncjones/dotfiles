@@ -2422,6 +2422,93 @@ $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
 exit 0
 SH
 
+check "verify-contract lint: refuses a command naming the task base, unpinned and pinned" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+WT=$(mktemp -d)
+BASE=3c9a51f0aa11bb22cc33dd44ee55ff6600778899
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_ref":"origin/main","base_sha":"'"$BASE"'"}'
+set +e
+for TOKEN in "$BASE" 3c9a51f0aa11 3c9a51f 3C9A51F0AA11; do
+  printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"ok","run":"true"},{"name":"scope","run":"git diff %s..HEAD -- a"}]}' \
+    "$TOKEN" > "$WT/c.json"
+  OUT=$($CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+    --contract c.json --allow-unpinned --validate-only 2>"$ERRFILE")
+  [ $? -eq 2 ] || exit 1
+  [ -z "$OUT" ] || exit 1
+  [ "$(wc -l < "$ERRFILE")" -eq 1 ] || exit 1
+  grep -q "^\[X\] contract command 'scope' names the task base" "$ERRFILE" || exit 1
+  grep -q 'git merge-base origin/main HEAD' "$ERRFILE" || exit 1
+  grep -q 'contract-pinning.md' "$ERRFILE" || exit 1
+done
+SHA=$(python3 -c "import hashlib;print(hashlib.sha256(open('$WT/c.json','rb').read()).hexdigest())")
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_ref":"origin/main","base_sha":"'"$BASE"'","contract_path":"c.json","contract_sha256":"'"$SHA"'"}'
+OUT=$($CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --validate-only 2>"$ERRFILE")
+[ $? -eq 2 ] || exit 1
+[ -z "$OUT" ] || exit 1
+grep -q "contract command 'scope' names the task base" "$ERRFILE" || exit 1
+exit 0
+SH
+
+check "verify-contract lint: passes the run-time merge-base form and unrelated hex" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+WT=$(mktemp -d)
+BASE=3c9a51f0aa11bb22cc33dd44ee55ff6600778899
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_ref":"origin/main","base_sha":"'"$BASE"'"}'
+# merge-base form, an unrelated 40-hex pin, a 6-char prefix, a 64-hex run
+# starting with the base, and a token that holds a prefix but does not start with it.
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"a","run":"base=$(git merge-base origin/main HEAD); git diff $base..HEAD -- a"},{"name":"b","run":"tool 0123456789abcdef0123456789abcdef01234567"},{"name":"c","run":"echo 3c9a51"},{"name":"d","run":"echo %s0123456789abcdef01234567"},{"name":"e","run":"echo ff3c9a51f0aa"}]}' \
+  "$BASE" > "$WT/c.json"
+EXPECT=$(python3 -c "import hashlib;print(hashlib.sha256(open('$WT/c.json','rb').read()).hexdigest())")
+OUT=$($CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned --validate-only 2>"$ERRFILE")
+[ "$OUT" = "$EXPECT" ] || exit 1
+[ ! -s "$ERRFILE" ] || exit 1
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_ref":"origin/main","base_sha":"'"$BASE"'","contract_path":"c.json","contract_sha256":"'"$EXPECT"'"}'
+OUT=$($CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --validate-only 2>"$ERRFILE")
+[ "$OUT" = "$EXPECT" ] || exit 1
+[ ! -s "$ERRFILE" ] || exit 1
+exit 0
+SH
+
+check "verify-contract lint: passes when no task base is known, and on the full run" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+WT=$(mktemp -d)
+BASE=3c9a51f0aa11bb22cc33dd44ee55ff6600778899
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"scope","run":"printf x > marker; echo %s"}]}' \
+  "$BASE" > "$WT/c.json"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+# No task record: skipped.
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned --validate-only | grep -qE '^[0-9a-f]{64}$'
+# Base is not a 40-lowercase-hex string: skipped.
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_sha":"3c9a51f0aa11"}'
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned --validate-only | grep -qE '^[0-9a-f]{64}$'
+# Full run never lints: the base-naming command executes.
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_ref":"origin/main","base_sha":"'"$BASE"'"}'
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned >/dev/null
+[ "$(cat "$WT/marker")" = "x" ]
+# Corrupt record under --allow-unpinned: skipped.
+printf 'not-json' > "$ROOT/herdr-orch/slug-x/tasks/PROJ-1.json"
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned --validate-only | grep -qE '^[0-9a-f]{64}$'
+exit 0
+SH
+
 check "mech role: haiku-first defaults, haiku only legal in mech, 4-alias capabilities" <<PY
 $LOAD
 assert c.CAP_MODELS==("fable","opus","sonnet","haiku")
