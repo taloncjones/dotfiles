@@ -512,18 +512,22 @@ def expand_braces(tok: str) -> list[str]:
     return results
 
 
-def brace_expansion_size(tok: str) -> int:
-    """How many words expand_braces would return for tok, without building them."""
-    size = 1
-    while True:
-        m = BRACE_GROUP.match(tok)
-        if not m:
-            return size
+def brace_expansion_size(tok: str, cap: int) -> int:
+    """The word count expand_braces returns for tok, or cap + 1 once it passes
+    cap. Walks the same splits without building the words, iteratively."""
+    count = 0
+    stack = [tok]
+    while stack:
+        cur = stack.pop()
+        m = BRACE_GROUP.match(cur)
+        if not m or "," not in m.group(2):
+            count += 1
+            if count > cap:
+                return count
+            continue
         prefix, body, suffix = m.groups()
-        if "," not in body:
-            return size
-        size *= body.count(",") + 1
-        tok = prefix + "x" + suffix
+        stack.extend(prefix + part + suffix for part in body.split(","))
+    return count
 
 
 def canonicalize(path: str) -> str:
@@ -656,7 +660,7 @@ def check_rm(
             targets.append(tok)
 
     for raw in targets:
-        if brace_cap is not None and brace_expansion_size(raw) > brace_cap:
+        if brace_cap is not None and brace_expansion_size(raw, brace_cap) > brace_cap:
             raise TooComplexError
         for candidate in expand_braces(raw):
             expanded = expand_home(candidate, home)
