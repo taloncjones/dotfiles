@@ -204,6 +204,11 @@ assert_allows "rm guard ignores malformed shell input" \
 
 # An rm inside a command substitution is denied.
 rmg_sub_payload() {
+    # Linux caps one argv entry at 131072 bytes, so a large command goes in on stdin.
+    if [ "${#1}" -gt 65536 ]; then
+        printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": sys.stdin.read(), "workdir": "/tmp/project"}}))'
+        return
+    fi
     python3 -c 'import json,sys; print(json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": sys.argv[1], "workdir": "/tmp/project"}}))' "$1"
 }
 assert_denies_2 "rm guard denies an rm in a backtick body (S1)" \
@@ -237,6 +242,266 @@ EOF
 )"')"
 assert_allows "rm guard allows a quoted rm -rf / string (S8)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "rm -rf /"')"
+assert_denies_2 "rm guard denies apostrophe heredoc then backtick rm (T1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"; echo `rm -rf /`')"
+assert_denies_2 "rm guard denies comment paren in quoted body (T2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(true # )
+rm -rf /)"')"
+assert_denies_2 "rm guard denies comment apostrophe in quoted body (T2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(true # don'"'"'t
+rm -rf /)"')"
+assert_denies_2 "rm guard denies comment quote in quoted body (T2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(true # a "
+rm -rf /)"')"
+assert_denies_2 "rm guard denies arithmetic-bracket shift operator (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $[ 1 <<N ]
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies expansion shift operator (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo ${x:- <<EOF }
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies unterminated heredoc in backtick span (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x=`cat <<EOF `
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies heredoc closed by its own parenthesis (T3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'x=$(cat <<EOF)
+echo "$(rm -rf /)"
+EOF')"
+assert_denies_2 "rm guard denies ANSI-C quote then quoted substitution rm (T4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $'"'"'\'"'"''"'"' "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies ANSI-C quote then top-level rm (T4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $'"'"'\'"'"''"'"';rm -rf /')"
+assert_denies_2 "rm guard denies unpaired substitution before an rm (T5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(echo hi
+rm -f ./x')"
+assert_allows "rm guard allows apostrophe heredoc commit message (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"')"
+assert_allows "rm guard allows backtick rm example in heredoc commit message (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+use `rm -rf /` carefully
+EOF
+)"')"
+assert_denies_2 "rm guard denies a quoted hyphenated heredoc delimiter, read as base does (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'COMMIT-MSG'"'"'
+don'"'"'t rm -rf /
+COMMIT-MSG
+)"')"
+assert_allows "rm guard allows ANSI-C printf before a safe rm (T7)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
+assert_denies_2 "rm guard denies numbered-list commit message with backtick rm example, as base does (T8)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+Steps:
+1) deny
+2) `rm -rf /` example
+EOF
+)"')"
+assert_denies_2 "rm guard denies an rm after a PID dollar and plain quote (S10)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')"
+assert_denies_2 "rm guard denies an unquoted non-identifier heredoc delimiter, read as base does (A1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'git commit -m "$(cat <<COMMIT-MSG
+don'"'"'t remove rm entries
+COMMIT-MSG
+)"')"
+assert_denies_2 "rm guard denies an rm after a heredoc delimiter holding an expansion (A1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<$(true)
+x
+$(true)
+rm -rf /
+$
+)"')"
+assert_denies_2 "rm guard denies a backtick rm in an unquoted heredoc body the shell expands (C1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<COMMIT-MSG
+use `rm -rf /` here
+COMMIT-MSG
+)"')"
+assert_denies_2 "rm guard denies a substitution rm in an unquoted numeric heredoc body (C1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<123
+$(rm -rf /)
+123
+)"')"
+assert_denies_2 "rm guard denies an rm after a comment following an expanding heredoc with a substitution (F1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'cat <<EOF
+$(true)
+EOF
+# don'"'"'t
+echo '"'"'<<\EOF '"'"' \'"'"'
+echo "$(rm -rf /)"
+EOF')"
+assert_allows "rm guard allows a commit heredoc with a substitution, a comment and an apostrophe (F1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'cat <<EOF
+$(date)
+EOF
+# don'"'"'t
+echo ok')"
+assert_denies_2 "rm guard denies an rm after a double-quoted heredoc delimiter with an escaped dollar (F2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'cat <<"a\$b"
+body
+a$b
+echo "$(rm -rf /)"
+a\$b')"
+assert_allows "rm guard allows a double-quoted heredoc delimiter with an apostrophe in the body (F2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'cat <<"EOF"
+don'"'"'t
+EOF
+echo ok')"
+assert_denies_within_3s() {
+    label="$1"
+    hook="$2"
+    payload="$3"
+    hook_status=0
+    printf '%s\n' "$payload" | python3 -c 'import subprocess,sys
+try:
+    sys.exit(subprocess.run([sys.argv[1]], input=sys.stdin.read(), text=True, capture_output=True, timeout=3).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "$hook" || hook_status=$?
+    if [ "$hook_status" -eq 2 ]; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s returned %s instead of 2 within 3 s\n' "$label" "$hook_status" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + ")\"")')
+assert_denies_within_3s "rm guard denies a hidden rm among thousands of << operators within 3 s (B1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_MANY_HEREDOCS")"
+RMG_MISSING_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /)\"\n" + "".join("cat <<E%d\n" % i for i in range(12000)))')
+assert_denies_within_3s "rm guard denies a hidden rm before thousands of distinct unterminated heredocs within 3 s (C2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_MISSING_HEREDOCS")"
+RMG_SUB_HEREDOCS=$(python3 -c 'print("echo \"$(cat <<E\nx\nE\n)\"\n" * 5000 + "echo \"$(rm -rf /)\"")')
+assert_denies_within_3s "rm guard denies an rm after thousands of heredoc substitutions within 3 s (D1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_SUB_HEREDOCS")"
+RMG_UNTERM_SUBS=$(python3 -c 'print("echo \"$(cat <<E\n)\"\n" * 4000 + "echo \"$(rm -rf /)\"")')
+assert_denies_within_3s "rm guard denies an rm after thousands of unterminated heredoc substitutions within 3 s (E1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_UNTERM_SUBS")"
+RMG_BODY_SUBS=$(python3 -c 'print("cat <<X\n" + "$(cat <<E\n)\n" * 4000 + "X\necho \"$(rm -rf /)\"")')
+assert_denies_within_3s "rm guard denies an rm after thousands of unterminated substitutions in an expanding heredoc body within 3 s (E2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_BODY_SUBS")"
+assert_denies_2 "rm guard denies an rm after a subshell heredoc closed on its own line with an apostrophe body (R1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '(cat <<EOF)
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')"
+assert_denies_2 "rm guard denies an rm after a heredoc beside a bracket in a parameter expansion (R2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo ${x/[/} <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')"
+RMG_PENDING_PARENS=$(python3 -c 'q = chr(39); print("echo \"$(rm -rf /)\"\n" + ("x<<y " + q + "\n" + q + " ") * 8000 + ")" * 30000)')
+assert_denies_within_3s "rm guard denies a hidden rm among thousands of pending heredocs and closing parentheses within 3 s (R3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload "$RMG_PENDING_PARENS")"
+assert_denies_2 "rm guard denies an rm after a hyphenated heredoc terminator split by a backslash-newline (R4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<END-MSG
+END-\
+MSG
+rm -rf /etc
+END-MSG
+)"')"
+assert_denies_2 "rm guard denies a substitution rm in a quoted hyphenated heredoc fed to bash (R5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'bash <<'"'"'COMMIT-MSG'"'"'
+echo "$(rm -rf /etc)"
+COMMIT-MSG')"
+assert_denies_2 "rm guard denies a wrapped rm before an unterminated heredoc and a stray quote (B1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '(rm -rf /) <<EOF
+'"'"'')"
+assert_denies_2 "rm guard denies a wrapped rm before an unterminated heredoc and a stray double quote (B1)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'bash -c '"'"'rm -rf /'"'"' <<EOF
+"')"
+assert_denies_2 "rm guard denies an rm after a PID dollar and a brace before a heredoc (B2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $${ <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies an rm after a PID dollar and a bracket before a heredoc (B2)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo $$[ <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"')"
+assert_denies_2 "rm guard denies a quoted punctuated heredoc delimiter whose output a later sh runs (B3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(cat <<'"'"'E.F'"'"' > f; sh f
+rm -rf /
+E.F
+)"')"
+assert_denies_2 "rm guard denies an eval of a quoted punctuated heredoc delimiter (B3)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'echo "$(eval "$(cat <<'"'"'E.F'"'"'
+rm -rf /
+E.F
+)")"')"
+assert_denies_2 "rm guard denies a wrapped rm before a heredoc operator inside a parameter expansion and a stray quote (B4)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '(rm -rf /)
+${<<'"'"'E'"'"'
+"')"
+assert_denies_2 "rm guard denies an rm before a heredoc body holding an unpaired substitution (B5)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload 'F
+rm -rf /
+<<EOF
+"$(
+EOF')"
+assert_denies_2 "rm guard denies a substitution rm after an ANSI-C quote inside an arithmetic bracket (B6)" \
+    claude/hooks/rm_guard.py "$(rmg_sub_payload '$[$'"'"'\'"'"'"$(rm -rf /)'"'"']')"
+
+# A brace bomb the new reading exposes must not hide the root rm the legacy reading denies (R1, R2).
+RMG_NL='
+'
+RMG_BOMB1000=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 1000, end="")')
+RMG_BOMB25=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 25, end="")')
+assert_denies_2 "rm guard denies a root rm beside a brace bomb after an ANSI-C quote (R1)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB1000}\`")"
+assert_denies_2 "rm guard denies a root rm beside a brace bomb in a heredoc inside a quoted substitution (R1)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "x=\"\$(cat <<EOF${RMG_NL}\$(${RMG_BOMB1000})${RMG_NL}EOF${RMG_NL})\"; echo \"\$(rm -rf /)\"")"
+rmg_start=$(date +%s)
+assert_denies_2 "rm guard denies a root rm beside a 25-group brace bomb (R2)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB25}\`")"
+rmg_elapsed=$(($(date +%s) - rmg_start))
+if [ "$rmg_elapsed" -le 3 ]; then
+    printf 'PASS  rm guard denies a 25-group brace bomb within 3 s (R2)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rm guard took %s s on a 25-group brace bomb (R2)\n' "$rmg_elapsed" >&2
+    FAIL=$((FAIL + 1))
+fi
+assert_denies_2 "rm guard denies a brace bomb alone in the new reading (R3)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "echo \$'\\'' \`${RMG_BOMB1000}\`")"
+if python3 - claude/hooks/rm_guard.py <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rmg", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.check_reading
+def flaky(command, real_cwd, home, cwd, depth, budget, mode):
+    if mode == (True, False):
+        return real(command, real_cwd, home, cwd, depth, budget, mode)
+    raise RuntimeError("injected")
+mod.check_reading = flaky
+assert mod.check_command("echo hi", "/tmp", "/Users/x") == mod.TOO_COMPLEX
+def legacy_boom(*a):
+    raise RuntimeError("injected")
+mod.check_reading = legacy_boom
+try:
+    mod.check_command("echo hi", "/tmp", "/Users/x")
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("legacy reading exception was swallowed")
+PY
+then
+    printf 'PASS  rm guard denies on an exception in a new reading, propagates one in the legacy reading (R3)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rm guard injected reading exception handling (R3)\n' >&2
+    FAIL=$((FAIL + 1))
+fi
 
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.

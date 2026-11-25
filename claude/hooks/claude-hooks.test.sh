@@ -772,11 +772,17 @@ rmg_denies_with "deny text D1 via Codex payload shape" \
 
 # Warn-only zsh pitfall checks: one additionalContext JSON on stdout, exit 0.
 rmg_json_payload() {
+    # Linux caps one argv entry at 131072 bytes, so a large command goes in on stdin.
+    if [ "${#1}" -gt 65536 ]; then
+        printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.stdin.read()}, "cwd": sys.argv[1]}))' "$RMG_CWD"
+        return
+    fi
     python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}, "cwd": sys.argv[2]}))' "$1" "$RMG_CWD"
 }
 # An rm inside a command substitution is denied like the same rm at top level.
 RMG_D2='Blocked: rm target is the filesystem root or a glob directly under it. Fix: name the specific file or subdirectory to remove, or skip the rm.'
 RMG_D5='Blocked: rm target is a system path (/etc). Fix: remove only scratch paths under /tmp or $TMPDIR, or ask the user to run this removal.'
+RMG_UNPAIRED='Blocked: this guard cannot find where a command substitution ends, and an rm follows it. Fix: close each $( and backtick, or run the rm as a separate command.'
 RMG_TOO_COMPLEX='Blocked: command nests more command substitutions than this guard can check. Fix: split it into separate, simpler commands.'
 rmg_allows_json() {
     label="$1"
@@ -815,6 +821,200 @@ for i in range(40):
     c = "echo \"$(true %d; %s)\"" % (i, c)
 print(c + "; rm -f ./scratch.txt")')
 rmg_denies_with "denies a 40-level substitution nest with the limit text (S9)" "$(rmg_json_payload "$RMG_NEST")" "$RMG_TOO_COMPLEX"
+rmg_denies_with "denies apostrophe heredoc then quoted substitution rm (T1)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"; echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies apostrophe heredoc then backtick rm (T1)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"; echo `rm -rf /`')" "$RMG_D2"
+rmg_denies_with "denies comment paren in quoted body (T2)" "$(rmg_json_payload 'echo "$(true # )
+rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies comment apostrophe in quoted body (T2)" "$(rmg_json_payload 'echo "$(true # don'"'"'t
+rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies comment quote in quoted body (T2)" "$(rmg_json_payload 'echo "$(true # a "
+rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies arithmetic-bracket shift operator (T3)" "$(rmg_json_payload 'echo $[ 1 <<N ]
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies expansion shift operator (T3)" "$(rmg_json_payload 'echo ${x:- <<EOF }
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies unterminated heredoc in backtick span (T3)" "$(rmg_json_payload 'x=`cat <<EOF `
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies heredoc closed by its own parenthesis (T3)" "$(rmg_json_payload 'x=$(cat <<EOF)
+echo "$(rm -rf /)"
+EOF')" "$RMG_D2"
+rmg_denies_with "denies ANSI-C quote then quoted substitution rm (T4)" "$(rmg_json_payload 'echo $'"'"'\'"'"''"'"' "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies ANSI-C quote then top-level rm (T4)" "$(rmg_json_payload 'echo $'"'"'\'"'"''"'"';rm -rf /')" "$RMG_D2"
+rmg_denies_with "denies unpaired substitution before an rm (T5)" "$(rmg_json_payload 'echo "$(echo hi
+rm -f ./x')" "$RMG_UNPAIRED"
+rmg_allows_json "allows unpaired substitution with no rm word (T5)" "$(rmg_json_payload 'echo "$(echo hi
+confirm the format')"
+rmg_allows_json "allows apostrophe heredoc commit message (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+don'"'"'t do this
+EOF
+)"')"
+rmg_allows_json "allows backtick rm example in heredoc commit message (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+use `rm -rf /` carefully
+EOF
+)"')"
+rmg_allows_json "allows hash line and quoted rm in heredoc commit message (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+# title
+fix (a) and "rm -rf /"
+EOF
+)"')"
+rmg_denies_with "denies a quoted hyphenated heredoc delimiter, read as base does (T7)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'COMMIT-MSG'"'"'
+don'"'"'t rm -rf /
+COMMIT-MSG
+)"')" "$RMG_UNPAIRED"
+rmg_allows_json "allows ANSI-C printf before a safe rm (T7)" "$(rmg_json_payload 'printf $'"'"'a\tb\n'"'"'; rm -f ./out.txt')"
+rmg_allows_json "allows grep for an rm string (T7)" "$(rmg_json_payload 'grep '"'"'rm -rf'"'"' f')"
+rmg_denies_with "denies numbered-list commit message with backtick rm example, as base does (T8)" "$(rmg_json_payload 'git commit -m "$(cat <<'"'"'EOF'"'"'
+Steps:
+1) deny
+2) `rm -rf /` example
+EOF
+)"')" "$RMG_D2"
+RMG_WIDE=$(python3 -c 'print("".join("cd /tmp/d%d; " % i for i in range(300)) + "echo \"$(true " + "x" * 4000 + ")\"; rm -f ./scratch.txt")')
+rmg_denies_with "denies a wide substitution scan past the text budget (T6)" "$(rmg_json_payload "$RMG_WIDE")" "$RMG_TOO_COMPLEX"
+rmg_denies_with "denies an rm after a PID dollar and plain quote (S10)" "$(rmg_json_payload 'echo $$'"'"'a\'"'"'; rm -rf /; echo '"'"'x'"'"'')" "$RMG_D2"
+rmg_denies_with "denies an unquoted non-identifier heredoc delimiter, read as base does (A1)" "$(rmg_json_payload 'git commit -m "$(cat <<COMMIT-MSG
+don'"'"'t remove rm entries
+COMMIT-MSG
+)"')" "$RMG_UNPAIRED"
+rmg_denies_with "denies an rm after a heredoc delimiter holding an expansion (A1)" "$(rmg_json_payload 'echo "$(cat <<$(true)
+x
+$(true)
+rm -rf /
+$
+)"')" "$RMG_D2"
+rmg_denies_with "denies a backtick rm in an unquoted heredoc body the shell expands (C1)" "$(rmg_json_payload 'echo "$(cat <<COMMIT-MSG
+use `rm -rf /` here
+COMMIT-MSG
+)"')" "$RMG_D2"
+rmg_denies_with "denies a substitution rm in an unquoted numeric heredoc body (C1)" "$(rmg_json_payload 'echo "$(cat <<123
+$(rm -rf /)
+123
+)"')" "$RMG_D2"
+rmg_denies_with "denies an rm after a comment following an expanding heredoc with a substitution (F1)" "$(rmg_json_payload 'cat <<EOF
+$(true)
+EOF
+# don'"'"'t
+echo '"'"'<<\EOF '"'"' \'"'"'
+echo "$(rm -rf /)"
+EOF')" "$RMG_D2"
+rmg_allows_json "allows a commit heredoc with a substitution, a comment and an apostrophe (F1)" "$(rmg_json_payload 'cat <<EOF
+$(date)
+EOF
+# don'"'"'t
+echo ok')"
+rmg_denies_with "denies an rm after a double-quoted heredoc delimiter with an escaped dollar (F2)" "$(rmg_json_payload 'cat <<"a\$b"
+body
+a$b
+echo "$(rm -rf /)"
+a\$b')" "$RMG_D2"
+rmg_allows_json "allows a double-quoted heredoc delimiter with an apostrophe in the body (F2)" "$(rmg_json_payload 'cat <<"EOF"
+don'"'"'t
+EOF
+echo ok')"
+rmg_denies_within_3s() {
+    label="$1"
+    payload="$2"
+    rc=0
+    printf '%s' "$payload" | HOME="$RMG_HOME" python3 -c 'import subprocess,sys
+try:
+    sys.exit(subprocess.run([sys.argv[1]], input=sys.stdin.read(), text=True, capture_output=True, timeout=3).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "$RMG" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s (rc=%s)\n' "$label" "$rc" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+RMG_MANY_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /; " + "x<<y; " * 4000 + ")\"")')
+rmg_denies_within_3s "denies a hidden rm among thousands of << operators within 3 s (B1)" "$(rmg_json_payload "$RMG_MANY_HEREDOCS")"
+RMG_MISSING_HEREDOCS=$(python3 -c 'print("echo \"$(rm -rf /)\"\n" + "".join("cat <<E%d\n" % i for i in range(12000)))')
+rmg_denies_within_3s "denies a hidden rm before thousands of distinct unterminated heredocs within 3 s (C2)" "$(rmg_json_payload "$RMG_MISSING_HEREDOCS")"
+RMG_SUB_HEREDOCS=$(python3 -c 'print("echo \"$(cat <<E\nx\nE\n)\"\n" * 5000 + "echo \"$(rm -rf /)\"")')
+rmg_denies_within_3s "denies an rm after thousands of heredoc substitutions within 3 s (D1)" "$(rmg_json_payload "$RMG_SUB_HEREDOCS")"
+RMG_UNTERM_SUBS=$(python3 -c 'print("echo \"$(cat <<E\n)\"\n" * 4000 + "echo \"$(rm -rf /)\"")')
+rmg_denies_within_3s "denies an rm after thousands of unterminated heredoc substitutions within 3 s (E1)" "$(rmg_json_payload "$RMG_UNTERM_SUBS")"
+RMG_BODY_SUBS=$(python3 -c 'print("cat <<X\n" + "$(cat <<E\n)\n" * 4000 + "X\necho \"$(rm -rf /)\"")')
+rmg_denies_within_3s "denies an rm after thousands of unterminated substitutions in an expanding heredoc body within 3 s (E2)" "$(rmg_json_payload "$RMG_BODY_SUBS")"
+rmg_denies_with "denies an rm after a subshell heredoc closed on its own line with an apostrophe body (R1)" "$(rmg_json_payload '(cat <<EOF)
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')" "$RMG_D2"
+rmg_denies_with "denies an rm after a heredoc beside a bracket in a parameter expansion (R2)" "$(rmg_json_payload 'echo ${x/[/} <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')" "$RMG_D2"
+rmg_denies_with "denies an rm after a heredoc beside a brace in a parameter expansion (R2)" "$(rmg_json_payload 'echo ${x:-{} <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"
+echo '"'"'x'"'"'')" "$RMG_D2"
+RMG_PENDING_PARENS=$(python3 -c 'q = chr(39); print("echo \"$(rm -rf /)\"\n" + ("x<<y " + q + "\n" + q + " ") * 8000 + ")" * 30000)')
+rmg_denies_within_3s "denies a hidden rm among thousands of pending heredocs and closing parentheses within 3 s (R3)" "$(rmg_json_payload "$RMG_PENDING_PARENS")"
+rmg_denies_with "denies an rm after a hyphenated heredoc terminator split by a backslash-newline (R4)" "$(rmg_json_payload 'echo "$(cat <<END-MSG
+END-\
+MSG
+rm -rf /etc
+END-MSG
+)"')" "$RMG_D5"
+rmg_denies_with "denies an rm after a numeric heredoc terminator split by a backslash-newline (R4)" "$(rmg_json_payload 'echo "$(cat <<123
+12\
+3
+rm -rf /etc
+123
+)"')" "$RMG_D5"
+rmg_denies_with "denies a substitution rm in a quoted hyphenated heredoc fed to bash (R5)" "$(rmg_json_payload 'bash <<'"'"'COMMIT-MSG'"'"'
+echo "$(rm -rf /etc)"
+COMMIT-MSG')" "$RMG_D5"
+rmg_denies_with "denies an rm in an unquoted hyphenated heredoc fed to bash (R5)" "$(rmg_json_payload 'bash <<END-MSG
+rm -rf /etc
+END-MSG')" "$RMG_D5"
+rmg_denies_with "denies a substitution rm in a quoted hyphenated heredoc piped to bash (R5)" "$(rmg_json_payload 'cat <<'"'"'COMMIT-MSG'"'"' | bash
+echo "$(rm -rf /etc)"
+COMMIT-MSG')" "$RMG_D5"
+rmg_allows_json "allows a large unquoted heredoc body that mentions format (R6)" "$(rmg_json_payload "echo format
+cat <<EOF
+$(python3 -c 'print("hello world line\n" * 18000, end="")')
+EOF")"
+rmg_denies_with "denies a wrapped rm before an unterminated heredoc and a stray quote (B1)" "$(rmg_json_payload '(rm -rf /) <<EOF
+'"'"'')" "$RMG_D2"
+rmg_denies_with "denies a wrapped rm before an unterminated heredoc and a stray double quote (B1)" "$(rmg_json_payload 'bash -c '"'"'rm -rf /'"'"' <<EOF
+"')" "$RMG_D2"
+rmg_denies_with "denies an rm after a PID dollar and a brace before a heredoc (B2)" "$(rmg_json_payload 'echo $${ <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies an rm after a PID dollar and a bracket before a heredoc (B2)" "$(rmg_json_payload 'echo $$[ <<EOF
+don'"'"'t
+EOF
+echo "$(rm -rf /)"')" "$RMG_D2"
+rmg_denies_with "denies a quoted punctuated heredoc delimiter whose output a later sh runs (B3)" "$(rmg_json_payload 'echo "$(cat <<'"'"'E.F'"'"' > f; sh f
+rm -rf /
+E.F
+)"')" "$RMG_D2"
+rmg_denies_with "denies an eval of a quoted punctuated heredoc delimiter (B3)" "$(rmg_json_payload 'echo "$(eval "$(cat <<'"'"'E.F'"'"'
+rm -rf /
+E.F
+)")"')" "$RMG_D2"
+rmg_denies_with "denies a wrapped rm before a heredoc operator inside a parameter expansion and a stray quote (B4)" "$(rmg_json_payload '(rm -rf /)
+${<<'"'"'E'"'"'
+"')" "$RMG_D2"
+rmg_denies_with "denies an rm before a heredoc body holding an unpaired substitution (B5)" "$(rmg_json_payload 'F
+rm -rf /
+<<EOF
+"$(
+EOF')" "$RMG_D2"
+rmg_denies_with "denies a substitution rm after an ANSI-C quote inside an arithmetic bracket (B6)" "$(rmg_json_payload '$[$'"'"'\'"'"'"$(rm -rf /)'"'"']')" "$RMG_D2"
 rmg_warns() {
     label="$1"
     payload="$2"
@@ -1043,6 +1243,56 @@ shh_silent "silent wait after a closed child subshell" "$(shh_payload 'make & (c
 shh_silent "silent wait after a closing paren" "$(shh_payload '(make)& wait')"
 
 rmg_denies_with "deny wins over warnings, stdout empty" "$(rmg_json_payload 'E="env -u A"; $E true; rm -rf $X')" "$RMG_D1"
+
+# A brace bomb the new reading exposes must not hide the root rm the legacy reading denies (R1, R2).
+RMG_BOMB1000=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 1000, end="")')
+RMG_BOMB25=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 25, end="")')
+rmg_denies_with "denies a root rm beside a brace bomb after an ANSI-C quote (R1)" \
+    "$(rmg_json_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB1000}\`")" "$RMG_D2"
+rmg_denies_with "denies a root rm beside a brace bomb in a heredoc inside a quoted substitution (R1)" \
+    "$(rmg_json_payload "x=\"\$(cat <<EOF${NL}\$(${RMG_BOMB1000})${NL}EOF${NL})\"; echo \"\$(rm -rf /)\"")" "$RMG_D2"
+rmg_start=$(date +%s)
+rmg_denies_with "denies a root rm beside a 25-group brace bomb (R2)" \
+    "$(rmg_json_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB25}\`")" "$RMG_D2"
+rmg_elapsed=$(($(date +%s) - rmg_start))
+if [ "$rmg_elapsed" -le 3 ]; then
+    printf 'PASS  rmg: 25-group brace bomb is denied within 3 s (R2)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rmg: 25-group brace bomb took %s s (R2)\n' "$rmg_elapsed" >&2
+    FAIL=$((FAIL + 1))
+fi
+rmg_denies_with "denies a brace bomb alone in the new reading as too complex (R3)" \
+    "$(rmg_json_payload "echo \$'\\'' \`${RMG_BOMB1000}\`")" "$RMG_TOO_COMPLEX"
+if python3 - "$RMG" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rmg", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.check_reading
+def flaky(command, real_cwd, home, cwd, depth, budget, mode):
+    if mode == (True, False):
+        return real(command, real_cwd, home, cwd, depth, budget, mode)
+    raise RuntimeError("injected")
+mod.check_reading = flaky
+assert mod.check_command("echo hi", "/tmp", "/Users/x") == mod.TOO_COMPLEX
+def legacy_boom(*a):
+    raise RuntimeError("injected")
+mod.check_reading = legacy_boom
+try:
+    mod.check_command("echo hi", "/tmp", "/Users/x")
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("legacy reading exception was swallowed")
+PY
+then
+    printf 'PASS  rmg: an exception in a new reading denies, in the legacy reading propagates (R3)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rmg: injected reading exception handling (R3)\n' >&2
+    FAIL=$((FAIL + 1))
+fi
 
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
