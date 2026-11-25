@@ -447,6 +447,62 @@ EOF')"
 assert_denies_2 "rm guard denies a substitution rm after an ANSI-C quote inside an arithmetic bracket (B6)" \
     claude/hooks/rm_guard.py "$(rmg_sub_payload '$[$'"'"'\'"'"'"$(rm -rf /)'"'"']')"
 
+# A brace bomb the new reading exposes must not hide the root rm the legacy reading denies (R1, R2).
+RMG_NL='
+'
+RMG_BOMB1000=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 1000, end="")')
+RMG_BOMB25=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 25, end="")')
+assert_denies_2 "rm guard denies a root rm beside a brace bomb after an ANSI-C quote (R1)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB1000}\`")"
+assert_denies_2 "rm guard denies a root rm beside a brace bomb in a heredoc inside a quoted substitution (R1)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "x=\"\$(cat <<EOF${RMG_NL}\$(${RMG_BOMB1000})${RMG_NL}EOF${RMG_NL})\"; echo \"\$(rm -rf /)\"")"
+rmg_start=$(date +%s)
+assert_denies_2 "rm guard denies a root rm beside a 25-group brace bomb (R2)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB25}\`")"
+rmg_elapsed=$(($(date +%s) - rmg_start))
+if [ "$rmg_elapsed" -le 3 ]; then
+    printf 'PASS  rm guard denies a 25-group brace bomb within 3 s (R2)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rm guard took %s s on a 25-group brace bomb (R2)\n' "$rmg_elapsed" >&2
+    FAIL=$((FAIL + 1))
+fi
+assert_denies_2 "rm guard denies a brace bomb alone in the new reading (R3)" \
+    claude/hooks/rm_guard.py \
+    "$(rmg_sub_payload "echo \$'\\'' \`${RMG_BOMB1000}\`")"
+if python3 - claude/hooks/rm_guard.py <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rmg", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.check_reading
+def flaky(command, real_cwd, home, cwd, depth, budget, mode):
+    if mode == (True, False):
+        return real(command, real_cwd, home, cwd, depth, budget, mode)
+    raise RuntimeError("injected")
+mod.check_reading = flaky
+assert mod.check_command("echo hi", "/tmp", "/Users/x") == mod.TOO_COMPLEX
+def legacy_boom(*a):
+    raise RuntimeError("injected")
+mod.check_reading = legacy_boom
+try:
+    mod.check_command("echo hi", "/tmp", "/Users/x")
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("legacy reading exception was swallowed")
+PY
+then
+    printf 'PASS  rm guard denies on an exception in a new reading, propagates one in the legacy reading (R3)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rm guard injected reading exception handling (R3)\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # zsh unsplit-scalar warnings come from the same rm_guard.py hook, so they
 # reach Codex through its payload shapes. Warn-only: always exit 0.
 assert_rm_guard_warns() {

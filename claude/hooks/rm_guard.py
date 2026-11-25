@@ -512,6 +512,20 @@ def expand_braces(tok: str) -> list[str]:
     return results
 
 
+def brace_expansion_size(tok: str) -> int:
+    """How many words expand_braces would return for tok, without building them."""
+    size = 1
+    while True:
+        m = BRACE_GROUP.match(tok)
+        if not m:
+            return size
+        prefix, body, suffix = m.groups()
+        if "," not in body:
+            return size
+        size *= body.count(",") + 1
+        tok = prefix + "x" + suffix
+
+
 def canonicalize(path: str) -> str:
     """Lexically resolve macOS's `/tmp` and `/var` symlinks to their real
     `/private/...` location, without touching the filesystem, so a target
@@ -623,7 +637,9 @@ def rm_flag_is_recursive_or_force(tok: str) -> bool:
     return False
 
 
-def check_rm(tokens: list[str], cwd: str, home: str, real_cwd: str) -> str | None:
+def check_rm(
+    tokens: list[str], cwd: str, home: str, real_cwd: str, brace_cap: int | None = None
+) -> str | None:
     """Return a denial reason for the `rm`/`rmdir` invocation `tokens`, or
     None."""
     recursive_or_force = any(rm_flag_is_recursive_or_force(t) for t in tokens[1:])
@@ -640,6 +656,8 @@ def check_rm(tokens: list[str], cwd: str, home: str, real_cwd: str) -> str | Non
             targets.append(tok)
 
     for raw in targets:
+        if brace_cap is not None and brace_expansion_size(raw) > brace_cap:
+            raise TooComplexError
         for candidate in expand_braces(raw):
             expanded = expand_home(candidate, home)
             has_unexpanded_var = "$" in expanded or "`" in expanded
@@ -675,6 +693,7 @@ BACKTICK_ESCAPE = re.compile(r"\\([\\$`])")
 SUBSTITUTION_DEPTH = 32
 SUBSTITUTION_BUDGET = 4096
 SUBSTITUTION_TEXT_BUDGET = 1 << 18
+BRACE_CAP = 4096
 RM_WORD = re.compile(r"(?<![A-Za-z0-9_.\-])(?:rm|rmdir)(?![A-Za-z0-9_.\-])")
 UNPAIRED = (
     "Blocked: this guard cannot find where a command substitution ends, and an "
@@ -697,12 +716,22 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
     # inside `${` or `$[` as a heredoc, `$'` as a plain quote (the legacy
     # reading, equal to the guard before it read them), a backtick span as a
     # quote. Each reading is checked, so a hidden rm is denied if any shows it.
-    modes = [(False, False), (True, False)]
+    # The legacy reading runs first and unwrapped, so its verdict and any
+    # exception are the guard's from before the other readings. The others fail
+    # closed and cap brace expansion, so a runaway `{a,b}` product denies.
+    budget = [SUBSTITUTION_BUDGET, SUBSTITUTION_TEXT_BUDGET]
+    reason = check_substitutions(command, real_cwd, home, cwd, 0, budget, (True, False))
+    if reason:
+        return reason
+    modes = [(False, False)]
     if "`" in command and "<<" in command:
         modes.append((False, True))
     for mode in modes:
         budget = [SUBSTITUTION_BUDGET, SUBSTITUTION_TEXT_BUDGET]
-        reason = check_substitutions(command, real_cwd, home, cwd, 0, budget, mode)
+        try:
+            reason = check_substitutions(command, real_cwd, home, cwd, 0, budget, mode)
+        except Exception:
+            return TOO_COMPLEX
         if reason:
             return reason
     return None
@@ -715,9 +744,11 @@ def check_segments(
     cwd: str,
     cwds: list[str],
     scripts: list[tuple[str, str]],
+    brace_cap: int | None = None,
 ) -> str | None:
     """Check each segment of command. Appends every directory a `cd` enters to
-    cwds and every `sh -c` script, with its directory, to scripts."""
+    cwds and every `sh -c` script, with its directory, to scripts. A brace_cap
+    raises TooComplexError for an rm target that expands to more words."""
     for tokens in split_segments(tokenize(command)):
         raw = tokens
         tokens = strip_prefixes(raw)
@@ -725,7 +756,7 @@ def check_segments(
             continue
         head = basename(tokens[0])
         if head in REMOVE_COMMANDS:
-            reason = check_rm(tokens, cwd, home, real_cwd)
+            reason = check_rm(tokens, cwd, home, real_cwd, brace_cap)
             if reason:
                 return reason
         elif head == "cd":
@@ -736,7 +767,7 @@ def check_segments(
             inner = extract_shell_c_arg(tokens)
             if inner is not None:
                 scripts.append((inner, cwd))
-                reason = check_segments(inner, real_cwd, home, cwd, [], [])
+                reason = check_segments(inner, real_cwd, home, cwd, [], [], brace_cap)
                 if reason:
                     return reason
     return None
@@ -780,7 +811,9 @@ def check_reading(
     except TooComplexError:
         return TOO_COMPLEX
     cwds, scripts = [cwd], []
-    reason = check_segments(collapsed, real_cwd, home, cwd, cwds, scripts)
+    reason = check_segments(
+        collapsed, real_cwd, home, cwd, cwds, scripts, None if legacy else BRACE_CAP
+    )
     if reason:
         return reason
     for text, text_cwd in scripts:

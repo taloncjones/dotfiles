@@ -1244,6 +1244,56 @@ shh_silent "silent wait after a closing paren" "$(shh_payload '(make)& wait')"
 
 rmg_denies_with "deny wins over warnings, stdout empty" "$(rmg_json_payload 'E="env -u A"; $E true; rm -rf $X')" "$RMG_D1"
 
+# A brace bomb the new reading exposes must not hide the root rm the legacy reading denies (R1, R2).
+RMG_BOMB1000=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 1000, end="")')
+RMG_BOMB25=$(python3 -c 'print("rm -f ./m" + "{a,b}" * 25, end="")')
+rmg_denies_with "denies a root rm beside a brace bomb after an ANSI-C quote (R1)" \
+    "$(rmg_json_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB1000}\`")" "$RMG_D2"
+rmg_denies_with "denies a root rm beside a brace bomb in a heredoc inside a quoted substitution (R1)" \
+    "$(rmg_json_payload "x=\"\$(cat <<EOF${NL}\$(${RMG_BOMB1000})${NL}EOF${NL})\"; echo \"\$(rm -rf /)\"")" "$RMG_D2"
+rmg_start=$(date +%s)
+rmg_denies_with "denies a root rm beside a 25-group brace bomb (R2)" \
+    "$(rmg_json_payload "echo \"\$(rm -rf /)\"; echo \$'\\'' \`${RMG_BOMB25}\`")" "$RMG_D2"
+rmg_elapsed=$(($(date +%s) - rmg_start))
+if [ "$rmg_elapsed" -le 3 ]; then
+    printf 'PASS  rmg: 25-group brace bomb is denied within 3 s (R2)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rmg: 25-group brace bomb took %s s (R2)\n' "$rmg_elapsed" >&2
+    FAIL=$((FAIL + 1))
+fi
+rmg_denies_with "denies a brace bomb alone in the new reading as too complex (R3)" \
+    "$(rmg_json_payload "echo \$'\\'' \`${RMG_BOMB1000}\`")" "$RMG_TOO_COMPLEX"
+if python3 - "$RMG" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rmg", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.check_reading
+def flaky(command, real_cwd, home, cwd, depth, budget, mode):
+    if mode == (True, False):
+        return real(command, real_cwd, home, cwd, depth, budget, mode)
+    raise RuntimeError("injected")
+mod.check_reading = flaky
+assert mod.check_command("echo hi", "/tmp", "/Users/x") == mod.TOO_COMPLEX
+def legacy_boom(*a):
+    raise RuntimeError("injected")
+mod.check_reading = legacy_boom
+try:
+    mod.check_command("echo hi", "/tmp", "/Users/x")
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("legacy reading exception was swallowed")
+PY
+then
+    printf 'PASS  rmg: an exception in a new reading denies, in the legacy reading propagates (R3)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rmg: injected reading exception handling (R3)\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
 GUARD_FIX=$(mktemp -d)
